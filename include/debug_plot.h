@@ -13,6 +13,7 @@
 
 #include <Arduino.h>
 
+#include "bowl_logic.h"
 #include "config.h"
 #include "sensor_array.h"
 
@@ -20,17 +21,17 @@ namespace debug_plot {
 
 #if BOWLSTACK_DEBUG_PLOT
 
-// Prints the tuning banner. Call once after SensorArray::begin().
+// Prints the tuning and threshold banner. Call once after SensorArray::begin().
 void begin(const SensorArray &sensors);
 
 // Emits one plotter line per OUTPUT_PERIOD_MS and a once-a-second
 // human-readable heartbeat. Call every loop; it paces itself.
-void update(const SensorArray &sensors);
+void update(const SensorArray &sensors, const BowlLogic &logic);
 
 #else
 
 inline void begin(const SensorArray &) {}
-inline void update(const SensorArray &) {}
+inline void update(const SensorArray &, const BowlLogic &) {}
 
 #endif
 

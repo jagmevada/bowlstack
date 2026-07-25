@@ -1,0 +1,52 @@
+// Turns per-level distances into a bowl count.
+//
+// Two things happen here. Each level is thresholded with hysteresis into
+// present/absent, then the stack's physical constraint -- bowls rest on each
+// other and cannot float -- is applied to derive a count and catch impossible
+// readings.
+
+#pragma once
+
+#include <Arduino.h>
+
+#include "config.h"
+#include "sensor_array.h"
+
+enum class LevelState : uint8_t {
+  Absent,
+  Present,
+  Unknown,  // sensor offline; this level's true state is not observable
+};
+
+enum class StackStatus : uint8_t {
+  Ok,             // count is trustworthy
+  Discontiguous,  // a present level sits above an absent one -- impossible
+  Degraded,       // an offline sensor leaves the count ambiguous
+};
+
+class BowlLogic {
+ public:
+  void update(const SensorArray &sensors);
+
+  uint8_t count() const { return count_; }
+  StackStatus status() const { return status_; }
+  LevelState level(uint8_t i) const { return level_[i]; }
+
+  // True when the count is safe to act on.
+  bool trustworthy() const { return status_ == StackStatus::Ok; }
+
+  static const char *stateName(LevelState s);
+  static const char *statusName(StackStatus s);
+
+ private:
+  void recompute();
+
+  // Hysteresis state, kept separately from level_ so it survives a sensor
+  // dropping offline and returning: level_ overlays sensor health on top of
+  // it, rather than destroying the last known presence.
+  bool present_[config::SENSOR_COUNT] = {false};
+  LevelState level_[config::SENSOR_COUNT] = {LevelState::Unknown};
+
+  uint8_t count_ = 0;
+  StackStatus status_ = StackStatus::Degraded;
+};

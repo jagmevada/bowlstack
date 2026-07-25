@@ -69,6 +69,60 @@ while `f1` does not, something is wrong — a failed sensor, a misaligned mount,
 or an obstruction — and it must be reported as an error rather than silently
 counted.
 
+Contiguity also works in the device's favour. A level whose sensor is dead but
+which sits **below** an observed bowl is *inferred present* — physics proves a
+bowl is there — so one dead sensor low in the stack costs nothing. Equally, an
+Unknown **above** an observed Absent proves nothing either, because nothing can
+rest on an empty level, so the count stays exact. Only an Unknown between the
+top bowl and the first Absent leaves the count ambiguous (`DEGRADED`).
+
+### Presence thresholding
+
+Each level is thresholded with hysteresis (Schmitt trigger): present below
+`PRESENT_BELOW_MM`, absent above `ABSENT_ABOVE_MM`, previous state held
+between. A single threshold would chatter on measurement noise alone, and every
+flap would be a spurious change report.
+
+Both directions are debounced, and they must be debounced **separately**:
+
+- **Disappearance** needs `DROPOUT_MISSES` consecutive out-of-range reads.
+- **Appearance** needs `MIN_VALID_SAMPLES` in the window before a reading is
+  trusted at all. Without this, losing a target took three misses but gaining
+  one took a single hit — a forearm or tray crossing a beam for one 50 ms
+  measurement would register as a bowl. It also guarantees the trim is active,
+  since below `2*TRIM+2` samples trimming is skipped and a lone outlier would
+  be reported with `stdev 0.00`, looking maximally confident.
+
+### Sensor health
+
+A sensor is `Offline`, `Warming`, or `Online`, and the distinction matters more
+than it looks.
+
+**`Warming` exists because "no measurement yet" is not "no bowl".** Warm-up ends
+at the first definite *conclusion* — enough samples to trust a distance, or
+enough consecutive misses to confirm nothing is there — not at the first
+measurement. Otherwise a station booted with bowls already stacked would
+publish a confident count of zero before its first result arrived.
+
+**Runtime failure is detected, not absorbed.** When nothing acknowledges on the
+bus the driver's `readReg` returns `0xFF` per byte, which also makes the
+data-ready flag read true, so a dead module presents as an endless stream of
+out-of-range results. Left unchecked that is indistinguishable from "no target"
+and would produce a **wrong stack count reported as OK** — the worst failure
+this device can make. Two independent detectors:
+
+- `0xFFFF` from the range register is an I2C failure signature, never a
+  distance (a live sensor with no target reads ~8190).
+- No completed measurement within `SENSOR_STALE_MS` catches a sensor that still
+  answers its registers but has stopped ranging.
+
+Either demotes the sensor to `Offline`, whereupon recovery is retried on a
+`RECOVER_RETRY_MS` backoff so a permanently dead module cannot spin the loop.
+
+> **Not yet covered:** a sensor that answers normally but reports *wrong*
+> distances. No single sensor can detect that — it is the reason for the
+> planned dual-redundancy cross-check.
+
 ## Hardware configuration
 
 Two independent hardware I2C buses, two sensors each. Splitting the bus halves
@@ -171,13 +225,16 @@ Common to both presets:
 **Phase 1 — sensing engine (current).** Bring up all four sensors across two
 buses, scan round-robin, stream distances to the serial plotter for validation.
 
-**Phase 2 — presence logic (next).** Threshold each distance into
-present/absent, apply the contiguity rule above, and derive a bowl count plus a
-fault state.
+**Phase 2 — presence logic (done).** Hysteresis thresholding per level, the
+contiguity rule, bowl count with fault status, runtime sensor-health detection
+with backoff recovery, and the full device report (identity, firmware, MAC,
+uptime, battery, charging, per-sensor health, per-level state, stack count).
 
-**Phase 3 — telemetry (deferred).** POST to **Supabase**, keyed by device ID:
-every **10 s** periodically, and **immediately** on any change (bowl added or
-removed).
+**Phase 3 — telemetry (next).** POST to **Supabase**, keyed by device ID: every
+**10 s** periodically, and **immediately** on change. The report cadence and
+change detection already run — `device_status::sample()` builds the payload and
+`device_status::differs()` answers "send now?"; only WiFi and the HTTP client
+are missing. Credentials go in `include/secrets.h`, already gitignored.
 
 **Final product — TCA9548A + dual redundancy.** See below. Hardware not yet in
 hand; the current dual-bus build is the interim arrangement.

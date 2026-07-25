@@ -82,11 +82,33 @@ bool SensorArray::initSensor(uint8_t level) {
   }
   c.dev.startContinuous();
 
-  c.state = SensorState::Online;
+  // Warming, not Online: no measurement exists yet. Treating this as Online
+  // would make an empty window indistinguishable from an observed "no target",
+  // and a station booted with bowls already stacked would publish a confident
+  // count of zero before the first result ever arrives.
+  c.state = SensorState::Warming;
   c.consecutiveInvalid = 0;
+  c.ioFailures = 0;
+  c.lastActivityMs = millis();
   c.window.clear();
   Serial.printf("%-3s: ready at 0x%02X\n", cfg.name, c.dev.getAddress());
   return true;
+}
+
+void SensorArray::demote(uint8_t level, const char *why) {
+  Channel &c = ch_[level];
+  c.state = SensorState::Offline;
+  c.window.clear();
+  c.nextRecoverMs = millis() + config::RECOVER_RETRY_MS;
+  Serial.printf("%-3s: OFFLINE (%s)\n", config::SENSORS[level].name, why);
+}
+
+void SensorArray::maybeRecover(uint8_t level, uint32_t now) {
+  Channel &c = ch_[level];
+  if ((int32_t)(now - c.nextRecoverMs) < 0) return;
+  c.nextRecoverMs = now + config::RECOVER_RETRY_MS;
+  Serial.printf("%-3s: attempting recovery\n", config::SENSORS[level].name);
+  initSensor(level);
 }
 
 void SensorArray::begin() {
@@ -111,23 +133,70 @@ bool SensorArray::recover(uint8_t level) {
 }
 
 void SensorArray::poll() {
+  const uint32_t now = millis();
+
   // Round-robin: service whichever sensors already have a result waiting.
   // Because all four range concurrently, this is a fast poll rather than a 4x
   // serialisation -- each still produces a fresh sample every timing budget.
   for (uint8_t i = 0; i < config::SENSOR_COUNT; i++) {
     Channel &c = ch_[i];
-    if (c.state != SensorState::Online || !dataReady(c.dev)) continue;
+
+    if (c.state == SensorState::Offline) {
+      maybeRecover(i, now);
+      continue;
+    }
+
+    if (!dataReady(c.dev)) {
+      // Registers still answer but no measurement ever completes. The read
+      // path below cannot see this failure, so it needs its own timeout.
+      if (now - c.lastActivityMs > config::SENSOR_STALE_MS) {
+        demote(i, "no measurement completed");
+      }
+      continue;
+    }
 
     const uint16_t mm = fetchRange(c.dev);
+
+    // 0xFFFF is an I2C read failure, not a distance. When nothing
+    // acknowledges, the driver's readReg returns 0xFF per byte -- which also
+    // makes dataReady() read true -- so a dead module presents as an endless
+    // stream of out-of-range results. Left unchecked that is indistinguishable
+    // from "no target", and bowl_logic would take it as a confident
+    // observation of absence: a wrong stack count reported as OK, which is the
+    // worst failure this device can produce.
+    if (mm == 0xFFFF) {
+      if (++c.ioFailures >= config::IO_FAILURES_TO_OFFLINE) {
+        demote(i, "I2C read failures");
+      }
+      continue;
+    }
+
+    c.ioFailures = 0;
+    c.lastActivityMs = now;
+
     if (mm < config::OUT_OF_RANGE_MM) {
       c.consecutiveInvalid = 0;
       c.window.push(mm);
-      c.lastSampleMs = millis();
+      c.lastSampleMs = now;
     } else if (c.consecutiveInvalid < config::DROPOUT_MISSES) {
       // Require several consecutive misses before accepting that the target is
       // gone. Dropping the window on the first miss would throw the whole
       // integration away over one bad ping.
       if (++c.consecutiveInvalid == config::DROPOUT_MISSES) c.window.clear();
+    }
+
+    // Warm-up ends at the first definite CONCLUSION, not the first
+    // measurement: either enough samples to trust a distance, or enough
+    // consecutive misses to confirm nothing is there. Ending it earlier would
+    // leave a window in which the sensor counts as Online while its reading is
+    // still untrustworthy, and bowl_logic would read that as an observed
+    // absence -- reintroducing the phantom empty stack this state exists to
+    // prevent. After warm-up the hysteresis holds state through transitions,
+    // so this never flips back and cannot churn.
+    if (c.state == SensorState::Warming &&
+        (c.window.size() >= config::MIN_VALID_SAMPLES ||
+         c.consecutiveInvalid >= config::DROPOUT_MISSES)) {
+      c.state = SensorState::Online;
     }
   }
 }
@@ -135,7 +204,13 @@ void SensorArray::poll() {
 Reading SensorArray::reading(uint8_t level) const {
   const Channel &c = ch_[level];
   const WindowStats w = c.window.stats();
-  const bool valid = (c.state == SensorState::Online) && (w.held > 0);
+
+  // MIN_VALID_SAMPLES, not 1: a single stray return would otherwise be a fully
+  // trusted measurement, so one transient obstruction could add a phantom
+  // bowl. It also guarantees the trim is active, since below 2*TRIM+2 samples
+  // trimming is skipped and an outlier would be reported with stdev 0.00.
+  const bool valid = (c.state == SensorState::Online) &&
+                     (w.held >= config::MIN_VALID_SAMPLES);
 
   Reading r;
   r.valid = valid;

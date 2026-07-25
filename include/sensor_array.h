@@ -11,8 +11,9 @@
 #include "trimmed_window.h"
 
 enum class SensorState : uint8_t {
-  Offline,  // init failed, or parked in reset; produces no readings
-  Online,   // configured and ranging continuously
+  Offline,  // init failed, or failed at runtime; produces no readings
+  Warming,  // configured, but has not yet completed its first measurement
+  Online,   // ranging and returning results
 };
 
 struct Reading {
@@ -56,10 +57,15 @@ class SensorArray {
     SensorState state = SensorState::Offline;
     TrimmedWindow window;
     uint8_t consecutiveInvalid = 0;
-    uint32_t lastSampleMs = 0;
+    uint8_t ioFailures = 0;
+    uint32_t lastSampleMs = 0;    // last in-range sample
+    uint32_t lastActivityMs = 0;  // last completed measurement, in range or not
+    uint32_t nextRecoverMs = 0;
   };
 
   bool initSensor(uint8_t level);
+  void demote(uint8_t level, const char *why);
+  void maybeRecover(uint8_t level, uint32_t now);
   static void shutdown(uint8_t level);
   static void enable(uint8_t level);
 
