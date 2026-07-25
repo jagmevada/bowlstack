@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-ChildItem -Path \"$env:USERPROFILE\\\\.vscode\\\\extensions\" -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'plot|serial|badlogic|zechner|mario' } | Select-Object -ExpandProperty Name)",
+      "PowerShell($p = \"$env:USERPROFILE\\\\.vscode\\\\extensions\\\\badlogicgames.serial-plotter-1.0.7\"; Get-ChildItem -Path $p -File | Select-Object Name, Length)",
+      "Read(//c/Users/jagme/.vscode/extensions/badlogicgames.serial-plotter-1.0.7/**)"
+    ]
+  }
+}
