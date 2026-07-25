@@ -35,8 +35,17 @@ class BowlLogic {
   // True when the count is safe to act on.
   bool trustworthy() const { return status_ == StackStatus::Ok; }
 
+  // Human-readable, for the serial log and plotter only. Free to change.
   static const char *stateName(LevelState s);
   static const char *statusName(StackStatus s);
+
+  // Canonical lowercase tokens for the wire. These are pinned by CHECK
+  // constraints in supabase/schema.sql, so they are an API, not a display
+  // choice -- editing one 400s the entire fleet at once. Kept separate from
+  // stateName/statusName precisely so a cosmetic tidy-up of the log format
+  // cannot silently break telemetry.
+  static const char *wireName(LevelState s);
+  static const char *wireName(StackStatus s);
 
  private:
   void recompute();

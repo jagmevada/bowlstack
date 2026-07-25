@@ -91,3 +91,23 @@ const char *BowlLogic::statusName(StackStatus s) {
     default:                         return "DEGRADED";
   }
 }
+
+// The wire vocabulary. Must match the CHECK constraints in
+// supabase/schema.sql exactly -- these strings are a contract with the server,
+// not a presentation detail.
+
+const char *BowlLogic::wireName(LevelState s) {
+  switch (s) {
+    case LevelState::Present: return "present";
+    case LevelState::Absent:  return "absent";
+    default:                  return "unknown";
+  }
+}
+
+const char *BowlLogic::wireName(StackStatus s) {
+  switch (s) {
+    case StackStatus::Ok:            return "ok";
+    case StackStatus::Discontiguous: return "discontiguous";
+    default:                         return "degraded";
+  }
+}
