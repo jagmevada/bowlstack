@@ -179,18 +179,116 @@ fault state.
 every **10 s** periodically, and **immediately** on any change (bowl added or
 removed).
 
-**Final product — TCA9548A.** Replace the dual-bus split with a **TCA9548A**
-I2C multiplexer. All four sensors then stay at 0x29, the XSHUT walk disappears
-entirely, and each channel is independently isolated, so a locked slave can be
-cut off by deselecting its channel. Costs 2 pins total instead of 8.
+**Final product — TCA9548A + dual redundancy.** See below. Hardware not yet in
+hand; the current dual-bus build is the interim arrangement.
+
+## Planned: TCA9548A and dual redundancy
+
+The VL53L0X modules in use are Chinese clones and can fail unpredictably, so
+the production build pairs **two sensors per bowl — 8 total**, filling all
+eight channels of a **TCA9548A** I2C multiplexer. Suggested map:
+`channel = level * 2 + replica`, giving f1 -> {0,1} ... f4 -> {6,7}.
+
+With the mux, all eight sensors stay at 0x29, the XSHUT addressing walk
+disappears, and a locked slave can be cut off by deselecting its channel — 2
+pins total instead of 8.
+
+### The mux does NOT provide optical mutual exclusion
+
+**TCA9548A isolates I2C only.** A sensor on a deselected channel keeps ranging
+autonomously, because continuous mode runs inside the sensor and not over the
+bus. Two sensors aimed at the same bowl will interfere with each other's
+returns regardless of which channel is selected. Mutual exclusion must be
+managed explicitly through ranging state (`stopContinuous`/`startContinuous`),
+never inferred from mux selection.
+
+### Redundancy scheme: primary/standby with periodic cross-check
+
+Two failure modes matter, and they need different defences:
+
+- **Hard failure** — the sensor stops answering I2C. Trivial to detect.
+- **Soft failure** — it answers but reports wrong distances. This silently
+  corrupts bowl counts, and a single sensor cannot detect it at all.
+
+Pure standby catches only the first; constant alternation catches both but
+halves the rate. The probe scheme gets both cheaply:
+
+```
+A serves continuously (full rate, B stopped)
+every ~60 s:  stop A -> start B -> sample -> compare -> restore A
+  agree     -> both healthy
+  disagree  -> flag degraded; neither reading is trustworthy
+  A silent  -> B takes over permanently, raise fault
+```
+
+Bowls are static, so a 1-2 s probe per minute is invisible. It also proves the
+standby is still alive, rather than discovering otherwise at failover.
+
+This preserves the existing concurrency model: four bowls still range
+simultaneously at the 366 mm pitch, and redundancy only changes *which*
+physical sensor serves each level.
+
+> **Mount each pair at the same height.** The 11.8 degree taper turns 20 mm of
+> vertical offset into ~4 mm of distance difference — enough to read as a
+> disagreement when both sensors are healthy. Give each *physical* sensor its
+> own `OFFSET_MM` and cross-check calibrated values.
+
+### Upgrade path in the code
+
+`Reading reading(uint8_t level)` is the stable seam: bowl logic and telemetry
+consume logical levels and never touch drivers, so both upgrades stay confined
+to `SensorArray` internals.
+
+1. Split logical level from physical sensor — `SENSORS[8]` plus a
+   `LEVEL_SENSORS[4][2]` map. Currently 1:1; the public API does not change.
+2. Add a `select(sensorIndex)` hook before each transaction group — a no-op in
+   direct-bus mode, a mux channel write in mux mode.
+3. Make addressing conditional — the XSHUT walk is not needed behind the mux.
+
+## Device identity
+
+Devices report against a unique ID, and 30+ units are planned after field
+trial.
+
+**Derive the ID from the eFuse MAC, not a compile-time `#define`.** A
+compile-time ID means one binary per unit: every field reflash then depends on
+knowing which build belongs to which device, and flashing the wrong one makes
+two devices report the same ID — corrupting data silently instead of failing
+loudly. That hazard scales with fleet size.
+
+`ESP.getEfuseMac()` is unique per chip, needs no provisioning, and gives
+**one binary for the whole fleet**:
+
+```cpp
+const char *deviceId();   // "bowlstack-a4cf12b3d9e8"
+```
+
+Map MAC -> friendly name/location in a Supabase table, where that mapping
+belongs and can be edited without touching firmware. An NVS override can be
+added later for human-friendly IDs, provisioned once over serial, still from a
+single binary.
 
 ## Build
 
-PlatformIO, `esp32dev`, Arduino framework. Sensor driver is `pololu/VL53L0X`.
+PlatformIO, Arduino framework. Sensor driver is `pololu/VL53L0X`.
+
+Two environments. Serial-plotter streaming is a **test harness**, compiled out
+of the production image entirely (measured: it costs 1,328 bytes, so it is
+absent rather than merely disabled):
+
+| Environment | `BOWLSTACK_DEBUG_PLOT` | Plot output |
+| --- | --- | --- |
+| `esp32dev-debug` | 1 | yes — use for bring-up |
+| `esp32dev` | 0 | none — ship this |
 
 ```
-pio run -e esp32dev -t upload --upload-port COM3
+pio run -e esp32dev-debug -t upload --upload-port COM3   # bring-up
+pio run -e esp32dev       -t upload --upload-port COM3   # production
 ```
+
+`default_envs` is set to `esp32dev-debug`, so a bare `pio run -t upload` builds
+the plotting image. **Change that to `esp32dev` before shipping.** Boot
+enumeration and error logging are not gated and remain in both images.
 
 Serial output is formatted for the **Serial Plotter** VS Code extension
 (badlogicgames.serial-plotter): lines starting with `>` carry
