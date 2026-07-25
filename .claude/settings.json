@@ -3,7 +3,8 @@
     "allow": [
       "PowerShell(Get-ChildItem -Path \"$env:USERPROFILE\\\\.vscode\\\\extensions\" -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'plot|serial|badlogic|zechner|mario' } | Select-Object -ExpandProperty Name)",
       "PowerShell($p = \"$env:USERPROFILE\\\\.vscode\\\\extensions\\\\badlogicgames.serial-plotter-1.0.7\"; Get-ChildItem -Path $p -File | Select-Object Name, Length)",
-      "Read(//c/Users/jagme/.vscode/extensions/badlogicgames.serial-plotter-1.0.7/**)"
+      "Read(//c/Users/jagme/.vscode/extensions/badlogicgames.serial-plotter-1.0.7/**)",
+      "PowerShell(cd \"d:\\\\Project\\\\Bowlstack\"; git remote add origin https://github.com/jagmevada/bowlstack.git; Copy-Item \"C:\\\\Users\\\\jagme\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\d--Project-Bowlstack\\\\4bf5d356-3dc0-4d95-85eb-321b40e346a9\\\\scratchpad\\\\secret.h.backup\" \"include\\\\secret.h\" -Force; Write-Output \"restored: $\\(Test-Path include\\\\secret.h\\)\"; git remote -v | Select-Object -First 1)"
     ]
   }
 }

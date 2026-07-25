@@ -5,4 +5,10 @@
 .vscode/ipch
 CAD/*
 .DS_Store
-include/secrets.h
+
+# Credentials -- never commit.
+# Both spellings are listed deliberately: this file previously ignored only the
+# plural, the real file was singular, and a Supabase password reached a public
+# repo as a result. The wildcard covers any future variant; secret.h.example
+# does not match it (it ends in .example) and is committed on purpose.
+include/secret*.h
