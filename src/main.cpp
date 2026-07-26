@@ -32,10 +32,18 @@
 #include "telemetry.h"
 #include "version.h"
 
+// How long to let the sensors settle before the first report. Reporting on the
+// very first loop iteration publishes an all-UNKNOWN / DEGRADED snapshot that
+// is superseded within a second -- noise in the history, and actively
+// misleading if a coordinator reads it. Sensors normally conclude in a few
+// hundred ms, so this ceiling is only reached when one is genuinely absent.
+static const uint32_t BOOT_SETTLE_MS = 5000;
+
 static SensorArray sensors;
 static BowlLogic logic;
 static DeviceStatus lastReported;
 static bool everReported = false;
+static uint32_t bootSettleDeadline = 0;
 
 void setup() {
   Serial.begin(config::SERIAL_BAUD);
@@ -57,6 +65,10 @@ void setup() {
   telemetry::begin();
 
   debug_plot::begin(sensors);
+
+  // Started here, not at sensors.begin(): net::begin() still blocks briefly on
+  // its join attempts, and that time is not sensor settling time.
+  bootSettleDeadline = millis() + BOOT_SETTLE_MS;
 }
 
 void loop() {
@@ -74,11 +86,18 @@ void loop() {
   // table bounded; the heartbeat upsert refreshes current state without
   // appending anything.
   if (!everReported) {
-    telemetry::enqueue(now, telemetry::Reason::Boot);
-    Serial.println("--- report (boot) ---");
-    device_status::print(now);
-    lastReported = now;
-    everReported = true;
+    // Report once every sensor has reached a conclusion, or once the grace
+    // period expires -- whichever comes first, so a dead sensor cannot hold
+    // the first report back indefinitely.
+    const bool settled = (sensors.onlineCount() == config::SENSOR_COUNT);
+    const bool graceOver = (int32_t)(millis() - bootSettleDeadline) >= 0;
+    if (settled || graceOver) {
+      telemetry::enqueue(now, telemetry::Reason::Boot);
+      Serial.printf("--- report (boot%s) ---\n", settled ? "" : ", not settled");
+      device_status::print(now);
+      lastReported = now;
+      everReported = true;
+    }
   } else if (device_status::differs(now, lastReported)) {
     telemetry::enqueue(now, telemetry::Reason::Change);
     telemetry::requestImmediateUpsert();

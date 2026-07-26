@@ -10,13 +10,14 @@
 
 namespace net {
 
-// Tries the two credential pairs from secret.h in order, then falls back to the
-// WiFiManager captive portal. Blocking, and only called once from setup() --
-// there are no sensor readings to lose yet at that point.
+// Tries the two credential pairs from secret.h in order. If neither
+// associates, opens the WiFiManager captive portal and returns immediately --
+// the portal is then pumped from loop(). Blocks only for the join attempts.
 void begin();
 
-// Call every loop. Reconnects in the background when the link drops; never
-// blocks. Returns immediately when already connected.
+// Call every loop. Pumps the captive portal when open and reconnects in the
+// background when the link drops. Never blocks for long: the bowl count must
+// stay live with no network at all.
 void loop();
 
 bool connected();

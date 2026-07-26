@@ -1,4 +1,4 @@
-#include "telemetry.h"
+﻿#include "telemetry.h"
 
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
@@ -65,6 +65,12 @@ uint32_t bootId_ = 0;
 bool lastOk_ = false;
 bool unprovisioned_ = false;
 uint32_t nextStatusMs_ = 0;
+
+// Armed only while a backoff is actually in force. Not a bare timestamp
+// compared as (int32_t)(now - 0): that inverts once millis() passes 2^31
+// (~24.9 days), which would silently halt all telemetry on a device that had
+// never failed a post.
+bool backoffActive_ = false;
 uint32_t backoffUntilMs_ = 0;
 bool statusPending_ = true;  // always report once at boot
 
@@ -358,12 +364,16 @@ void loop(const DeviceStatus &current) {
   if (!net::connected()) return;
 
   const uint32_t now = millis();
-  if ((int32_t)(now - backoffUntilMs_) < 0) return;
+  if (backoffActive_) {
+    if ((int32_t)(now - backoffUntilMs_) < 0) return;
+    backoffActive_ = false;
+  }
 
   if (unprovisioned_) {
     // Latched: only a human inserting a `devices` row fixes this. Back off hard
     // rather than hammering the endpoint for the life of the device.
     backoffUntilMs_ = now + UNPROVISIONED_RETRY_MS;
+    backoffActive_ = true;
     unprovisioned_ = false;  // allow one probe per interval
     Serial.println("telemetry: device not registered in `devices` - backing off");
     return;
@@ -373,6 +383,7 @@ void loop(const DeviceStatus &current) {
   // offline before the current-state row is overwritten.
   if (count_ > 0 && !flushEvents()) {
     backoffUntilMs_ = now + RETRY_PERIOD_MS;
+    backoffActive_ = true;
     lastOk_ = false;
     return;
   }
@@ -386,6 +397,7 @@ void loop(const DeviceStatus &current) {
     lastOk_ = true;
   } else {
     backoffUntilMs_ = now + RETRY_PERIOD_MS;
+    backoffActive_ = true;
     lastOk_ = false;
   }
 }
