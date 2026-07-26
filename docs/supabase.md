@@ -15,6 +15,12 @@ supabase/smoke_test.sql        -- 14 assertions; run BEFORE flashing any device
 supabase/diagnose.sql          -- privilege/trigger state when something is wrong
 ```
 
+> **`schema.sql` drops the `devices` registry too.** Re-running it always
+> leaves the fleet empty and every device unprovisioned — `register_devices.sql`
+> is not optional afterwards, it is part of the same operation. A device whose
+> row is missing is refused with `23503` and backs off, which looks like a
+> firmware fault until you check the registry.
+
 `smoke_test.sql` returns one table of PASS/FAIL rows plus a verdict. Several
 assertions are *supposed* to fail — a device must not be able to read your
 data — so each is wrapped in an exception handler.
@@ -53,8 +59,17 @@ has ever spoken; `reported` distinguishes "never heard from" from "reported zero
 bowls", which a NULL `stack_count` alone could not.
 
 Carries `boot_id`, `uptime_s`, `stack_count`, `stack_status`, `levels[]`,
-`sensors_ok[]`, `sensors_online`, `battery_mv`, `battery_pct`, `charging`,
+`sensors_ok[]`, `sensors_online`, `battery_mv`, `battery_level`, `charging`,
 `firmware`, `mac`, `updated_at`.
+
+> **`battery_level` is a band, not a percentage** — `good` / `medium` / `low` /
+> `critical`, or NULL for no cell. The device computes a percentage internally
+> from a measured discharge curve but does not publish it: a resting-voltage
+> estimate moves several points with load, temperature, cell age and per-unit
+> ADC calibration, so a number would imply precision the measurement lacks.
+> `battery_mv` is kept alongside because it is a *measurement* rather than an
+> inference, and an implausible value there identifies a wiring fault the band
+> would disguise.
 
 ### `status_events` — append-only history
 

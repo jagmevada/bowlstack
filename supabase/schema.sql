@@ -120,9 +120,16 @@ create table public.device_status (
   sensors_ok     boolean[],
   sensors_online smallint    check (sensors_online >= 0),
 
+  -- Raw cell millivolts: a measurement, kept for diagnosis. An implausible
+  -- value here identifies a divider or wiring fault that a band alone would
+  -- disguise as a merely flat battery.
   battery_mv     integer     check (battery_mv between 0 and 6000),
-  -- NULL, never -1: the firmware reports -1 for "no cell detected", and
-  -- serialising that as a number would poison any average over this column.
+
+  -- A BAND, not a percentage. A resting-voltage SoC estimate moves several
+  -- points with load, temperature, cell age and per-unit ADC calibration, so a
+  -- number would invite the UI to render precision the measurement lacks. NULL
+  -- means no cell detected -- never a fabricated 'critical', which would be
+  -- indistinguishable from a genuinely flat battery.
   battery_level  text        check (battery_level in ('good','medium','low','critical')),
   charging       boolean,
 
@@ -199,12 +206,11 @@ create table public.status_events (
                    check (cardinality(sensors_ok) = cardinality(levels)),
   sensors_online smallint    not null check (sensors_online >= 0),
   battery_level  text        check (battery_level in ('good','medium','low','critical')),
-  -- Nullable and never sent by the current hardware: charge state drives the
-  -- charger's own indicator and no signal reaches the ESP32. NULL reads as
-  -- "unknown", which is true; a NOT NULL column would have forced the firmware
-  -- to invent `false`, indistinguishable from "genuinely not charging". Kept
-  -- rather than dropped so a future revision that does sense it needs no
-  -- migration.
+
+  -- Sensed on GPIO27 from the charger's 5 V rail. Nullable rather than NOT
+  -- NULL so a firmware that cannot measure it reports nothing instead of
+  -- inventing `false`, which would be indistinguishable from "genuinely not
+  -- charging".
   charging       boolean,
   firmware       text        not null,
 
@@ -399,8 +405,6 @@ grant insert (device_id, boot_id, seq, age_ms, reason, stack_count,
               stack_status, levels, sensors_ok, sensors_online,
               battery_level, charging, firmware)
   on public.status_events to anon;
--- `charging` stays in the grant although the firmware does not currently send
--- it, so a hardware revision that adds the sense line needs no privilege change.
 
 -- Human read path.
 grant select on public.devices, public.device_status, public.status_events,

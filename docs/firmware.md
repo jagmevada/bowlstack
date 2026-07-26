@@ -123,7 +123,7 @@ the blast radius: a slave that locks one bus cannot take down all four sensors.
 | XSHUT `f3` | 23 | chosen for harness length |
 | XSHUT `f4` | 26 | |
 | Battery ADC | 35 | ADC1 — mandatory, ADC2 is unusable with WiFi |
-| Charger STAT | 27 | has an internal pull-up, unlike 34–39 |
+| Charger sense | 27 | 10 k series from the charger 5 V rail, `INPUT_PULLDOWN` |
 | LED `f1` | 4 | **active low** — common anode |
 | LED `f2` | 13 | |
 | LED `f3` | 14 | |
@@ -216,8 +216,8 @@ optimistic in mid-range and collapses without warning near the end.
 > the cell is always near full. The header stores `SoC = 100 − column`.
 
 Four coarse bands, because a percentage from a resting-voltage curve is far
-less precise than its decimals suggest — load, temperature and cell age all
-shift it:
+less precise than its decimals suggest — load, temperature, cell age and
+per-unit ADC calibration all shift it:
 
 | Band | SoC |
 | --- | --- |
@@ -225,14 +225,61 @@ shift it:
 | `medium` | > 35% |
 | `low` | > 10% |
 | `critical` | ≤ 10% |
-| `unknown` | no cell detected |
+| `unknown` | no cell, or an implausible reading |
 
-`battery_pct` is reported as **`null` when no cell is detected**, never 0 — the
-two are indistinguishable upstream otherwise.
+**Only the band is published.** The percentage is computed and printed locally —
+it is what you calibrate against — but sending a number would invite the UI to
+render precision the measurement does not have. `battery_mv` goes up alongside
+it because that is a *measurement*, and an implausible value there identifies a
+wiring fault the band would disguise.
+
+Readings are bounded at **both** ends. Below `BATTERY_ABSENT_BELOW_MV` the input
+is open; above `BATTERY_IMPLAUSIBLE_ABOVE_MV` no lithium cell can produce it, so
+the measurement is broken. Both report unknown rather than a number.
+
+> The upper bound exists because of a real failure: the SoC curve clamps
+> anything above its top point to 100%, so a floating pin read **6365 mV as
+> "100% (good)"** — a disconnected sensor presenting as a healthy full battery.
 
 The stated 3.0 V cutoff and the curve's 2.750 V floor are not in conflict: 3.0 V
 lands at roughly 5% on this curve, so the cutoff keeps a small reserve rather
 than running the cell to the knee.
+
+### Charger sense
+
+GPIO27, active high, with the **internal pull-down** enabled:
+
+```
+charger 5V ──[10k]── GPIO27  (INPUT_PULLDOWN)
+```
+
+| State | Pin | Mechanism |
+| --- | --- | --- |
+| charging | ~3.3 V | the input clamp conducts at `(5 − 3.3) / 10k` = **170 µA** |
+| idle | 0 V | internal ~45 kΩ pull-down |
+
+The internal pull-down is appropriate *here specifically* because it never sets
+the charging-state voltage — the clamp does — so its loose tolerance stays out
+of the measurement. It only has to beat leakage when nothing is connected. The
+same pull-down against a 4.7 kΩ series resistor would have been acting as half a
+divider and sat the pin near 4.5 V, which is why the resistor value and the pull
+choice are a matched pair, not independent decisions.
+
+Read as a **majority vote over 5 samples** to guard transition edges and harness
+coupling.
+
+### Power console line
+
+Printed every `POWER_REPORT_MS` (5 s) in **both** builds, from `loop()` rather
+than `debug_plot` — it is the only power telemetry visible without a network:
+
+```
+battery: pin 2080 mV -> cell 4102 mV : 95% -> good  charging=no
+```
+
+The pin voltage appears next to the cell voltage deliberately: it is what you
+compare against a multimeter to derive `BOWLSTACK_BATTERY_CAL`, and an
+implausible value there points at the divider rather than the battery.
 
 ### XSHUT addressing
 

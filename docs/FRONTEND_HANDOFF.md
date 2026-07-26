@@ -165,7 +165,7 @@ Constraints the UI should enforce before submitting:
 
 ```ts
 const { data } = await supabase.from('status_events')
-  .select('recorded_at, reason, stack_count, stack_status, levels, battery_pct')
+  .select('recorded_at, reason, stack_count, stack_status, levels, battery_level, charging')
   .eq('device_id', 'BWL-001')
   .gte('recorded_at', since)
   .order('recorded_at', { ascending: false })

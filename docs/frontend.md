@@ -78,7 +78,7 @@ are the ones most likely to be got wrong by reasonable assumption.
 | Assumption | Reality |
 | --- | --- |
 | "No data for hours = broken" | Devices are dark ~16 h/day **by design**. Use `offline`, which is service-hour aware. |
-| "`battery_pct` 0 means flat" | `null` means **no cell detected**. 0 means flat. |
+| "there is a battery percentage" | There is **`battery_level`** — a band. `null` means no cell detected, not flat. |
 | "History is regularly sampled" | Rows exist only on **change**. Gaps are steady state. |
 | "`recorded_at` ≈ `received_at`" | Offline events are **backdated** from a device-reported age. A large gap is correct. |
 | "A device is a board" | A device is an **installation**. A replaced board keeps the `device_id`; only `mac` changes. |
