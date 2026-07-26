@@ -104,7 +104,14 @@ begin
   --    This replaced INSERT ... ON CONFLICT, which required full-table SELECT
   --    plus an RLS SELECT policy for anon -- i.e. letting every device read
   --    every installation's telemetry.
+  --
+  --    Asserts on ROWS AFFECTED, not merely the absence of an error. A
+  --    zero-row UPDATE is a complete success as far as Postgres is concerned,
+  --    so checking only for an exception would pass while the device wrote
+  --    nothing at all -- which is exactly what happened when the SELECT policy
+  --    was missing and the WHERE clause could not see the row.
   st := 'NO ERROR';
+  v_n := -1;
   begin
     execute 'set local role anon';
     update public.device_status
@@ -115,13 +122,19 @@ begin
            battery_mv = 3980, battery_pct = 76, charging = false,
            firmware = '0.2.0', mac = '8C:94:DF:4C:7A:04'
      where device_id = DEV;
+    get diagnostics v_n = row_count;
   exception when others then
     st := sqlstate; msg := sqlerrm;
   end;
   res := res || jsonb_build_object('n',4,
-           'r', case when st = 'NO ERROR' then 'PASS' else 'FAIL' end,
+           'r', case when st = 'NO ERROR' and v_n = 1 then 'PASS' else 'FAIL' end,
            'c','device UPDATE of its status row (PATCH hot path)',
-           'd', st || coalesce(' | ' || msg, ''));
+           'd', case
+                  when st <> 'NO ERROR' then st || coalesce(' | ' || msg, '')
+                  when v_n = 0 then '0 rows matched - the WHERE cannot see the '
+                                    'row; anon needs a SELECT policy on device_status'
+                  else v_n::text || ' row updated'
+                end);
 
   -- 5. A device must not be able to change which row it is.
   begin

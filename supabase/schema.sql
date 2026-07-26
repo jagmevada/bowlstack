@@ -301,10 +301,25 @@ alter table public.service_windows enable row level security;
 create policy devices_select_staff on public.devices
   for select to authenticated using (true);
 
--- device_status: the device UPDATEs only. USING governs which rows it may
--- touch; there is no INSERT policy because it never inserts.
+-- device_status: the device UPDATEs only -- there is no INSERT policy because
+-- it never inserts, the row having been created when the device was registered.
 create policy device_status_update_device on public.device_status
   for update to anon using (true) with check (true);
+
+-- A SELECT policy is REQUIRED even though the device never reads anything.
+-- PostgREST issues PATCH ...?device_id=eq.X, i.e. UPDATE ... WHERE device_id =
+-- 'X', and evaluating that WHERE is a read subject to RLS. Without this policy
+-- the WHERE matches no rows and the PATCH silently succeeds having changed
+-- nothing -- a zero-row UPDATE is not an error, so the device would look
+-- healthy while writing nothing forever.
+--
+-- This does NOT make telemetry readable: the column-level GRANT below is what
+-- limits readability, and it covers device_id alone. A policy widens which
+-- ROWS are visible; the grant decides which COLUMNS. Smoke test assertion 3
+-- proves stack_count stays denied.
+create policy device_status_select_device on public.device_status
+  for select to anon using (true);
+
 create policy device_status_select_staff on public.device_status
   for select to authenticated using (true);
 
