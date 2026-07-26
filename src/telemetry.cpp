@@ -13,20 +13,20 @@ namespace telemetry {
 namespace {
 
 // Events held while offline. Small on purpose: the current state is re-sent on
-// every reconnect and on every boot, so the buffer only preserves the TIMING of
+// every reconnect and every boot, so the buffer preserves only the TIMING of
 // intermediate changes, not the truth of the present.
 const uint8_t QUEUE_LEN = 32;
 
-// Heartbeat. Changes post immediately via requestImmediateUpsert(), so this
-// only proves liveness. At 10 s x 30 devices the fleet would make ~7.8M
-// requests/month; TLS handshakes alone would then dominate the egress budget.
-const uint32_t UPSERT_PERIOD_MS = 60000;
+// Heartbeat. Changes post immediately, so this only proves liveness. At 10 s
+// across 30 devices the fleet would make ~7.8M requests/month, and TLS
+// handshakes alone would dominate the egress budget.
+const uint32_t STATUS_PERIOD_MS = 60000;
 
 // Backoff after a failed post, so a dead uplink cannot spin the loop.
 const uint32_t RETRY_PERIOD_MS = 15000;
 
-// Backoff once the server says this device_id is not registered. Retrying
-// cannot fix that; only a human inserting a `devices` row can.
+// Backoff once the server says this device is not registered. Retrying cannot
+// fix that; only a human inserting a `devices` row can.
 const uint32_t UNPROVISIONED_RETRY_MS = 300000;
 
 // Matches the server-side clamp in tg_status_events_stamp().
@@ -48,16 +48,16 @@ struct QueuedEvent {
 };
 
 QueuedEvent queue_[QUEUE_LEN];
-uint8_t head_ = 0;   // oldest
+uint8_t head_ = 0;  // oldest
 uint8_t count_ = 0;
 uint32_t nextSeq_ = 0;
 
 uint32_t bootId_ = 0;
 bool lastOk_ = false;
 bool unprovisioned_ = false;
-uint32_t nextUpsertMs_ = 0;
+uint32_t nextStatusMs_ = 0;
 uint32_t backoffUntilMs_ = 0;
-bool upsertPending_ = true;  // always report once at boot
+bool statusPending_ = true;  // always report once at boot
 
 WiFiClientSecure *tls_ = nullptr;
 
@@ -69,7 +69,9 @@ const char *reasonName(Reason r) {
   }
 }
 
-// Writes the fields common to both payloads.
+// Fields common to both payloads. device_id is deliberately NOT written here:
+// the PATCH carries it in the URL filter and has no UPDATE privilege on that
+// column, while the event INSERT adds it separately.
 void writeCommon(JsonObject o, uint8_t stackCount, StackStatus stackStatus,
                  const LevelState *levels, const bool *sensorOk,
                  uint8_t sensorsOnline, int8_t batteryPercent, bool charging) {
@@ -99,8 +101,10 @@ void writeCommon(JsonObject o, uint8_t stackCount, StackStatus stackStatus,
 }
 
 // Returns the HTTP status, or a negative HTTPClient error code.
-int post(const char *path, const char *query, const char *prefer,
-         const String &body) {
+// `rangeOut`, when non-null, receives the Content-Range header, which is how a
+// PATCH reports how many rows it actually matched.
+int request(const char *method, const char *path, const char *query,
+            const char *prefer, const String &body, String *rangeOut = nullptr) {
   if (!net::connected()) return -1000;
 
   HTTPClient http;
@@ -114,7 +118,7 @@ int post(const char *path, const char *query, const char *prefer,
 
   // Reuse keeps the TLS session alive across posts. Without it each request
   // re-downloads the certificate chain, which dominates egress far more than
-  // the payloads do.
+  // the payloads themselves.
   http.setReuse(true);
   http.setTimeout(HTTP_TIMEOUT_MS);
   http.addHeader("apikey", SUPABASE_ANON_KEY);
@@ -122,13 +126,18 @@ int post(const char *path, const char *query, const char *prefer,
   http.addHeader("Content-Type", "application/json");
   http.addHeader("Prefer", prefer);
 
-  const int code = http.POST(body);
+  static const char *kHeaders[] = {"Content-Range"};
+  http.collectHeaders(kHeaders, 1);
+
+  const int code = http.sendRequest(method, (uint8_t *)body.c_str(), body.length());
+
+  if (rangeOut != nullptr) *rangeOut = http.header("Content-Range");
 
   // Only read the body on failure -- on success it is empty anyway thanks to
-  // return=minimal, and we want the error text for diagnosis.
+  // return=minimal, and the error text is what we want for diagnosis.
   if (code < 200 || code >= 300) {
     const String err = http.getString();
-    Serial.printf("telemetry: POST %s -> %d %s\n", path, code,
+    Serial.printf("telemetry: %s %s -> %d %s\n", method, path, code,
                   err.substring(0, 180).c_str());
 
     // 23503 is a foreign-key violation: this device_id is not in `devices`.
@@ -140,11 +149,15 @@ int post(const char *path, const char *query, const char *prefer,
   return code;
 }
 
+// History. A plain INSERT -- no ON CONFLICT, because upserts require the anon
+// role to hold full-table SELECT plus an RLS SELECT policy, which would let any
+// device read every installation's telemetry. Idempotency instead comes from
+// the (device_id, boot_id, seq) unique constraint: a retried batch raises
+// 23505, which means the rows are already recorded and the batch can be
+// dropped.
 bool flushEvents() {
   if (count_ == 0) return true;
 
-  // Batch whatever is queued. Every object must carry an identical key set --
-  // PostgREST rejects or silently nulls ragged arrays.
   JsonDocument doc;
   JsonArray arr = doc.to<JsonArray>();
 
@@ -158,8 +171,8 @@ bool flushEvents() {
     o["seq"] = e.seq;
 
     // The clock-free timestamp. The device has no RTC, so it reports how long
-    // ago the event happened and the server subtracts that from now(). Unsigned
-    // arithmetic makes this correct across the millis() wrap.
+    // ago the event happened and the server subtracts that from now().
+    // Unsigned arithmetic makes this correct across the millis() wrap.
     uint32_t age = now - e.atMs;
     if (age > AGE_MAX_MS) age = AGE_MAX_MS;
     o["age_ms"] = age;
@@ -172,10 +185,8 @@ bool flushEvents() {
   String body;
   serializeJson(doc, body);
 
-  // ignore-duplicates makes a retry after a lost response a no-op rather than a
-  // duplicated batch, using the (device_id, boot_id, seq) unique constraint.
-  const int code = post("/rest/v1/status_events", "on_conflict=device_id,boot_id,seq",
-                        "resolution=ignore-duplicates,return=minimal", body);
+  const int code = request("POST", "/rest/v1/status_events", nullptr,
+                           "return=minimal", body);
 
   if (code >= 200 && code < 300) {
     head_ = 0;
@@ -183,9 +194,19 @@ bool flushEvents() {
     return true;
   }
 
-  // A 4xx other than auth means the batch is malformed and will never be
-  // accepted; keeping it would block the queue forever.
-  if (code >= 400 && code < 500 && code != 401 && code != 403 && code != 409) {
+  // 409 is the unique-constraint violation: these events are already on the
+  // server, so the batch has done its job and must be dropped rather than
+  // retried forever.
+  if (code == 409) {
+    Serial.println("telemetry: events already recorded (409), clearing buffer");
+    head_ = 0;
+    count_ = 0;
+    return true;
+  }
+
+  // Any other 4xx means the batch is malformed and will never be accepted;
+  // keeping it would block the queue permanently.
+  if (code >= 400 && code < 500 && code != 401 && code != 403) {
     Serial.println("telemetry: dropping unacceptable batch");
     head_ = 0;
     count_ = 0;
@@ -193,11 +214,14 @@ bool flushEvents() {
   return false;
 }
 
-bool upsertStatus(const DeviceStatus &s) {
+// Current state. A plain UPDATE via PostgREST PATCH; the row is created
+// server-side when the device is registered, so no insert path is needed.
+bool patchStatus(const DeviceStatus &s) {
   JsonDocument doc;
   JsonObject o = doc.to<JsonObject>();
 
-  o["device_id"] = BOWLSTACK_DEVICE_ID;
+  // No device_id in the body: it is the URL filter, and anon holds no UPDATE
+  // privilege on that column.
   o["boot_id"] = bootId_;
   o["uptime_s"] = s.uptimeSec;
   writeCommon(o, s.stackCount, s.stackStatus, s.levels, s.sensorOnline,
@@ -208,12 +232,27 @@ bool upsertStatus(const DeviceStatus &s) {
   String body;
   serializeJson(doc, body);
 
-  // merge-duplicates is what turns POST into an upsert; without it a second
-  // report from the same device would 409. return=minimal keeps SELECT
-  // permission unnecessary -- the device cannot read anything back.
-  const int code = post("/rest/v1/device_status", "on_conflict=device_id",
-                        "resolution=merge-duplicates,return=minimal", body);
-  return code >= 200 && code < 300;
+  const String query = String("device_id=eq.") + BOWLSTACK_DEVICE_ID;
+
+  // count=exact is what makes an unregistered device loud. A PATCH matching no
+  // rows is a perfectly successful 204 -- without the count we could not tell
+  // "reported" from "wrote nothing at all, forever".
+  String range;
+  const int code = request("PATCH", "/rest/v1/device_status", query.c_str(),
+                           "return=minimal,count=exact", body, &range);
+
+  if (code < 200 || code >= 300) return false;
+
+  // Content-Range looks like "0-0/1" on success, "*/0" when nothing matched.
+  if (range.endsWith("/0")) {
+    Serial.printf("telemetry: no device_status row for '%s' - register it in "
+                  "the devices table\n",
+                  BOWLSTACK_DEVICE_ID);
+    unprovisioned_ = true;
+    return false;
+  }
+
+  return true;
 }
 
 }  // namespace
@@ -222,12 +261,12 @@ void begin() {
   bootId_ = esp_random();
 
   tls_ = new WiFiClientSecure();
-  // No certificate pinning: the anon key grants insert-only access with no read
+  // No certificate pinning: the anon key grants write-only access with no read
   // path, so an intercepted session yields nothing readable and can at worst
-  // inject telemetry. Pin a root CA here if that changes.
+  // inject telemetry. Pin a root CA here if that ever changes.
   tls_->setInsecure();
 
-  Serial.printf("telemetry: boot_id=%u, %s\n", bootId_, SUPABASE_URL);
+  Serial.printf("telemetry: boot_id=%u -> %s\n", bootId_, SUPABASE_URL);
 }
 
 void enqueue(const DeviceStatus &s, Reason reason) {
@@ -254,10 +293,10 @@ void enqueue(const DeviceStatus &s, Reason reason) {
   queue_[(head_ + count_) % QUEUE_LEN] = e;
   count_++;
 
-  upsertPending_ = true;
+  statusPending_ = true;
 }
 
-void requestImmediateUpsert() { upsertPending_ = true; }
+void requestImmediateUpsert() { statusPending_ = true; }
 
 void loop(const DeviceStatus &current) {
   if (!net::connected()) return;
@@ -270,26 +309,24 @@ void loop(const DeviceStatus &current) {
     // rather than hammering the endpoint for the life of the device.
     backoffUntilMs_ = now + UNPROVISIONED_RETRY_MS;
     unprovisioned_ = false;  // allow one probe per interval
-    Serial.println("telemetry: device_id not registered in `devices` - backing off");
+    Serial.println("telemetry: device not registered in `devices` - backing off");
     return;
   }
 
   // History first, oldest-first, so a reconnect replays what happened while
-  // offline before overwriting the current-state row.
-  if (count_ > 0) {
-    if (!flushEvents()) {
-      backoffUntilMs_ = now + RETRY_PERIOD_MS;
-      lastOk_ = false;
-      return;
-    }
+  // offline before the current-state row is overwritten.
+  if (count_ > 0 && !flushEvents()) {
+    backoffUntilMs_ = now + RETRY_PERIOD_MS;
+    lastOk_ = false;
+    return;
   }
 
-  const bool due = (int32_t)(now - nextUpsertMs_) >= 0;
-  if (!upsertPending_ && !due) return;
+  const bool due = (int32_t)(now - nextStatusMs_) >= 0;
+  if (!statusPending_ && !due) return;
 
-  if (upsertStatus(current)) {
-    upsertPending_ = false;
-    nextUpsertMs_ = now + UPSERT_PERIOD_MS;
+  if (patchStatus(current)) {
+    statusPending_ = false;
+    nextStatusMs_ = now + STATUS_PERIOD_MS;
     lastOk_ = true;
   } else {
     backoffUntilMs_ = now + RETRY_PERIOD_MS;
