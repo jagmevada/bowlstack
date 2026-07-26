@@ -260,7 +260,9 @@ counts as (
 leftovers as (
   select 11, 'row count', 'smoke-test leftovers', count(*)::text,
          case when count(*) > 0 then '<<< smoke test did not clean up' else '' end
-    from public.devices where device_id = 'BWL-SMOKETEST'
+    from public.devices
+   where device_id in ('BWL-SMOKETEST','BWL-SMOKE2','BWL-SMOKE3')
+      or (location = 'R' and food_slot is not null)
 )
 
 select sec, category, item, value, problem

@@ -13,7 +13,7 @@ supabase/schema.sql            -- drops and rebuilds everything
 supabase/register_devices.sql  -- registers BWL-001 .. BWL-032
 supabase/assign_devices.sql    -- permanent location/food_slot assignment
 supabase/seed_meal_mapping.sql -- sample menus, for the front-end test bed
-supabase/smoke_test.sql        -- 17 assertions; run BEFORE flashing any device
+supabase/smoke_test.sql        -- 20 assertions; run BEFORE flashing any device
 ```
 
 Two files sit outside that sequence:

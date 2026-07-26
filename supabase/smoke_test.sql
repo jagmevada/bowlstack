@@ -1,5 +1,5 @@
 -- =====================================================================
---  Bowlstack -- schema smoke test.  17 assertions.
+--  Bowlstack -- schema smoke test.  20 assertions.
 --
 --  Run after schema.sql, and BEFORE flashing any device. Paste the whole file
 --  into the Supabase SQL editor; it returns one table of PASS/FAIL rows plus a
@@ -17,15 +17,20 @@
 --    13     a device cannot delete history
 --    14-16  the menu is invisible and unwritable to devices, and the preload
 --           inherits the previous meal while correctly flagging is_saved
+--    17-19  the VIEWS, which are the front-end's whole interface: slot_overview
+--           sums the stacks sharing a dish position, keeps untrustworthy counts
+--           out of that total, and device_overview resolves the assignment
 --
 --  Several assertions are SUPPOSED to fail: a device must NOT be able to read
 --  your data. Each is wrapped in an exception handler so the run continues, and
 --  records the real SQLSTATE so a failure names its own cause instead of leaving
 --  you to guess.
 --
---  Uses a throwaway device id (BWL-SMOKETEST) at location 'R', plus menu
---  fixtures on an absurd date, and deletes everything it creates. Safe to
---  re-run, and safe against a populated database.
+--  Fixtures: BWL-SMOKETEST at location 'R' with no slot, BWL-SMOKE2 and
+--  BWL-SMOKE3 both at R/8 so the aggregation has something to aggregate, and menu
+--  rows on an absurd date. 'R' is reserved and slot 8 is outside the deployed
+--  1-5, so nothing can merge with live data. Everything is deleted afterwards, so
+--  this is safe to re-run and safe against a populated database.
 -- =====================================================================
 
 drop table if exists smoke_results;
@@ -45,7 +50,18 @@ declare
   v_n   int;
   v_txt text;
   v_saved boolean;
+  v_trusted  bigint;
+  v_reported bigint;
+  v_cap      bigint;
+  v_devs     bigint;
+  v_degraded boolean;
   DEV   constant text := 'BWL-SMOKETEST';
+  -- A second pair, both at the SAME dish position, to exercise the aggregation
+  -- in slot_overview. Placed at R/8: 'R' is reserved so it is not a real serving
+  -- area, and slot 8 is outside the 1-5 currently deployed, so the group cannot
+  -- merge with live data even on a populated database.
+  DEV2  constant text := 'BWL-SMOKE2';
+  DEV3  constant text := 'BWL-SMOKE3';
   -- Menu fixtures live at location 'R' on an absurd date, so they cannot collide
   -- with a real menu even if this runs against a populated database.
   MDAY  constant date := date '1999-01-01';
@@ -53,15 +69,20 @@ begin
   execute 'reset role';
 
   -- Clean slate, in case a previous run died before its cleanup.
-  delete from public.status_events where device_id = DEV;
-  delete from public.device_status where device_id = DEV;
-  delete from public.devices       where device_id = DEV;
+  delete from public.status_events where device_id in (DEV, DEV2, DEV3);
+  delete from public.device_status where device_id in (DEV, DEV2, DEV3);
+  delete from public.devices       where device_id in (DEV, DEV2, DEV3);
 
   -- 'R' (reserved) with no food_slot. A transient fixture must not claim a real
   -- serving position, and location is a D/M/T/R enum, so a descriptive string
   -- here would fail the CHECK.
   insert into public.devices (device_id, label, location, food_slot)
   values (DEV, 'smoke test', 'R', null);
+
+  -- Two stacks sharing one dish position, for the slot_overview assertions.
+  insert into public.devices (device_id, label, location, food_slot)
+  values (DEV2, 'smoke test slot pair', 'R', 8),
+         (DEV3, 'smoke test slot pair', 'R', 8);
 
   ------------------------------------------------------------------
   -- 0. RLS must be on. The GRANTs alone would still deny reads, but that is
@@ -308,9 +329,10 @@ begin
              'c','service windows installed','d',sqlstate||' '||sqlerrm);
   end;
 
-  -- 13. Devices must not be able to delete history. Destructive, so it runs
-  --     last -- earlier it would have wiped the row assertion 10 reads back,
-  --     reporting one problem as two.
+  -- 13. Devices must not be able to delete history. Placed AFTER assertion 10,
+  --     which reads that row back: if the grant were ever wrong and this delete
+  --     succeeded, running it earlier would fail 10 as well and report one
+  --     problem as two.
   begin
     execute 'set local role anon';
     delete from public.status_events where device_id = DEV;
@@ -402,13 +424,130 @@ begin
                      else st end);
 
   ------------------------------------------------------------------
+  -- The VIEWS. These are the front-end's entire interface, and slot_overview
+  -- carries the newest and most consequential logic in the schema.
+  ------------------------------------------------------------------
+
+  -- 17. slot_overview must SUM stack_count across the stacks sharing a slot.
+  --     (location, food_slot) is not unique precisely so it can: Darshanarthi
+  --     runs three counters per dish position. A UI reading one device and
+  --     calling it "Rice remaining" under-reports 3x on the busiest positions,
+  --     so this is the assertion that stops that being written.
+  st := 'NO ERROR';
+  begin
+    execute 'reset role';
+    update public.device_status
+       set boot_id = 1, uptime_s = 10, stack_count = 4, stack_status = 'ok',
+           levels = array['present','present','present','present'],
+           sensors_ok = array[true,true,true,true], sensors_online = 4,
+           battery_level = 'good', charging = false, firmware = '0.2.0'
+     where device_id = DEV2;
+    update public.device_status
+       set boot_id = 1, uptime_s = 10, stack_count = 3, stack_status = 'ok',
+           levels = array['present','present','present','absent'],
+           sensors_ok = array[true,true,true,true], sensors_online = 4,
+           battery_level = 'good', charging = false, firmware = '0.2.0'
+     where device_id = DEV3;
+
+    select devices, bowls_capacity, bowls_trusted, bowls_reported
+      into v_devs, v_cap, v_trusted, v_reported
+      from public.slot_overview where location = 'R' and food_slot = 8;
+
+    if v_devs = 2 and v_cap = 8 and v_trusted = 7 and v_reported = 7 then
+      st := 'OK';
+    else
+      st := 'devices=' || coalesce(v_devs::text,'null') ||
+            ' capacity=' || coalesce(v_cap::text,'null') ||
+            ' trusted='  || coalesce(v_trusted::text,'null') ||
+            ' reported=' || coalesce(v_reported::text,'null') ||
+            ' (want 2/8/7/7)';
+    end if;
+  exception when others then
+    st := sqlstate || ' ' || sqlerrm;
+  end;
+  res := res || jsonb_build_object('n',17,
+           'r', case when st = 'OK' then 'PASS' else 'FAIL' end,
+           'c','slot_overview sums stacks sharing a dish position',
+           'd', case when st = 'OK' then '4 + 3 = 7 bowls over 2 stacks, capacity 8'
+                     else st end);
+
+  -- 18. ...and must keep QUANTITY separate from TRUST. A degraded device's count
+  --     is a lower bound, so it must not be folded into bowls_trusted -- that
+  --     would silently overstate confidence in the number the kitchen acts on.
+  --     It still counts in bowls_reported, and must raise any_degraded.
+  st := 'NO ERROR';
+  begin
+    execute 'reset role';
+    update public.device_status
+       set boot_id = 1, uptime_s = 20, stack_status = 'degraded',
+           levels = array['present','present','present','unknown'],
+           sensors_ok = array[true,true,true,false], sensors_online = 3
+     where device_id = DEV3;
+
+    select bowls_trusted, bowls_reported, any_degraded
+      into v_trusted, v_reported, v_degraded
+      from public.slot_overview where location = 'R' and food_slot = 8;
+
+    if v_trusted = 4 and v_reported = 7 and v_degraded then
+      st := 'OK';
+    else
+      st := 'trusted=' || coalesce(v_trusted::text,'null') ||
+            ' reported=' || coalesce(v_reported::text,'null') ||
+            ' any_degraded=' || coalesce(v_degraded::text,'null') ||
+            ' (want 4/7/true)';
+    end if;
+  exception when others then
+    st := sqlstate || ' ' || sqlerrm;
+  end;
+  res := res || jsonb_build_object('n',18,
+           'r', case when st = 'OK' then 'PASS' else 'FAIL' end,
+           'c','slot_overview excludes untrustworthy counts from the total',
+           'd', case when st = 'OK'
+                     then 'degraded stack dropped from trusted, kept in reported'
+                     else st end);
+
+  -- 19. device_overview must resolve the assignment and the meal clock. The
+  --     dish name itself cannot be asserted here without making the test
+  --     depend on the time of day -- current_meal_type is NULL outside service
+  --     hours, which is correct -- so this checks the parts that hold either way.
+  st := 'NO ERROR';
+  begin
+    execute 'reset role';
+    select count(*) into v_n
+      from public.device_overview
+     where device_id = DEV2 and location = 'R' and food_slot = 8
+       and awaiting_deployment = false;
+
+    if v_n <> 1 then
+      st := 'device_overview returned ' || v_n::text || ' matching row(s), want 1';
+    elsif public.current_meal_date('Asia/Kolkata')
+            <> (now() at time zone 'Asia/Kolkata')::date then
+      st := 'current_meal_date disagrees with the local date';
+    elsif coalesce(public.current_meal_type('Asia/Kolkata'), 'Lunch')
+            not in ('Breakfast','Lunch','Dinner') then
+      st := 'current_meal_type returned an out-of-vocabulary value';
+    else
+      st := 'OK';
+    end if;
+  exception when others then
+    st := sqlstate || ' ' || sqlerrm;
+  end;
+  res := res || jsonb_build_object('n',19,
+           'r', case when st = 'OK' then 'PASS' else 'FAIL' end,
+           'c','device_overview resolves assignment; meal clock is sane',
+           'd', case when st = 'OK'
+                     then 'row found, local date agrees, meal=' ||
+                          coalesce(public.current_meal_type('Asia/Kolkata'),'none now')
+                     else st end);
+
+  ------------------------------------------------------------------
   -- Cleanup. Deliberately no enclosing ROLLBACK: that would discard the
   -- results along with the test data.
   ------------------------------------------------------------------
   execute 'reset role';
-  delete from public.status_events where device_id = DEV;
-  delete from public.device_status where device_id = DEV;
-  delete from public.devices       where device_id = DEV;
+  delete from public.status_events where device_id in (DEV, DEV2, DEV3);
+  delete from public.device_status where device_id in (DEV, DEV2, DEV3);
+  delete from public.devices       where device_id in (DEV, DEV2, DEV3);
   delete from public.meal_food_mapping
    where location = 'R' and meal_date in (MDAY, MDAY + 1);
 

@@ -111,7 +111,7 @@ supabase/register_devices.sql  -- BWL-001 .. BWL-032
 supabase/assign_devices.sql    -- permanent location/food_slot assignment
 supabase/seed_meal_mapping.sql -- sample menus, for the front-end test bed
 supabase/reset_spares.sql      -- restores awaiting_deployment for the reserved 8
-supabase/smoke_test.sql        -- 17 assertions; expect ALL PASS
+supabase/smoke_test.sql        -- 20 assertions; expect ALL PASS
 ```
 
 > `schema.sql` **drops the `devices` registry too**, so re-running it always
