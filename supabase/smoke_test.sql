@@ -203,20 +203,13 @@ begin
              'name','bad vocabulary rejected','detail','CHECK constraint held');
   end;
 
-  -- 8. Devices must not be able to delete history.
-  begin
-    execute 'set local role anon';
-    delete from public.status_events where device_id = DEV;
-    res := res || jsonb_build_object('n',8,'result','FAIL',
-             'name','anon cannot delete events','detail','anon CAN delete');
-  exception when insufficient_privilege then
-    res := res || jsonb_build_object('n',8,'result','PASS',
-             'name','anon cannot delete events',
-             'detail','permission denied, as intended');
-  end;
-
   ------------------------------------------------------------------
   -- Owner-side inspection of what the device wrote.
+  --
+  -- Note the ordering: the delete test (8) runs LAST, after these read-backs.
+  -- It is the only destructive assertion, and if anon turned out to be able to
+  -- delete, running it here would wipe the row assertion 9 needs -- reporting
+  -- one real problem as two.
   ------------------------------------------------------------------
 
   -- 9. Clock-free timestamps: recorded_at must sit ~300 s in the past even
@@ -300,6 +293,19 @@ begin
     res := res || jsonb_build_object('n',11,'result','FAIL',
              'name','service windows installed',
              'detail',sqlstate||' '||sqlerrm);
+  end;
+
+  -- 8. Devices must not be able to delete history. Runs last because it is
+  --    destructive; see the note above.
+  begin
+    execute 'set local role anon';
+    delete from public.status_events where device_id = DEV;
+    res := res || jsonb_build_object('n',8,'result','FAIL',
+             'name','anon cannot delete events','detail','anon CAN delete');
+  exception when insufficient_privilege then
+    res := res || jsonb_build_object('n',8,'result','PASS',
+             'name','anon cannot delete events',
+             'detail','permission denied, as intended');
   end;
 
   ------------------------------------------------------------------
