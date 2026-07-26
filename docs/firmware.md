@@ -124,6 +124,11 @@ the blast radius: a slave that locks one bus cannot take down all four sensors.
 | XSHUT `f4` | 26 | |
 | Battery ADC | 35 | ADC1 — mandatory, ADC2 is unusable with WiFi |
 | Charger STAT | 27 | has an internal pull-up, unlike 34–39 |
+| LED `f1` | 4 | **active low** — common anode |
+| LED `f2` | 13 | |
+| LED `f3` | 14 | |
+| LED `f4` | 18 | |
+| LED health | 19 | |
 
 SDA/SCL are shared within a bus; XSHUT is unique per sensor. All sensors take
 **VIN → 3V3** and **GND → GND**; the breakout `GPIO1` interrupt pin is unused,
@@ -132,6 +137,81 @@ since the firmware polls.
 > **GPIO 34–39 cannot drive XSHUT.** They are input-only on the ESP32 — no
 > output driver at all — so they cannot pull the line low. They are fine for the
 > battery ADC and charger input, which only read.
+
+### Status LEDs
+
+Five indicators, **all common anode — the GPIO is active LOW**, so driving a pin
+HIGH turns its LED *off*.
+
+| LED | Shows |
+| --- | --- |
+| 1–4 | thresholded presence of `f1`–`f4` — lit when a bowl is there |
+| 5 | device health |
+
+Health patterns:
+
+| Pattern | Meaning |
+| --- | --- |
+| solid on | nominal |
+| **1 Hz** blink | a sensor is misbehaving — offline, or `stack_status` not `ok` |
+| **2 Hz** blink | WiFi disconnected |
+
+WiFi loss blinks faster and **takes precedence** when both are true. One LED
+cannot show two things: a sensor fault still reaches the server tagged as a
+fault, whereas a dropped link means nobody downstream sees anything at all.
+
+Level LEDs follow the **debounced presence decision**, the same value the bowl
+count is built from — not the raw distance. An LED flickering while the count
+held steady would misrepresent what the device believes.
+
+> **Pin choice is more constrained than it looks.** GPIO 12 is the MTDI
+> strapping pin: held HIGH at boot it misconfigures flash voltage and can brick
+> the module — fatal for an active-low LED, whose idle state is HIGH. GPIO 0, 2
+> and 15 are boot straps that an LED pulling toward VCC would disturb; 1 and 3
+> are the serial console; 6–11 are flash; 34–39 cannot drive at all. 4, 13, 14,
+> 18 and 19 are clear of all of it.
+
+> LEDs are driven **off before** their pins become outputs. Until configured a
+> pin floats, and the common anode's pull to VCC lights the LED — every
+> indicator would glow through boot, reading as "all bowls present, everything
+> healthy" before anything had been measured.
+
+The LEDs run in their own task (`leds`, core 1, prio 1). They are **production
+behaviour**, unlike `debug_plot` which compiles to nothing in the shipping
+image — the front-panel status must not vanish with the test harness.
+
+### Battery
+
+Voltage is read on ADC1 and converted through a **measured discharge curve**
+(`include/battery_soc.h`), not a straight line between 3.0 V and 4.2 V. Li-ion
+is markedly non-linear: a real cell sits above 3.6 V for the first ~60% of its
+capacity then falls away sharply, so a linear fit reads roughly 20 points
+optimistic in mid-range and collapses without warning near the end.
+
+> **The supplied table was headed "SoC(%)" but its first column is depth of
+> discharge.** Row 1 is `0.0 → 4.159 V` (a full cell, nothing drawn); the last
+> is `100.0 → 2.750 V` (empty). Used literally it would have reported a flat
+> battery as 100% — an inversion that looks entirely plausible on a bench where
+> the cell is always near full. The header stores `SoC = 100 − column`.
+
+Four coarse bands, because a percentage from a resting-voltage curve is far
+less precise than its decimals suggest — load, temperature and cell age all
+shift it:
+
+| Band | SoC |
+| --- | --- |
+| `good` | > 70% |
+| `medium` | > 35% |
+| `low` | > 10% |
+| `critical` | ≤ 10% |
+| `unknown` | no cell detected |
+
+`battery_pct` is reported as **`null` when no cell is detected**, never 0 — the
+two are indistinguishable upstream otherwise.
+
+The stated 3.0 V cutoff and the curve's 2.750 V floor are not in conflict: 3.0 V
+lands at roughly 5% on this curve, so the cutoff keeps a small reserve rather
+than running the cell to the knee.
 
 ### XSHUT addressing
 

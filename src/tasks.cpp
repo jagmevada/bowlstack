@@ -6,6 +6,7 @@
 #include <freertos/task.h>
 
 #include "debug_plot.h"
+#include "indicators.h"
 #include "net.h"
 #include "telemetry.h"
 #include "version.h"
@@ -32,6 +33,7 @@ const UBaseType_t PRIO_SENSOR = 3;
 const UBaseType_t PRIO_NET = 2;
 const UBaseType_t PRIO_TELEMETRY = 2;
 const UBaseType_t PRIO_DEBUG = 1;
+const UBaseType_t PRIO_INDICATOR = 1;
 
 // Sized from measured high-water marks, not guesses -- see printStackHeadroom().
 // Observed free after a TLS post and a full plot/heartbeat cycle:
@@ -50,6 +52,7 @@ const uint32_t STACK_SENSOR = 4096;
 const uint32_t STACK_NET = 8192;
 const uint32_t STACK_TELEMETRY = 12288;
 const uint32_t STACK_DEBUG = 4096;
+const uint32_t STACK_INDICATOR = 2560;
 
 // Sensor cadence. Sensors conclude a measurement every TIMING_BUDGET_US, so
 // polling far faster than that is wasted -- but the delay also YIELDS, which a
@@ -91,6 +94,7 @@ TaskHandle_t hSensor = nullptr;
 TaskHandle_t hNet = nullptr;
 TaskHandle_t hTelemetry = nullptr;
 TaskHandle_t hDebug = nullptr;
+TaskHandle_t hIndicator = nullptr;
 
 void publish(const DeviceStatus &s, const PlotFrame &f) {
   if (xSemaphoreTake(stateMutex, portMAX_DELAY) != pdTRUE) return;
@@ -232,6 +236,35 @@ void debugTask(void *) {
   }
 }
 
+// --- indicator task --------------------------------------------------------
+// Separate from debugTask because the LEDs are PRODUCTION behaviour: debug_plot
+// compiles to nothing in the shipping image, and the front-panel status must
+// not vanish with it. Blinking also needs steady timing, which a task provides
+// and a best-effort call from a busier loop would not.
+
+void indicatorTask(void *) {
+  indicators::begin();
+
+  for (;;) {
+    if (ready()) {
+      const tasks::PlotFrame f = plotFrame();
+
+      // "Misbehaving" is anything that makes the count untrustworthy: a sensor
+      // not producing readings, or a stack shape the physics says is
+      // impossible. Both are conditions a person at the station can act on.
+      bool sensorFault = (f.stackStatus != StackStatus::Ok);
+      for (uint8_t i = 0; i < config::SENSOR_COUNT; i++) {
+        if (f.state[i] != SensorState::Online) sensorFault = true;
+      }
+
+      indicators::update(f, sensorFault, !net::connected());
+    }
+    // 50 ms is well inside the 250 ms half-period of the fastest blink, so the
+    // pattern stays even without a tighter loop.
+    vTaskDelay(pdMS_TO_TICKS(50));
+  }
+}
+
 }  // namespace
 
 void start() {
@@ -251,8 +284,10 @@ void start() {
                           PRIO_TELEMETRY, &hTelemetry, CORE_NETWORK);
   xTaskCreatePinnedToCore(debugTask, "debug", STACK_DEBUG, nullptr, PRIO_DEBUG,
                           &hDebug, CORE_MEASURE);
+  xTaskCreatePinnedToCore(indicatorTask, "leds", STACK_INDICATOR, nullptr,
+                          PRIO_INDICATOR, &hIndicator, CORE_MEASURE);
 
-  Serial.println("tasks: sensor(core1) net(core0) telemetry(core0) debug(core1)");
+  Serial.println("tasks: sensor+debug+leds(core1) net+telemetry(core0)");
 }
 
 DeviceStatus snapshot() {
@@ -290,11 +325,12 @@ void printStackHeadroom() {
   // number. Overflow on ESP32 surfaces as a corrupt-looking crash far from the
   // cause, so this figure has to be right to be worth printing.
   Serial.printf("tasks: stack free  sensor=%u/%u net=%u/%u telemetry=%u/%u "
-                "debug=%u/%u bytes\n",
+                "debug=%u/%u leds=%u/%u bytes\n",
                 hSensor ? uxTaskGetStackHighWaterMark(hSensor) : 0, STACK_SENSOR,
                 hNet ? uxTaskGetStackHighWaterMark(hNet) : 0, STACK_NET,
                 hTelemetry ? uxTaskGetStackHighWaterMark(hTelemetry) : 0, STACK_TELEMETRY,
-                hDebug ? uxTaskGetStackHighWaterMark(hDebug) : 0, STACK_DEBUG);
+                hDebug ? uxTaskGetStackHighWaterMark(hDebug) : 0, STACK_DEBUG,
+                hIndicator ? uxTaskGetStackHighWaterMark(hIndicator) : 0, STACK_INDICATOR);
 }
 
 }  // namespace tasks

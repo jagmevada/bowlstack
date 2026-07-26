@@ -1,7 +1,9 @@
 #include "device_status.h"
 
 #include <WiFi.h>  // for the MAC only; no radio is started here
+#include <math.h>
 
+#include "battery_soc.h"
 #include "version.h"
 
 namespace device_status {
@@ -21,16 +23,17 @@ static uint16_t readBatteryMv() {
 }
 
 static int8_t batteryPercent(uint16_t mv) {
-  // No cell wired yet, so the input floats. Report unknown rather than
-  // inventing a plausible-looking 0%, which would be indistinguishable
-  // upstream from a genuinely flat battery.
+  // No cell wired, so the input floats. Report unknown rather than inventing a
+  // plausible-looking 0%, which would be indistinguishable upstream from a
+  // genuinely flat battery.
   if (mv < config::BATTERY_ABSENT_BELOW_MV) return -1;
 
-  if (mv <= config::BATTERY_MIN_MV) return 0;
-  if (mv >= config::BATTERY_MAX_MV) return 100;
-
-  const uint32_t span = config::BATTERY_MAX_MV - config::BATTERY_MIN_MV;
-  return (int8_t)(((uint32_t)(mv - config::BATTERY_MIN_MV) * 100) / span);
+  // Interpolate the MEASURED discharge curve rather than assuming a straight
+  // line between 3.0 V and 4.2 V. Li-ion is markedly non-linear: the real cell
+  // sits above 3.6 V for the first ~60% of its capacity and then falls away
+  // sharply, so a linear fit reads roughly 20 points optimistic in mid-range
+  // and collapses without warning near the end.
+  return (int8_t)lroundf(battery::socFromMillivolts(mv));
 }
 
 DeviceStatus sample(const SensorArray &sensors, const BowlLogic &logic) {
@@ -78,8 +81,10 @@ void print(const DeviceStatus &s) {
     Serial.printf("  battery: no cell detected (%u mV)  charging=%s\n",
                   s.batteryMv, s.charging ? "yes" : "no");
   } else {
-    Serial.printf("  battery: %u mV (%d%%)  charging=%s\n", s.batteryMv,
-                  s.batteryPercent, s.charging ? "yes" : "no");
+    Serial.printf("  battery: %u mV (%d%%, %s)  charging=%s\n", s.batteryMv,
+                  s.batteryPercent,
+                  battery::levelName(battery::levelFromSoc(s.batteryPercent)),
+                  s.charging ? "yes" : "no");
   }
 
   Serial.print("  levels:");

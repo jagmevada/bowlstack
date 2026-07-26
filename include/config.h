@@ -166,6 +166,38 @@ static const uint16_t NO_TARGET_MM = 2000;
 static const float PRESENT_BELOW_MM = 100.0f;
 static const float ABSENT_ABOVE_MM = 400.0f;
 
+// --- status LEDs -----------------------------------------------------------
+// Five indicators. LED_LEVEL[i] mirrors the thresholded presence of level i --
+// f1 on LED 1 and so on -- and LED_HEALTH carries device state.
+//
+// ALL LEDs ARE COMMON ANODE: the cathode is switched, so the GPIO is ACTIVE
+// LOW. Driving a pin HIGH turns its LED OFF. They are also driven OFF as the
+// very first act of indicators::begin(), because until a pin is configured it
+// floats and the anode's pull to VCC lights the LED -- every indicator would
+// glow through boot and read as "everything is fine" before anything had been
+// measured.
+//
+// Pin choice is constrained more than it looks on ESP32:
+//   6-11        flash, unusable
+//   34-39       input only, cannot drive anything
+//   12          MTDI strapping -- HIGH at boot misconfigures flash voltage and
+//               can brick the module. Never use for an active-low LED.
+//   0, 2, 15    boot strapping; an LED pulling them toward VCC breaks download
+//               mode or the boot log
+//   1, 3        UART0, in use by the serial console
+// 4, 13, 14, 18 and 19 are free of all of that.
+static const uint8_t LED_LEVEL[SENSOR_COUNT] = {4, 13, 14, 18};
+static const uint8_t LED_HEALTH = 19;
+
+// Health blink rates, in Hz. Solid = healthy.
+//
+// WiFi loss blinks FASTER than a sensor fault and takes precedence when both
+// are true. One LED cannot show two things, and the choice is deliberate: a
+// sensor fault still leaves the server receiving data with an explicit fault
+// flag, whereas a dropped link means nobody downstream can see anything at all.
+static const float HEALTH_BLINK_SENSOR_HZ = 1.0f;
+static const float HEALTH_BLINK_WIFI_HZ = 2.0f;
+
 // --- battery and charger ---------------------------------------------------
 // GPIO35 is input-only, which ruled it out for XSHUT but makes it ideal here.
 // It is ADC1: ADC2 is unusable whenever WiFi is active, so an ADC1 pin is

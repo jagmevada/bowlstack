@@ -107,8 +107,22 @@ an error.
 ### `battery_pct` can be `null`
 
 `null` means **no cell detected**, not 0%. Render "—" or "no battery", never a
-flat-battery icon. (`battery_mv` is the ground truth; the percentage is a linear
-approximation of a non-linear Li-ion curve.)
+flat-battery icon.
+
+`battery_pct` comes from a **measured Li-ion discharge curve**, not a linear
+map — so it is meaningful, but it is still a resting-voltage estimate that load,
+temperature and cell age all shift. Present it in the same four bands the device
+uses, so the UI and the front-panel LED agree:
+
+| Band | SoC | Suggested treatment |
+| --- | --- | --- |
+| good | > 70% | normal |
+| medium | > 35% | normal |
+| low | > 10% | warn |
+| critical | ≤ 10% | alert — needs charging or swapping |
+| unknown | `null` | "—", not 0% |
+
+`battery_mv` is the ground truth if you ever need the underlying number.
 
 ### `levels` is bottom-up
 
