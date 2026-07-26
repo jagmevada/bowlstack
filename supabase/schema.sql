@@ -1,62 +1,63 @@
 ﻿-- =====================================================================
---  Bowlstack telemetry schema  (v2 -- full rebuild, drops everything first)
+--  Bowlstack -- complete schema
 --
---  Run as owner in the Supabase SQL editor. Idempotent: safe to re-run.
+--  Run as owner in the Supabase SQL editor. DROPS EVERYTHING first, then
+--  rebuilds, so it is idempotent and destructive in equal measure.
 --
 --  APPLY ORDER
 --  -----------
---      1. schema.sql            (this file -- DROPS EVERYTHING first)
+--      1. schema.sql            this file
 --      2. register_devices.sql  BWL-001 .. BWL-032
 --      3. assign_devices.sql    permanent location/food_slot assignment
 --      4. seed_meal_mapping.sql sample menus, for the front-end test bed
---      5. reset_spares.sql      restores awaiting_deployment for the reserved 8
+--      5. reset_spares.sql      only after a stray write; see that file
 --      6. smoke_test.sql        17 assertions; expect ALL PASS
 --
---  This file is the COMPLETE schema. There is no migration to apply after it:
---  the device assignment model (location/food_slot) and meal_food_mapping are
---  defined here directly, so a fresh database and a documented one cannot drift.
+--  diagnose.sql is read-only and can be run at any time.
 --
---  Two things worth knowing before reading on, because both invert an assumption
---  the earlier version of this schema made:
+--  CONTENTS
+--    1 devices             installation registry + permanent assignment
+--    2 device_status       current state, one row per device
+--    3 status_events       append-only history
+--    4 triggers            timestamps, the reported flag, clock-free ages
+--    5 service windows     when devices are expected to be awake
+--    6 meal_food_mapping   what each slot serves, per meal per day
+--    7 row-level security
+--    8 grants
+--    9 views               device_overview, slot_overview
 --
---    - (location, food_slot) is NOT unique. Darshanarthi runs three counters per
---      dish position, so remaining stock for a dish is the SUM across the stacks
---      sharing a slot. public.slot_overview computes it.
+--  FOUR IDEAS THAT SHAPE EVERYTHING BELOW
+--  --------------------------------------
+--  1. State is UPDATED in place; history is APPENDED only on real change.
+--     One row per device never grows. Appending every report instead would be
+--     ~30 devices x 8640/day = 259k rows/day and would exhaust the free tier in
+--     about ten days.
 --
---    - Devices never store food names. A device stores a slot NUMBER; what that
---      slot serves changes three times a day and lives in meal_food_mapping,
---      keyed by date so history stays attributable to the dish.
+--  2. There are NO UPSERTS, and the design does not need any.
+--     `INSERT ... ON CONFLICT` is rejected for the anon role with 42501, while a
+--     plain INSERT by the same role into the same table succeeds. Testing
+--     established that ON CONFLICT wants full-table SELECT plus an RLS SELECT
+--     policy -- which would let every device read every installation's
+--     telemetry, precisely the property this schema exists to protect. So:
+--       device_status  the row is created when the device is REGISTERED
+--                      (trigger, section 2), leaving the device a plain UPDATE.
+--       status_events  plain INSERT. Idempotency comes from a unique constraint:
+--                      a retried batch raises 23505, which the firmware reads as
+--                      "already recorded".
+--     This also needs strictly fewer privileges than upserting would.
 --
---  See docs/meal_mapping.md for the front-end contract.
+--  3. (location, food_slot) is NOT unique.
+--     Darshanarthi runs three counters per dish position, so three stacks share
+--     one slot and remaining stock for a dish is the SUM across them.
+--     public.slot_overview computes it; reading a single device and calling it
+--     "Rice remaining" under-reports 3x on the busiest positions in the hall.
 --
---  WRITE MODEL
---  -----------
---  Current state is UPDATED in place (one row per device, no growth); history
---  is APPENDED only when something actually changed. Appending every report
---  would be ~30 devices x 8640/day = 259k rows/day, exhausting the free tier
---  in about ten days. Devices are also powered only during meal service, so
---  the real volume is roughly a third of that again.
+--  4. Devices never store food names.
+--     A device stores a slot NUMBER. What that slot serves changes three times a
+--     day and lives in meal_food_mapping, keyed by DATE so a past bowl count
+--     stays attributable to the dish that was actually there.
 --
---  NO UPSERTS ANYWHERE -- this is deliberate
---  -----------------------------------------
---  v1 had the device POST with `Prefer: resolution=merge-duplicates`, i.e.
---  INSERT ... ON CONFLICT. Every such statement was rejected for the anon role
---  with 42501 while a plain INSERT by the same role into the same table
---  succeeded, and neither column-level nor full-table SELECT grants changed
---  it. Since the heartbeat and the event batch both used ON CONFLICT, no
---  device traffic would have reached the server at all.
---
---  Rather than keep guessing at which privilege ON CONFLICT wants, the design
---  no longer needs it:
---
---    device_status -- the row is created automatically when a device is
---                     registered (trigger below), so the device only ever
---                     issues a plain UPDATE (PostgREST PATCH).
---    status_events -- plain INSERT. Idempotency comes from the unique
---                     constraint: a retried batch raises 23505, which the
---                     firmware treats as "already recorded".
---
---  This also needs strictly fewer privileges than the upsert version.
+--  Front-end contract: docs/meal_mapping.md and docs/FRONTEND_HANDOFF.md.
 -- =====================================================================
 
 begin;
@@ -120,7 +121,7 @@ comment on column public.devices.location is
   'NULL until deployed.';
 
 comment on column public.devices.food_slot is
-  'Dish position on the station, 1-8. NOT unique -- several stacks may serve one '
+  'Dish position on the station, 1-8. NOT unique; several stacks may serve one '
   'slot, so remaining stock for a dish is the SUM over the devices sharing it. '
   'What FOOD occupies a slot changes per meal and lives in meal_food_mapping; '
   'the slot number is the fixed physical position, not the dish.';

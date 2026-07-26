@@ -57,8 +57,8 @@ This is now in the database as `meal_food_mapping`, keyed
 `(location, meal_date, meal_type, food_slot)`. Full contract, TypeScript
 interfaces and queries: **[meal_mapping.md](meal_mapping.md)**.
 
-The open question this section used to pose has been answered, and it was the one
-that mattered:
+The design question that governed the shape has been settled, and it was the one
+that could not be deferred:
 
 > Does history need to record what a slot *contained* at the time, so past bowl
 > counts can be attributed to a dish?

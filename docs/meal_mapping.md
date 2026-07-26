@@ -32,11 +32,17 @@ supabase/reset_spares.sql      -- restores awaiting_deployment for the reserved 
 supabase/smoke_test.sql        -- 17 assertions; expect ALL PASS
 ```
 
-`schema.sql` is the **complete** schema — there is no migration to apply after it.
-An earlier version of this work shipped one, because there was live telemetry to
-preserve; the database has since been rebuilt from scratch, so the assignment
-model and `meal_food_mapping` are defined in `schema.sql` directly. One definition
-rather than a base plus a fix-up, which is one fewer thing to drift.
+`schema.sql` is the **complete** schema — the assignment model and
+`meal_food_mapping` are defined there directly, so there is no migration to apply
+afterwards and nothing that can drift from it.
+
+`reset_spares.sql` is not part of the normal sequence: on a freshly rebuilt
+database no device has reported, so `awaiting_deployment` is already correct. It
+exists to repair that state after a stray write — see the file.
+
+`diagnose.sql` is read-only and can be run at any time. Its menu-coverage section
+answers the most common front-end confusion directly: a blank dish name is almost
+always an unentered menu rather than anything broken.
 
 ## 2. The assignment
 

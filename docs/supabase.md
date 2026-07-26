@@ -9,11 +9,19 @@ Schema, write model, security and setup. For what produces the numbers see
 ## 1. Setup order
 
 ```
-supabase/schema.sql            -- drops and rebuilds everything; idempotent
+supabase/schema.sql            -- drops and rebuilds everything
 supabase/register_devices.sql  -- registers BWL-001 .. BWL-032
+supabase/assign_devices.sql    -- permanent location/food_slot assignment
+supabase/seed_meal_mapping.sql -- sample menus, for the front-end test bed
 supabase/smoke_test.sql        -- 17 assertions; run BEFORE flashing any device
-supabase/diagnose.sql          -- privilege/trigger state when something is wrong
 ```
+
+Two files sit outside that sequence:
+
+| | |
+| --- | --- |
+| `diagnose.sql` | read-only; run any time something is wrong. Checks objects, RLS, every grant, view security, deployment totals and **menu coverage** — a blank dish name on the dashboard is almost always an unentered menu rather than a fault |
+| `reset_spares.sql` | a repair tool. On a fresh rebuild nothing has reported, so `awaiting_deployment` is already correct and this does nothing |
 
 > **`schema.sql` drops the `devices` registry too.** Re-running it always
 > leaves the fleet empty and every device unprovisioned — `register_devices.sql`
@@ -51,8 +59,8 @@ plain `UPDATE` instead of an upsert.
 
 **`(location, food_slot)` is deliberately not unique.** Darshanarthi runs three
 counters per dish position, so three stacks share a slot and remaining stock for a
-dish is the **sum** across them — see `slot_overview`. An earlier version enforced
-uniqueness on the assumption of one stack per position; that was wrong about the
+dish is the **sum** across them — see `slot_overview`. Do not add a unique
+constraint here: it encodes one stack per position, which is wrong about the
 building.
 
 ### `meal_food_mapping` — what each slot serves, per meal per day

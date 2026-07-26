@@ -1,17 +1,31 @@
 -- =====================================================================
---  Bowlstack schema smoke test  (v2 -- upsert-free design)
+--  Bowlstack -- schema smoke test.  17 assertions.
 --
---  Run AFTER schema.sql and BEFORE flashing any device. Paste the whole file
---  into the Supabase SQL editor and run once; it returns one table of
---  PASS/FAIL rows plus a verdict.
+--  Run after schema.sql, and BEFORE flashing any device. Paste the whole file
+--  into the Supabase SQL editor; it returns one table of PASS/FAIL rows plus a
+--  verdict.
 --
---  Several assertions are SUPPOSED to fail -- a device must NOT be able to
---  read your data. They are wrapped in exception handlers so the run
---  continues, and each records the real SQLSTATE so a failure names its own
---  cause instead of leaving you to guess.
+--  WHAT IT PROVES
+--    0-1    the objects exist and registering a device provisions its status row
+--    2-3    a device cannot READ anything -- not the registry, not telemetry
+--    4      the PATCH hot path actually writes (asserted on ROWS AFFECTED)
+--    5      a device cannot change which row it is
+--    6-7    events insert, and a replay is idempotent via 23505
+--    8      an unregistered device_id is refused -- the provisioning gate
+--    9      the wire vocabulary is pinned by CHECK constraints
+--    10-12  clock-free timestamps, the reported flag, service windows
+--    13     a device cannot delete history
+--    14-16  the menu is invisible and unwritable to devices, and the preload
+--           inherits the previous meal while correctly flagging is_saved
 --
---  Uses a throwaway device id (BWL-SMOKETEST) and deletes everything it
---  creates. Safe to re-run.
+--  Several assertions are SUPPOSED to fail: a device must NOT be able to read
+--  your data. Each is wrapped in an exception handler so the run continues, and
+--  records the real SQLSTATE so a failure names its own cause instead of leaving
+--  you to guess.
+--
+--  Uses a throwaway device id (BWL-SMOKETEST) at location 'R', plus menu
+--  fixtures on an absurd date, and deletes everything it creates. Safe to
+--  re-run, and safe against a populated database.
 -- =====================================================================
 
 drop table if exists smoke_results;
@@ -43,9 +57,9 @@ begin
   delete from public.device_status where device_id = DEV;
   delete from public.devices       where device_id = DEV;
 
-  -- 'R' (reserved) with no food_slot: a transient test device must not claim a
-  -- real serving position, and location is now a D/M/T/R enum rather than the
-  -- free text it used to be -- inserting 'transient' here would fail the CHECK.
+  -- 'R' (reserved) with no food_slot. A transient fixture must not claim a real
+  -- serving position, and location is a D/M/T/R enum, so a descriptive string
+  -- here would fail the CHECK.
   insert into public.devices (device_id, label, location, food_slot)
   values (DEV, 'smoke test', 'R', null);
 

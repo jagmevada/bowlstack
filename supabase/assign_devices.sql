@@ -79,8 +79,8 @@ commit;
 -- ---------------------------------------------------------------------
 --  Verify: every device assigned, and the totals match the installation.
 -- ---------------------------------------------------------------------
-select coalesce(location, '--')                as location,
-       coalesce(food_slot::text, '--')         as slot,
+select coalesce(location, '(none)')            as location,
+       coalesce(food_slot::text, '(none)')     as slot,
        count(*)                                as stacks,
        string_agg(device_id, ', ' order by device_id) as devices
   from public.devices

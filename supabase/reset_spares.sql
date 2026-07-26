@@ -1,6 +1,11 @@
 -- =====================================================================
 --  Reset the UNDEPLOYED units back to "never heard from"
 --
+--  A REPAIR TOOL, not part of the normal setup sequence. On a freshly rebuilt
+--  database no device has reported yet, so `awaiting_deployment` is already
+--  correct and this does nothing. Run it only when something has written to units
+--  that were never installed.
+--
 --  Run as owner, after assign_devices.sql. Idempotent. Safe to re-run.
 --
 --  WHY THIS IS NEEDED
@@ -8,17 +13,17 @@
 --  `awaiting_deployment` in device_overview means "registered, but has never
 --  reported". It is the state the front-end must tell apart from `offline`, and
 --  getting that wrong is the difference between a dashboard that flags a real
---  failure and one that flags 17 units nobody has installed yet.
+--  failure and one that flags the 8 reserved units nobody has installed yet.
 --
 --  The flag is sticky by design. tg_device_status_stamp() sets
 --  `reported := true` unconditionally on every UPDATE, precisely so a device
---  cannot pin it and hide an outage. That means ANY write to a device -- one
---  stray test round included -- permanently retires it from
+--  cannot pin it and hide an outage. That means ANY write to a device --
+--  including one stray test round -- permanently retires it from
 --  `awaiting_deployment`.
 --
---  This happened during bring-up: a fleet-simulator run wrote to all 32
---  registered ids rather than only the deployed ones, so every unit reported and
---  the state became untestable. This script restores it.
+--  The realistic cause is a simulator or test script pointed at every registered
+--  id rather than only the deployed ones. Point them at BWL-001..024 and this
+--  file is never needed.
 --
 --  HOW
 --  ---
