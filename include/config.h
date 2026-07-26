@@ -216,15 +216,34 @@ static const uint8_t PIN_BATTERY_ADC = 35;
 // readings are trusted.
 static const uint32_t BATTERY_REPORT_MS = 2000;
 
-// Battery sense divider, MEASURED rather than assumed: 4.105 V at the cell
-// read 2.045 V at the pin, so the real ratio is 4.105 / 2.045 = 2.0073 -- the
-// nominal 2.0 of two 10k resistors, plus their tolerance. Using the nominal
-// value instead would under-report a full cell by ~15 mV, which on the flat
-// upper part of the discharge curve is worth a couple of percent of apparent
-// charge.
+// Millivolts at the CELL per millivolt the ADC REPORTS. Not the resistor ratio:
+// it deliberately folds two independent errors into one measured number.
 //
-// Re-derive this per unit if the readings matter: divide a multimeter reading
-// at the cell by the "pin" figure in the battery console line.
+//   divider tolerance   two 10k resistors are 2.0 nominal, 2.0049 measured
+//                       (4100 mV cell / 2045 mV at the pin by multimeter)
+//   ADC gain error      the ADC reported 2078.7 mV where the pin was truly
+//                       2045 -- 1.6% high, ordinary for ESP32 even with eFuse
+//                       calibration
+//
+// Correcting only the divider would have left the ADC error untouched and
+// reported a 4.10 V cell as 4.17 V, i.e. 100% where the truth is ~95%.
+//
+//   factor = true cell mV / reported pin mV = 4100 / 2078.7 = 1.9724
+//
+// This is a SINGLE-POINT calibration of ONE board. Both error sources vary per
+// unit -- resistor tolerance and per-chip ADC calibration -- so across 32
+// devices expect a few percent of SoC error if this value is shared. That is
+// tolerable given the four coarse bands, but near the knee of the discharge
+// curve a few percent of voltage is worth far more than a few percent of
+// charge, so calibrate per unit if a band boundary ever matters:
+//
+//   1. read the "pin" figure from the battery console line
+//   2. measure the cell with a multimeter
+//   3. factor = cell mV / pin mV
+//   4. platformio.ini: -DBOWLSTACK_BATTERY_CAL=1.9724f
+#ifndef BOWLSTACK_BATTERY_CAL
+#define BOWLSTACK_BATTERY_CAL 1.9724f
+#endif
 //
 //     battery + --[10k]--+-- GPIO35
 //                        |
@@ -247,7 +266,7 @@ static const uint32_t BATTERY_REPORT_MS = 2000;
 // needs to sample accurately, while drawing only ~210 uA (about 1.7 mAh/day at
 // 8 h service, negligible against a 3.4 Ah cell). Larger resistors would save
 // current but push source impedance out of spec.
-static const float BATTERY_DIVIDER = 2.0073f;
+static const float BATTERY_DIVIDER = BOWLSTACK_BATTERY_CAL;
 
 // Li-ion endpoints for the percentage estimate. The real discharge curve is
 // far from linear, so treat the percentage as indicative and the millivolt
