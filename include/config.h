@@ -205,22 +205,21 @@ static const float HEALTH_BLINK_WIFI_HZ = 2.0f;
 static const uint8_t PIN_BATTERY_ADC = 35;
 
 // --- charger sense ---------------------------------------------------------
-// Charger 5 V rail through a 4.7k series resistor to GPIO27. ACTIVE HIGH, and
-// no internal pull is enabled -- an internal pull-down is ~45k, which against
-// 4.7k would hold the pin near 4.5 V, worse than none at all.
+// Charger 5 V rail through a 10k series resistor to GPIO27, ACTIVE HIGH, with
+// the INTERNAL pull-down enabled.
 //
-// Two consequences of series-resistor-only wiring, both accepted deliberately:
+//     charger 5V --[10k]-- GPIO27 (INPUT_PULLDOWN)
 //
-//   Over-voltage. ESP32 pins are not 5 V tolerant (absolute max ~3.6 V). A
-//   series resistor does not divide; it meters ~340 uA into the internal clamp
-//   diode, which passes it to the 3.3 V rail. Within what the clamp tolerates,
-//   but outside datasheet limits.
+// Charging: the input clamp conducts and holds the pin at ~3.3 V, sinking
+//   (5 - 3.3) / 10k = 170 uA into the rail. Comfortably inside what the clamp
+//   tolerates, and far above the ~2.48 V logic-high threshold.
+// Idle:     the internal pull-down (~45k) takes the pin to a solid 0 V, so
+//   "not charging" is a real reading rather than an undriven input.
 //
-//   Floating when unplugged. With nothing pulling the pin down, "not charging"
-//   is an undriven input, so it is debounced below rather than trusted.
-//
-// A single 6.8k from GPIO27 to GND resolves both: 2.96 V plugged, a solid 0 V
-// unplugged, and no clamp current.
+// The internal pull-down is used here rather than an external resistor because
+// the clamp -- not the pull-down -- sets the charging-state voltage, so the
+// pull-down's loose tolerance never enters the measurement. It only has to win
+// against leakage when nothing is connected, which it does easily.
 static const uint8_t PIN_CHARGING = 27;
 
 // FALSE: this senses the charger's 5 V rail, so the pin is HIGH while charging.
@@ -231,10 +230,11 @@ static const bool CHARGING_ACTIVE_LOW = false;
 // but it stops a single noise sample from flipping the reported charge state.
 static const uint8_t CHARGING_SAMPLES = 5;
 
-// How often the battery line is printed to the console. 2 s is a bring-up
-// cadence for validating the divider and the SoC curve -- raise it once the
-// readings are trusted.
-static const uint32_t BATTERY_REPORT_MS = 2000;
+// How often the power line -- cell voltage, band and charge state -- is printed
+// to the console. Present in the PRODUCTION build too: it is the only power
+// telemetry visible without a network, and the readings move slowly enough that
+// 5 s costs nothing.
+static const uint32_t POWER_REPORT_MS = 5000;
 
 // Millivolts at the CELL per millivolt the ADC REPORTS. Not the resistor ratio:
 // it deliberately folds two independent errors into one measured number.

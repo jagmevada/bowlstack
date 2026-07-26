@@ -1,4 +1,4 @@
-#include "device_status.h"
+﻿#include "device_status.h"
 
 #include <WiFi.h>  // for the MAC only; no radio is started here
 #include <math.h>
@@ -13,15 +13,17 @@ void begin() {
   // cell once the divider has halved it.
   analogSetPinAttenuation(config::PIN_BATTERY_ADC, ADC_11db);
 
-  // Plain INPUT: no internal pull. An internal pull-down is ~45k, which against
-  // the 4.7k series resistor from 5 V would sit the pin near 4.5 V -- further
-  // out of spec than leaving it alone.
-  pinMode(config::PIN_CHARGING, INPUT);
+  // INPUT_PULLDOWN, not plain INPUT: with only a 10k series resistor from the
+  // charger there is nothing else to define the idle state, and an undriven pin
+  // would report charging at random whenever the charger was unplugged. The
+  // pull-down's loose tolerance does not matter here because it never sets the
+  // charging-state voltage -- the input clamp does.
+  pinMode(config::PIN_CHARGING, INPUT_PULLDOWN);
 }
 
-// Majority vote. The pin floats when no charger is attached, so a single read
-// is not trustworthy; this does not make a floating input correct, but it stops
-// one noise sample flipping the reported charge state.
+// Majority vote. The pull-down makes a single read sound in principle; this
+// guards transition edges and any coupling along the harness, for the cost of a
+// few microseconds.
 static bool readCharging() {
   uint8_t high = 0;
   for (uint8_t i = 0; i < config::CHARGING_SAMPLES; i++) {
@@ -117,7 +119,7 @@ bool differs(const DeviceStatus &a, const DeviceStatus &b) {
   return false;
 }
 
-void printBattery(const DeviceStatus &s) {
+void printPower(const DeviceStatus &s) {
   // The pin voltage is printed alongside the cell voltage on purpose: it is
   // what you compare against a multimeter to derive BATTERY_DIVIDER, and an
   // implausible value there identifies a divider fault that the scaled figure
@@ -147,7 +149,7 @@ void print(const DeviceStatus &s) {
   Serial.printf("[%s] fw=%s mac=%s up=%us\n", s.deviceId, s.firmware, s.mac,
                 s.uptimeSec);
 
-  printBattery(s);
+  printPower(s);
 
   Serial.print("  levels:");
   for (uint8_t i = 0; i < config::SENSOR_COUNT; i++) {

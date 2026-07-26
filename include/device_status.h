@@ -1,4 +1,4 @@
-// Assembles the full device report: identity, power, health and the bowl
+﻿// Assembles the full device report: identity, power, health and the bowl
 // count. This is the payload the Phase 3 Supabase uplink will serialise, kept
 // separate from transport so the same snapshot can be printed, posted, or
 // compared against the last one to trigger an immediate send.
@@ -57,8 +57,9 @@ bool differs(const DeviceStatus &a, const DeviceStatus &b);
 
 void print(const DeviceStatus &s);
 
-// One line: pin voltage, cell voltage, percent and band. Printed on its own
-// cadence during bring-up, and included in print().
-void printBattery(const DeviceStatus &s);
+// One line: pin voltage, cell voltage, band and charge state. Printed on its
+// own cadence -- in the PRODUCTION build too, since it is the only power
+// telemetry visible without a network -- and included in print().
+void printPower(const DeviceStatus &s);
 
 }  // namespace device_status
