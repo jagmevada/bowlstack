@@ -265,6 +265,16 @@ revoke all on public.status_events from anon, authenticated, public;
 -- Device write path.
 grant insert, update on public.device_status to anon;
 
+-- ON CONFLICT needs SELECT on the arbiter index columns: PostgreSQL must probe
+-- that index to find a conflicting row, and the probe is a read. Without this,
+-- every upsert fails with 42501 even though INSERT and UPDATE are granted --
+-- and since both the heartbeat and the event batch use ON CONFLICT, no device
+-- traffic would reach the server at all. Key columns only, so telemetry stays
+-- unreadable. (See supabase/migration_003_upsert_select.sql, which verifies
+-- this empirically.)
+grant select (device_id) on public.device_status to anon;
+grant select (device_id, boot_id, seq) on public.status_events to anon;
+
 -- Column-level grant: anon cannot even name id / recorded_at / received_at, so
 -- a forged timestamp is refused at the privilege layer before the trigger's
 -- unconditional overwrite is needed. If this proves awkward during bring-up,
