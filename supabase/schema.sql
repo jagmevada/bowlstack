@@ -3,6 +3,33 @@
 --
 --  Run as owner in the Supabase SQL editor. Idempotent: safe to re-run.
 --
+--  THIS FILE IS NOT THE WHOLE SCHEMA -- APPLY THE MIGRATION AFTER IT
+--  ----------------------------------------------------------------
+--      1. schema.sql                            (this file)
+--      2. migrations/001_location_food_slot.sql REQUIRED
+--      3. register_devices.sql                  BWL-001 .. BWL-032
+--      4. assign_devices.sql                    permanent assignment
+--      5. seed_meal_mapping.sql                 sample menus, for the test bed
+--      6. reset_spares.sql                      restores awaiting_deployment
+--
+--  The migration runs BEFORE registration, not after. It is pure DDL and needs
+--  no rows, and going second would leave register_devices.sql naming columns
+--  that no longer exist -- which is the file most likely to be re-run later,
+--  when hardware is added.
+--
+--  Step 2 renames `area` -> `location` (adding 'R'), `item_slot` -> `food_slot`
+--  (widening to 1-8), DROPS the unique index on the pair, and adds
+--  meal_food_mapping with its views and functions. It is idempotent, so it is
+--  correct on a fresh database as well as an existing one.
+--
+--  The new objects live in the migration rather than being copied here on
+--  purpose. Two definitions of the same table drift, and the copy that stays
+--  right is the one nobody runs. See docs/meal_mapping.md.
+--
+--  The columns below are therefore the PRE-migration shape. Do not "fix" them
+--  here without deleting the migration, or a fresh install and an upgraded one
+--  will stop matching.
+--
 --  WRITE MODEL
 --  -----------
 --  Current state is UPDATED in place (one row per device, no growth); history

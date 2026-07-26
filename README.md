@@ -13,6 +13,7 @@ warning when a station is running short.
 | [docs/sensor_logic.md](docs/sensor_logic.md) | how a distance reading becomes a bowl count — filtering, presence, contiguity, sensor health |
 | [docs/firmware.md](docs/firmware.md) | modules, FreeRTOS tasks, wiring, network behaviour, build |
 | [docs/supabase.md](docs/supabase.md) | schema, write model, security, setup |
+| [docs/meal_mapping.md](docs/meal_mapping.md) | device assignment, meal-wise food mapping, TypeScript interfaces and queries |
 | [docs/frontend.md](docs/frontend.md) | front-end planning and open design questions |
 | [docs/FRONTEND_HANDOFF.md](docs/FRONTEND_HANDOFF.md) | **self-contained** contract for building the UI against Supabase |
 

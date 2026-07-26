@@ -20,16 +20,18 @@ begin;
 -- Registering a device fires devices_create_status, so each row here also
 -- provisions its device_status row -- which is what lets the firmware use a
 -- plain UPDATE instead of an upsert.
--- area, item_slot and label are left NULL on purpose. A unit has no serving
--- position until it is physically installed, and the front-end configuration
--- page is what assigns it -- guessing here would put 32 devices at positions
+-- location, food_slot and label are left NULL on purpose. A unit has no serving
+-- position until it is physically installed; assign_devices.sql does that as a
+-- separate, deliberate step. Guessing here would put 32 devices at positions
 -- nobody has built yet.
-insert into public.devices (device_id, area, item_slot, label, location, timezone)
+--
+-- Only device_id and timezone are named. Listing the assignment columns would
+-- couple this file to their names, and RUN ORDER PUTS THE MIGRATION FIRST -- so
+-- by the time this executes they are `location` and `food_slot`, not `area` and
+-- `item_slot`. Naming only what is needed keeps this correct either way, which
+-- matters because this is the file someone re-runs after adding hardware.
+insert into public.devices (device_id, timezone)
 select 'BWL-' || lpad(n::text, 3, '0'),
-       null,              -- 'D' Darshanarthi | 'T' Tiffin | 'M' Mahtma
-       null,              -- 1-5, the physical slot label on the station
-       null,
-       null,
        'Asia/Kolkata'     -- change per site if the fleet ever spans zones
   from generate_series(1, 32) as n
  on conflict (device_id) do nothing;
@@ -41,16 +43,16 @@ commit;
 --  the Supabase SQL editor only displays the last statement's output.
 -- ---------------------------------------------------------------------
 select o.device_id,
-       coalesce(o.area, '-') || coalesce(o.item_slot::text, '-') as position,
-       coalesce(o.label, '(unnamed)')                            as label,
+       coalesce(o.location, '-') || coalesce(o.food_slot::text, '-') as position,
+       coalesce(o.label, '(unnamed)')                               as label,
        case when o.awaiting_deployment then 'awaiting deployment'
             when o.offline              then 'OFFLINE'
-            else 'reporting' end                                 as state,
+            else 'reporting' end                                    as state,
        o.stack_count
   from public.device_overview o
 union all
 select 'TOTAL',
-       count(*) filter (where area is not null)::text || ' placed',
+       count(*) filter (where location is not null)::text || ' placed',
        count(*)::text || ' registered',
        count(*) filter (where awaiting_deployment)::text || ' awaiting',
        null

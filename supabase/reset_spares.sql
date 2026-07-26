@@ -29,9 +29,10 @@
 --
 --  WHAT IT TOUCHES
 --  ---------------
---  Only devices with `area IS NULL`, i.e. the spares. A deployed unit is never
+--  Only devices with `location = 'R'` (reserved/future) or no location at all --
+--  BWL-025..032 after assign_devices.sql. A deployed unit in D, M or T is never
 --  affected, so live telemetry from the prototype or from the simulated fleet
---  survives. It DOES delete history for the spares -- which is the intent: a unit
+--  survives. It DOES delete history for the spares, which is the intent: a unit
 --  that has never been installed should have nothing to show.
 -- =====================================================================
 
@@ -39,13 +40,15 @@ begin;
 
 -- Report first, so the operation is visible before it happens.
 select count(*) as spares_to_reset
-  from public.devices where area is null;
+  from public.devices where location = 'R' or location is null;
 
 delete from public.status_events
- where device_id in (select device_id from public.devices where area is null);
+ where device_id in (select device_id from public.devices
+                     where location = 'R' or location is null);
 
 delete from public.device_status
- where device_id in (select device_id from public.devices where area is null);
+ where device_id in (select device_id from public.devices
+                     where location = 'R' or location is null);
 
 -- Re-create with defaults: reported = false, updated_at = null, every telemetry
 -- column NULL. Matches exactly what tg_devices_create_status() produces when a

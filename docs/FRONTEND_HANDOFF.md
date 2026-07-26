@@ -48,8 +48,10 @@ const { data } = await supabase.from('device_overview').select('*')
 | Column | Type | Meaning |
 | --- | --- | --- |
 | `device_id` | text | `BWL-001` … `BWL-032`. Stable identity — survives board replacement |
-| `area` | text | `D` Darshanarthi, `T` Tiffin, `M` Mahtma. `null` until deployed |
-| `item_slot` | int | 1–5, physical label on the station. `null` until deployed |
+| `location` | text | `D` Darshanarthi, `M` Mahatma, `T` Tiffin, `R` reserved. `null` until deployed |
+| `food_slot` | int | 1–8 dish position on the station. **Not unique** — see below. `null` for reserved |
+| `current_food` | text | what this slot is serving right now, or `null` outside service hours |
+| `current_meal` | text | `Breakfast` / `Lunch` / `Dinner`, or `null` |
 | `label` | text | free text you set |
 | `location` | text | free text you set |
 | `timezone` | text | IANA zone, drives service-hour logic |
@@ -153,21 +155,26 @@ from index 0. Rendering it as a vertical column is the intuitive view.
 `authenticated` may update exactly these columns on `devices`:
 
 ```
-area, item_slot, label, location, timezone
+location, food_slot, label, timezone
 ```
 
 ```ts
 await supabase.from('devices')
-  .update({ area: 'D', item_slot: 3, label: 'Dal counter' })
+  .update({ location: 'D', food_slot: 3 })
   .eq('device_id', 'BWL-001')
 ```
 
 Constraints the UI should enforce before submitting:
 
-- `area` ∈ `D` | `T` | `M`
-- `item_slot` ∈ 1–5
-- **`(area, item_slot)` is unique** — assigning a taken position returns a
-  unique-violation. Show which device currently holds it.
+- `location` ∈ `D` | `M` | `T` | `R`
+- `food_slot` ∈ 1–8 (only 1–5 currently deployed)
+- **`(location, food_slot)` is NOT unique, deliberately.** Several stacks serve one
+  dish position — Darshanarthi slot 1 has three. Do not treat a shared position as
+  a conflict.
+
+> `label` names the physical position, never the dish. What sits in slot 3 changes
+> with the meal; that lives in `meal_food_mapping`. See
+> [meal_mapping.md](meal_mapping.md).
 
 > **`device_id` is not updatable, by design.** It is the installation's identity
 > and the key every history row hangs off.
@@ -226,8 +233,9 @@ supabase.channel('bowlstack')
 
 ### Stock view — the primary screen
 
-Bowl counts grouped by **area**, so remaining stock per item is visible at a
-glance across all three areas. Group by `area`, order by `item_slot`.
+Remaining stock per dish, across all three areas. **Read `slot_overview`, not
+`device_overview`** — several stacks serve one dish position, so the number is the
+sum across them. Group by `location`, order by `food_slot`.
 
 Slots are physical positions. **What food sits in slot 3 changes with the meal**
 — breakfast, lunch and dinner rotate through Dal/Kadhi, Rice, Curry, Roti and so
@@ -243,7 +251,7 @@ device ID.
 
 ### Configuration page
 
-Assign `area`, `item_slot`, `label` per device. Also where the slot→food mapping
+Assign `location`, `food_slot`, `label` per device. Also where the slot→food mapping
 per meal will live.
 
 ---
