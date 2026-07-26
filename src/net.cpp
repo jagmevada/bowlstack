@@ -33,11 +33,16 @@ const uint32_t WM_CONNECT_TIMEOUT_S = 10;
 // seconds to resolve, so going much shorter would cancel one still in progress.
 const uint32_t RETRY_PERIOD_MS = 10000;
 
-// How long the device stays offline before reopening the portal. Without this a
-// station whose router was replaced would retry a network that no longer exists
-// forever, recoverable only by reflashing. Long enough that a router reboot does
-// not drop a healthy unit into AP mode.
-const uint32_t PORTAL_AFTER_OFFLINE_MS = 300000;  // 5 minutes
+// How long the static credentials get before the portal opens. Short, so an
+// installer standing at a unit whose network is wrong does not wait minutes for
+// somewhere to type the new one.
+//
+// It is only safe to be this aggressive because retries CONTINUE while the
+// portal is open (see loop()). Otherwise 30 s would turn every router reboot
+// into a full PORTAL_TIMEOUT_S outage: the portal would open before the router
+// finished restarting, and nothing would attempt the real network until it
+// closed again.
+const uint32_t PORTAL_AFTER_OFFLINE_MS = 30000;  // 30 seconds
 
 // --- credentials -----------------------------------------------------------
 // Slot 2 is whatever the portal last commissioned. It is stored in our own NVS
@@ -289,12 +294,24 @@ void loop() {
       retryArmed = false;
 
       if (portalRunning) {
-        // Someone just commissioned this unit. Remember the network so it
-        // survives the next reboot, then take the AP down -- leaving it up
-        // wastes power and keeps advertising the device to anyone scanning.
-        storeCommissioned(WiFi.SSID().c_str(), WiFi.psk().c_str());
+        // The link came up while the AP was open -- either someone
+        // commissioned it, or one of the known networks came back while the
+        // retries kept running. Either way the AP has done its job: take it
+        // down rather than leaving it advertising the device and burning
+        // power.
+        //
+        // Only record a network as commissioned when it is NOT one of the
+        // compiled-in ones. Otherwise a routine reconnect to a static SSID
+        // during an open portal would overwrite the network someone
+        // deliberately configured.
+        const bool isStatic = (WIFI_SSID_1[0] && strcmp(joinedSsid, WIFI_SSID_1) == 0) ||
+                              (WIFI_SSID_2[0] && strcmp(joinedSsid, WIFI_SSID_2) == 0);
+        if (!isStatic) {
+          storeCommissioned(WiFi.SSID().c_str(), WiFi.psk().c_str());
+        }
         wm.stopConfigPortal();
         portalRunning = false;
+        Serial.println("wifi: link is up - closing config portal");
       }
     } else {
       Serial.printf("wifi: DISCONNECTED from '%s'\n",
@@ -306,6 +323,39 @@ void loop() {
     wasConnected = nowConnected;
   }
 
+  if (!nowConnected) {
+    if (!offlineTracked) {
+      offlineTracked = true;
+      offlineSinceMs = now;
+    }
+
+    // Open the portal once the known networks have had their chance, so a unit
+    // whose network was replaced can be re-pointed on site rather than needing
+    // a reflash.
+    if (!portalRunning &&
+        (int32_t)(now - (offlineSinceMs + PORTAL_AFTER_OFFLINE_MS)) >= 0) {
+      Serial.printf("wifi: offline %us with no known network\n",
+                    (now - offlineSinceMs) / 1000);
+      openPortal();
+    }
+
+    // Retries run EVEN WHILE THE PORTAL IS OPEN. WiFiManager puts the radio in
+    // AP_STA, so commissioning and recovery proceed in parallel: the AP stays
+    // available for an installer while the device keeps reaching for its own
+    // networks. Skipping retries here is what would make a 30 s portal trigger
+    // turn a brief router reboot into a full portal-timeout outage -- and the
+    // link-state check above notices the moment one succeeds, tearing the AP
+    // down on its own.
+    if (!retryArmed) {
+      retryArmed = true;
+      nextRetryMs = now;  // first retry immediately on going offline
+    }
+    if ((int32_t)(now - nextRetryMs) >= 0) {
+      nextRetryMs = now + RETRY_PERIOD_MS;
+      retryNextCredential();
+    }
+  }
+
   // Pump the captive portal. Cheap while idle; the save path is bounded by the
   // timeouts set in openPortal().
   if (portalRunning) {
@@ -313,44 +363,15 @@ void loop() {
 
     if (!wm.getConfigPortalActive()) {
       // Timed out with nobody configuring it. Not fatal: bowl counting
-      // continues and telemetry buffers. Restart the offline clock so the
-      // retries get another full window before the portal reopens -- otherwise
-      // a permanently dead network would pin the device in AP mode, unable to
-      // notice its own network returning.
+      // continues, telemetry buffers, and the retries above never stopped.
+      // Restart the offline clock so the portal reopens after another window
+      // rather than immediately re-arming on the next iteration.
       portalRunning = false;
       offlineSinceMs = now;
       offlineTracked = true;
-      retryArmed = false;
-      Serial.println("wifi: portal closed unconfigured - offline, will retry");
+      Serial.println("wifi: portal closed unconfigured - still retrying");
     }
-    return;
   }
-
-  if (nowConnected) return;
-
-  if (!offlineTracked) {
-    offlineTracked = true;
-    offlineSinceMs = now;
-  }
-
-  // Nothing known has answered for a long time. Reopen the portal so the unit
-  // can be pointed at a new network in the field.
-  if ((int32_t)(now - (offlineSinceMs + PORTAL_AFTER_OFFLINE_MS)) >= 0) {
-    Serial.printf("wifi: offline %us with no known network - reopening portal\n",
-                  (now - offlineSinceMs) / 1000);
-    offlineSinceMs = now;  // restart the clock; the portal has its own timeout
-    openPortal();
-    return;
-  }
-
-  if (!retryArmed) {
-    retryArmed = true;
-    nextRetryMs = now;  // first retry immediately on going offline
-  }
-  if ((int32_t)(now - nextRetryMs) < 0) return;
-  nextRetryMs = now + RETRY_PERIOD_MS;
-
-  retryNextCredential();
 }
 
 bool connected() { return WiFi.status() == WL_CONNECTED; }
