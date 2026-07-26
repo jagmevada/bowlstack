@@ -65,13 +65,30 @@ outside those windows is normal, and every liveness check is service-hour aware.
 
 ## Status
 
+**Single-device prototype complete and verified end to end on hardware** —
+sensors → bowl count → WiFi → Supabase, plus front-panel indicators and battery
+monitoring.
+
 | Phase | State |
 | --- | --- |
 | **1 — sensing engine** | done. Four sensors across two I2C buses, XSHUT addressing, round-robin acquisition |
 | **2 — presence logic** | done. Hysteresis thresholding, contiguity rule, bowl count with fault status, runtime sensor-health detection with backoff recovery |
 | **3 — telemetry** | done. WiFi with captive-portal commissioning, Supabase uplink with offline buffering |
 | **4 — task fabric** | done. FreeRTOS split so measurement never stalls on the network |
-| **5 — front-end** | not started. See [docs/FRONTEND_HANDOFF.md](docs/FRONTEND_HANDOFF.md) |
+| **5 — indicators & power** | done. Five status LEDs, measured Li-ion SoC curve, charger sense |
+| **6 — fleet stress test** | next. Simulate 32 devices against Supabase |
+| **7 — front-end** | not started. See [docs/FRONTEND_HANDOFF.md](docs/FRONTEND_HANDOFF.md) |
+
+### Verified on hardware
+
+| | Result |
+| --- | --- |
+| Sensors | 4/4 at 0x30–0x33, 10.0 Hz, stdev 1–5 mm at ~1 m |
+| Bowl count | tracks blocking f1 → f1+f2 → f1..f3 → f1..f4 |
+| Offline buffering | 4 events held 5 min 15 s, replayed with `recorded_at` spread across the 2.96 s in which they actually occurred — ordering preserved to 14 ms |
+| Live latency | 11 ms end to end when online |
+| Battery | 4102 mV against a 4.100 V multimeter reading, ±3 mV |
+| Task isolation | plotter held 9.78 Hz while the net task was blocked 12 s mid-join |
 
 **Deferred:** TCA9548A mux and dual-sensor redundancy (hardware not in hand);
 per-device JWTs to replace the shared anon key.
@@ -87,6 +104,11 @@ supabase/schema.sql            -- drops and rebuilds; idempotent
 supabase/register_devices.sql  -- BWL-001 .. BWL-032
 supabase/smoke_test.sql        -- 14 assertions; expect ALL PASS
 ```
+
+> `schema.sql` **drops the `devices` registry too**, so re-running it always
+> leaves the fleet unprovisioned. `register_devices.sql` is part of the same
+> operation, not an optional extra — an unregistered device is refused with
+> `23503` and backs off, which reads as a firmware fault until you check.
 
 **Firmware** — PlatformIO:
 
@@ -107,7 +129,22 @@ firmware**; it carries `BYPASSRLS` and makes every policy decorative.
 
 ---
 
-## The two ideas worth knowing up front
+## Hardware summary
+
+| Signal | GPIO | Notes |
+| --- | --- | --- |
+| I2C0 SDA / SCL | 17 / 16 | `f1` + `f2` — **not** 16/17, verified on the board |
+| I2C1 SDA / SCL | 21 / 22 | `f3` + `f4` |
+| XSHUT `f1`–`f4` | 32, 33, 23, 26 | output-capable pins only |
+| LEDs `f1`–`f4` | 4, 13, 14, 18 | **active low** (common anode) |
+| LED health | 19 | solid ok · 1 Hz sensor fault · 2 Hz WiFi down |
+| Battery ADC | 35 | 10k+10k divider, ADC1 |
+| Charger sense | 27 | 10k series from 5 V, internal pull-down |
+
+Full wiring rationale — including which pins are unusable and why — is in
+[docs/firmware.md](docs/firmware.md).
+
+## The ideas worth knowing up front
 
 **A device is an installation, not a board.** `BOWLSTACK_DEVICE_ID` is a
 compile-time constant, deliberately *not* derived from the chip's MAC. Replace a
@@ -120,3 +157,15 @@ loudly rather than corrupting a real installation's data.
 one physical fact both catches impossible sensor readings and lets a dead sensor
 below an observed bowl be inferred rather than degrading the count. The full
 treatment is in [docs/sensor_logic.md](docs/sensor_logic.md).
+
+**Measurement never waits on the network.** Sensors own core 1; WiFi and TLS
+live on core 0. This is not tuning — a single loop was previously blocked 138 s
+in the captive portal and 62 s in a WiFiManager save, polling nothing
+throughout. Cooperative scheduling could not fix it, because the blocking is
+inside third-party libraries.
+
+**The device never claims what it cannot measure.** No cell detected reports
+`null`, not 0%. A sensor that has not concluded reports `unknown`, not "no
+bowl". An impossible stack reports a fault, not a count. Each of these started
+as a bug where the firmware sounded confident and was wrong — the pattern is
+deliberate throughout.

@@ -232,9 +232,10 @@ static const uint8_t CHARGING_SAMPLES = 5;
 
 // How often the power line -- cell voltage, band and charge state -- is printed
 // to the console. Present in the PRODUCTION build too: it is the only power
-// telemetry visible without a network, and the readings move slowly enough that
-// 5 s costs nothing.
-static const uint32_t POWER_REPORT_MS = 5000;
+// telemetry visible without a network. A cell discharges over hours and the
+// band has four steps, so anything faster than this is noise on the console
+// rather than information.
+static const uint32_t POWER_REPORT_MS = 10000;
 
 // Millivolts at the CELL per millivolt the ADC REPORTS. Not the resistor ratio:
 // it deliberately folds two independent errors into one measured number.

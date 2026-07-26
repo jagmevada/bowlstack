@@ -33,14 +33,16 @@ upgrades confined to `SensorArray`.
 
 ## 2. Task architecture
 
-The firmware runs as four FreeRTOS tasks, not one Arduino loop.
+The firmware runs as five FreeRTOS tasks plus the Arduino loop, not one loop.
 
 | Task | Core | Prio | Stack | Owns |
 | --- | --- | --- | --- | --- |
 | `sensor` | **1** | 3 | 4 KB | I2C, filtering, presence, stack count |
 | `net` | 0 | 2 | 8 KB | WiFi join, portal, reconnection |
 | `telemetry` | 0 | 2 | 12 KB | TLS, PATCH, event batches |
-| `debug` | 1 | 1 | 4 KB | plotter / heartbeat |
+| `debug` | 1 | 1 | 4 KB | plotter / heartbeat (debug build only) |
+| `leds` | 1 | 1 | 2.5 KB | front-panel indicators (production) |
+| Arduino `loop` | 1 | 1 | — | power line, stack headroom |
 
 ### Why this exists
 
@@ -89,7 +91,8 @@ Sized from measured high-water marks, reported by `tasks::printStackHeadroom()`
 every 60 s:
 
 ```
-tasks: stack free  sensor=2044/4096 net=6508/8192 telemetry=6648/12288 debug=1824/4096
+tasks: stack free  sensor=2988/4096 net=6508/8192 telemetry=11464/12288
+                   debug=3552/4096 leds=1868/2560 bytes
 ```
 
 > `uxTaskGetStackHighWaterMark` returns **bytes** on ESP-IDF, not words —
@@ -270,8 +273,10 @@ coupling.
 
 ### Power console line
 
-Printed every `POWER_REPORT_MS` (5 s) in **both** builds, from `loop()` rather
-than `debug_plot` — it is the only power telemetry visible without a network:
+Printed every `POWER_REPORT_MS` (10 s) in **both** builds, from `loop()` rather
+than `debug_plot` — it is the only power telemetry visible without a network. A
+cell discharges over hours and the band has four steps, so faster is console
+noise rather than information:
 
 ```
 battery: pin 2080 mV -> cell 4102 mV : 95% -> good  charging=no
