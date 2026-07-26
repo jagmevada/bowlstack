@@ -100,6 +100,19 @@ void writeCommon(JsonObject o, uint8_t stackCount, StackStatus stackStatus,
   o["firmware"] = BOWLSTACK_FW_VERSION;
 }
 
+// Supabase presents several URLs in its dashboard and only one of them is the
+// API origin. Normalising here means a unit configured with the REST endpoint
+// (".../rest/v1/") or a trailing slash still works, instead of silently
+// building ".../rest/v1//rest/v1/device_status" and failing every request --
+// a mistake worth tolerating once it is being repeated across 30 devices.
+String apiBase() {
+  String u = String(SUPABASE_URL);
+  while (u.endsWith("/")) u.remove(u.length() - 1);
+  if (u.endsWith("/rest/v1")) u.remove(u.length() - 8);
+  while (u.endsWith("/")) u.remove(u.length() - 1);
+  return u;
+}
+
 // Returns the HTTP status, or a negative HTTPClient error code.
 // `rangeOut`, when non-null, receives the Content-Range header, which is how a
 // PATCH reports how many rows it actually matched.
@@ -108,7 +121,7 @@ int request(const char *method, const char *path, const char *query,
   if (!net::connected()) return -1000;
 
   HTTPClient http;
-  String url = String(SUPABASE_URL) + path;
+  String url = apiBase() + path;
   if (query != nullptr && query[0] != '\0') {
     url += "?";
     url += query;
@@ -266,7 +279,9 @@ void begin() {
   // inject telemetry. Pin a root CA here if that ever changes.
   tls_->setInsecure();
 
-  Serial.printf("telemetry: boot_id=%u -> %s\n", bootId_, SUPABASE_URL);
+  // Print the EFFECTIVE base, not the raw macro: if normalisation changed it,
+  // that difference is the first thing worth seeing when requests fail.
+  Serial.printf("telemetry: boot_id=%u -> %s\n", bootId_, apiBase().c_str());
 }
 
 void enqueue(const DeviceStatus &s, Reason reason) {
