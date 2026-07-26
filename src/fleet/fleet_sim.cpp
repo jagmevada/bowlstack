@@ -31,6 +31,10 @@ Node nodes_[NODE_COUNT];
 uint8_t cursor_ = 0;  // round-robin index for uplink servicing
 uint32_t reportAtMs_ = 0;
 
+// Alternates the event flush with the status round, so neither can starve the
+// other. See the note in loop().
+bool flushTurn_ = true;
+
 // Deterministic per-node PRNG. Seeded from the index rather than esp_random() so
 // a given node behaves the same across reboots -- a front-end developer
 // comparing two screenshots should not be fighting fresh randomness.
@@ -139,25 +143,48 @@ void buildStatus(Node &n) {
   // sensor under a bowl does not make the bowl disappear. An Unknown at or above
   // the top cannot be resolved either way, so it is not counted, which makes the
   // reported count a LOWER BOUND. That is precisely what `degraded` tells the UI.
+  // TRANSCRIBED FROM BowlLogic::recompute(), not re-derived. Keep the two in
+  // step: any divergence is a state the front-end will be built against and the
+  // hardware cannot produce.
   int8_t topPresent = -1;
-  for (int8_t i = config::SENSOR_COUNT - 1; i >= 0; i--) {
-    if (s.levels[i] == LevelState::Present) { topPresent = i; break; }
+  for (int8_t i = 0; i < (int8_t)config::SENSOR_COUNT; i++) {
+    if (s.levels[i] == LevelState::Present) topPresent = i;
   }
-  s.stackCount = (uint8_t)(topPresent + 1);
 
-  bool gap = false, unresolved = false;
-  for (uint8_t i = 0; i < config::SENSOR_COUNT; i++) {
-    if ((int8_t)i < topPresent && s.levels[i] == LevelState::Absent) gap = true;
-    if (s.levels[i] == LevelState::Unknown && (int8_t)i > topPresent) {
-      unresolved = true;
+  // An Absent BELOW the highest bowl is a floating bowl -- physically impossible,
+  // so a fault rather than a count.
+  for (int8_t i = 0; i < topPresent; i++) {
+    if (s.levels[i] == LevelState::Absent) {
+      s.stackCount = 0;
+      s.stackStatus = StackStatus::Discontiguous;
+      return;
     }
   }
 
-  s.stackStatus = gap          ? StackStatus::Discontiguous
-                : (unresolved || online < config::SENSOR_COUNT)
-                               ? StackStatus::Degraded
-                               : StackStatus::Ok;
-  if (gap) s.stackCount = 0;  // a fault reports no count, not a guess
+  bool ambiguous = false;
+  for (int8_t i = topPresent + 1; i < (int8_t)config::SENSOR_COUNT; i++) {
+    // BREAK at the first observed Absent. Nothing can rest above an empty level,
+    // so contiguity has already settled everything beyond it and an Unknown up
+    // there proves nothing.
+    //
+    // Omitting this break is a bug bowl_logic.cpp had already found and fixed --
+    // it flagged 12 of the 81 level combinations as ambiguous when the count was
+    // exact -- and the simulator reintroduced it. Reachable and permanent: the
+    // Degraded node kills f4 and drains, so at an empty stack it published
+    // levels [absent,absent,absent,unknown] as `degraded` where the firmware
+    // publishes `ok`. An adversarial review found 23 of 80 states disagreeing.
+    if (s.levels[i] == LevelState::Absent) break;
+    if (s.levels[i] == LevelState::Unknown) ambiguous = true;
+  }
+
+  s.stackCount = (uint8_t)(topPresent + 1);
+
+  // AMBIGUITY decides this, never sensor health. A dead sensor BELOW the top bowl
+  // costs nothing, because contiguity proves what it cannot see -- so `ok` with
+  // sensors_online < 4 and an `unknown` level is ordinary production output. The
+  // simulator previously degraded on `online < SENSOR_COUNT` and so could never
+  // emit it, teaching a front-end the false invariant "ok implies 4/4".
+  s.stackStatus = ambiguous ? StackStatus::Degraded : StackStatus::Ok;
 }
 
 // Exactly the fields device_status::differs() compares, so a simulated change
@@ -192,8 +219,17 @@ void evolve(Node &n) {
       break;
 
     case Scenario::Degraded:
-      n.sensorOk[config::SENSOR_COUNT - 1] = false;
+      n.sensorOk[config::SENSOR_COUNT - 1] = false;  // the TOP sensor
       if (n.stack > 0 && chance(n, 20)) n.stack--;
+      break;
+
+    case Scenario::DeadSensorLow:
+      // f1 is dead, but the stack is held at least 2 high so a bowl is always
+      // observed ABOVE the dead sensor. Contiguity then proves f1 is occupied,
+      // making the count exact and the status `ok` despite only 3 sensors online.
+      n.sensorOk[0] = false;
+      if (n.stack > 2 && chance(n, 25)) n.stack--;
+      else if (n.stack < 2) n.stack = config::SENSOR_COUNT;
       break;
 
     case Scenario::AllSensorsDead:
@@ -249,7 +285,8 @@ const char *scenarioName(Scenario s) {
     case Scenario::Normal:             return "normal";
     case Scenario::DepletesFast:       return "depletes-fast";
     case Scenario::Restocked:          return "restocked";
-    case Scenario::Degraded:           return "degraded";
+    case Scenario::Degraded:           return "degraded-top";
+    case Scenario::DeadSensorLow:      return "dead-sensor-low";
     case Scenario::AllSensorsDead:     return "all-sensors-dead";
     case Scenario::Discontiguous:      return "discontiguous";
     case Scenario::BatteryLow:         return "battery-low";
@@ -361,17 +398,32 @@ void loop() {
   // array, so this is the same batch INSERT the real firmware makes -- just with
   // rows from more than one installation. Without it, 31 buffers would mean 31
   // requests, which is the one way a single ESP32 could not represent 31 nodes.
+  //
+  // The flush and the status round ALTERNATE rather than the flush taking
+  // priority. Priority starved the entire fleet: if any one channel held events
+  // it could not send, `np > 0` on every pass and the function returned before
+  // reaching the status round, so no node ever got its state row PATCHed.
+  //
+  // An unregistered id reaches exactly that state and stays there. flushChannels
+  // sets `unprovisioned` on a 23503 and KEEPS the queue, but the hard backoff
+  // that would pace the retry lives in telemetry::loop() -- which only runs in
+  // the status round. One un-provisioned device therefore silenced the other
+  // thirteen indefinitely. Such channels are now excluded from the batch so
+  // telemetry::loop() can reach them and apply the backoff.
   telemetry::Channel *pending[NODE_COUNT];
   uint8_t np = 0;
   for (uint8_t i = 0; i < NODE_COUNT; i++) {
-    if (nodes_[i].ch.count > 0 && !nodes_[i].ch.backoffActive) {
-      pending[np++] = &nodes_[i].ch;
+    telemetry::Channel &c = nodes_[i].ch;
+    if (c.count > 0 && !c.backoffActive && !c.unprovisioned) {
+      pending[np++] = &c;
     }
   }
-  if (np > 0) {
+  if (np > 0 && flushTurn_) {
+    flushTurn_ = false;
     telemetry::flushMany(pending, np);
     return;  // one HTTP transaction per loop pass, as on a real device
   }
+  flushTurn_ = true;
 
   // --- current state: one node per pass, round-robin ----------------------
   // Each node keeps its own 5 s floor and 60 s heartbeat inside

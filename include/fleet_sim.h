@@ -78,8 +78,15 @@ enum class Scenario : uint8_t {
   Normal,             // the ordinary case: 4 bowls draining over service
   DepletesFast,       // reaches 0 early -- the shortage warning path
   Restocked,          // 0 -> 4 mid-service, so the count must be seen to RISE
-  Degraded,           // one dead sensor: status degraded, one level `unknown`,
-                      //   count is a LOWER BOUND and must be shown with a warning
+  Degraded,           // dead TOP sensor: the stack may extend into it, so the
+                      //   count is a LOWER BOUND -- status degraded, shown with a
+                      //   warning
+  DeadSensorLow,      // dead sensor BELOW the top bowl. Contiguity proves what it
+                      //   cannot see, so the count is EXACT and the status is
+                      //   `ok` -- with sensors_online 3 and an `unknown` level.
+                      //   Ordinary production output, and without this node the
+                      //   bed can never produce it, teaching the front-end the
+                      //   false invariant "ok implies 4/4, no unknown"
   AllSensorsDead,     // sensors_online 0, every level `unknown`
   Discontiguous,      // a bowl above a gap: physically impossible, so the UI
                       //   must show a FAULT and refuse to show a count
