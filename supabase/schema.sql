@@ -392,9 +392,17 @@ select d.device_id,
 
        -- Alarm only when the device SHOULD be reporting and is not. Devices are
        -- dark ~16h/day by design, so plain staleness is not a fault.
-       (public.in_service_window(now(), d.timezone, d.device_id)
-        and (s.updated_at is null
-             or s.updated_at < now() - interval '5 minutes')) as offline,
+       --
+       -- s.reported gates this so a device that has NEVER reported does not
+       -- alarm: that is a registered-but-not-yet-deployed unit, not a failure.
+       -- Without it, pre-registering the fleet would light up every unbuilt
+       -- station as offline and bury the ones that genuinely went down.
+       (coalesce(s.reported, false)
+        and public.in_service_window(now(), d.timezone, d.device_id)
+        and s.updated_at < now() - interval '5 minutes') as offline,
+
+       -- Registered but never heard from -- i.e. awaiting installation.
+       (not coalesce(s.reported, false)) as awaiting_deployment,
 
        -- Outside service hours these numbers are the last known state from the
        -- previous service, not live data. Say so rather than letting a
