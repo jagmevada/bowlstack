@@ -96,8 +96,12 @@ anon_table_ok as (
 -- 4. COLUMN-level grants held by anon. This is the real device write path.
 --
 --    Expected, and nothing else:
---      device_status  SELECT on device_id ONLY, UPDATE on the 13 payload columns
---      status_events  INSERT on 13 columns
+--      device_status  SELECT on device_id ONLY, UPDATE on 12 payload columns
+--                     (boot_id, uptime_s, stack_count, stack_status, levels,
+--                      sensors_ok, sensors_online, battery_mv, battery_level,
+--                      charging, firmware, mac)
+--      status_events  INSERT on 13 columns -- the same payload minus battery_mv
+--                     and mac, plus device_id, seq and age_ms
 --
 --    The narrow SELECT is load-bearing. PostgREST issues
 --    PATCH ...?device_id=eq.X, i.e. UPDATE ... WHERE device_id = 'X', and

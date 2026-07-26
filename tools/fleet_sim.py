@@ -34,10 +34,24 @@ history can be placed.
 
 USAGE
 -----
-    python tools/fleet_sim.py --once              # one round, all 32 devices
-    python tools/fleet_sim.py --backfill 5        # 5 days of service history
-    python tools/fleet_sim.py --live              # continuous, Ctrl-C to stop
-    python tools/fleet_sim.py --once --dry-run    # print payloads, send nothing
+    python tools/fleet_sim.py --once     --devices 24
+    python tools/fleet_sim.py --backfill 5 --devices 24
+    python tools/fleet_sim.py --live     --devices 24
+    python tools/fleet_sim.py --once --dry-run       # payloads only, sends nothing
+
+PASS --devices 24, ALWAYS
+-------------------------
+It targets BWL-001..024, which is exactly the deployed set. BWL-025..032 are
+reserved and have never been installed, and must stay that way in the data:
+tg_device_status_stamp() sets `reported := true` on every UPDATE -- deliberately,
+so a device cannot pin the flag and hide an outage -- which permanently retires a
+unit from `awaiting_deployment`. That is the state the front-end must tell apart
+from `offline`, and writing to a reserved id destroys it. It is a BEFORE UPDATE
+trigger, so no UPDATE can undo it; supabase/reset_spares.sql repairs it by
+deleting and re-creating the rows.
+
+The default is 32 because that is the fleet size, not because it is the right
+thing to send.
 
 Credentials come from the environment, or from include/secret.h (gitignored) as
 a convenience:

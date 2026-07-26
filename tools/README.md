@@ -60,11 +60,24 @@ BOWLSTACK_ANON_KEY
 ### Usage
 
 ```bash
-python tools/fleet_sim.py --once              # one round, all 32 devices
-python tools/fleet_sim.py --backfill 5        # 5 days of meal-service history
-python tools/fleet_sim.py --live              # continuous, Ctrl-C to stop
-python tools/fleet_sim.py --once --dry-run    # print payloads, send nothing
+python tools/fleet_sim.py --once     --devices 24   # one round
+python tools/fleet_sim.py --backfill 5 --devices 24 # 5 days of service history
+python tools/fleet_sim.py --live     --devices 24   # continuous, Ctrl-C to stop
+python tools/fleet_sim.py --once --dry-run          # payloads only, sends nothing
 ```
+
+> **Always pass `--devices 24`.** It targets BWL-001…024, which is exactly the
+> deployed set; BWL-025…032 are reserved and have never been installed.
+>
+> Without it the simulator writes to all 32, and `tg_device_status_stamp()` sets
+> `reported := true` unconditionally — deliberately, so a device cannot pin the
+> flag and hide an outage. That permanently retires the reserved units from
+> `awaiting_deployment`, which is the state the front-end must tell apart from
+> `offline`. It is a `BEFORE UPDATE` trigger, so no `UPDATE` can undo it;
+> `reset_spares.sql` repairs it by deleting and re-creating the rows.
+>
+> This has already happened once. The default is 32 because that is the fleet
+> size, not because it is the right thing to send.
 
 | Flag | Effect |
 | --- | --- |
