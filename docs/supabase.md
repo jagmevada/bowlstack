@@ -11,7 +11,7 @@ Schema, write model, security and setup. For what produces the numbers see
 ```
 supabase/schema.sql            -- drops and rebuilds everything; idempotent
 supabase/register_devices.sql  -- registers BWL-001 .. BWL-032
-supabase/smoke_test.sql        -- 14 assertions; run BEFORE flashing any device
+supabase/smoke_test.sql        -- 17 assertions; run BEFORE flashing any device
 supabase/diagnose.sql          -- privilege/trigger state when something is wrong
 ```
 

@@ -29,7 +29,12 @@ declare
   v_gap numeric;
   v_rls boolean;
   v_n   int;
+  v_txt text;
+  v_saved boolean;
   DEV   constant text := 'BWL-SMOKETEST';
+  -- Menu fixtures live at location 'R' on an absurd date, so they cannot collide
+  -- with a real menu even if this runs against a populated database.
+  MDAY  constant date := date '1999-01-01';
 begin
   execute 'reset role';
 
@@ -123,7 +128,7 @@ begin
            stack_status = 'ok',
            levels = array['present','present','present','absent'],
            sensors_ok = array[true,true,true,true], sensors_online = 4,
-           battery_mv = 3980, battery_pct = 76, charging = false,
+           battery_mv = 3980, battery_level = 'good', charging = false,
            firmware = '0.2.0', mac = '8C:94:DF:4C:7A:04'
      where device_id = DEV;
     get diagnostics v_n = row_count;
@@ -157,10 +162,10 @@ begin
     execute 'set local role anon';
     insert into public.status_events
       (device_id, boot_id, seq, age_ms, reason, stack_count, stack_status,
-       levels, sensors_ok, sensors_online, battery_pct, charging, firmware)
+       levels, sensors_ok, sensors_online, battery_level, charging, firmware)
     values (DEV, 12345, 1, 300000, 'change', 2, 'ok',
             array['present','present','absent','absent'],
-            array[true,true,true,true], 4, 76, false, '0.2.0');
+            array[true,true,true,true], 4, 'good', false, '0.2.0');
   exception when others then
     st := sqlstate; msg := sqlerrm;
   end;
@@ -175,10 +180,10 @@ begin
     execute 'set local role anon';
     insert into public.status_events
       (device_id, boot_id, seq, age_ms, reason, stack_count, stack_status,
-       levels, sensors_ok, sensors_online, battery_pct, charging, firmware)
+       levels, sensors_ok, sensors_online, battery_level, charging, firmware)
     values (DEV, 12345, 1, 300000, 'change', 2, 'ok',
             array['present','present','absent','absent'],
-            array[true,true,true,true], 4, 76, false, '0.2.0');
+            array[true,true,true,true], 4, 'good', false, '0.2.0');
   exception when unique_violation then
     st := '23505';
   when others then
@@ -197,7 +202,7 @@ begin
     execute 'set local role anon';
     insert into public.status_events
       (device_id, boot_id, seq, age_ms, reason, stack_count, stack_status,
-       levels, sensors_ok, sensors_online, battery_pct, charging, firmware)
+       levels, sensors_ok, sensors_online, battery_level, charging, firmware)
     values ('BWL-000', 1, 1, 0, 'boot', 0, 'degraded',
             array['unknown','unknown','unknown','unknown'],
             array[false,false,false,false], 0, null, false, '0.2.0');
@@ -214,10 +219,10 @@ begin
     execute 'set local role anon';
     insert into public.status_events
       (device_id, boot_id, seq, age_ms, reason, stack_count, stack_status,
-       levels, sensors_ok, sensors_online, battery_pct, charging, firmware)
+       levels, sensors_ok, sensors_online, battery_level, charging, firmware)
     values (DEV, 12345, 2, 0, 'change', 1, 'OK',
             array['present','absent','absent','absent'],
-            array[true,true,true,true], 4, 76, false, '0.2.0');
+            array[true,true,true,true], 4, 'good', false, '0.2.0');
     res := res || jsonb_build_object('n',9,'r','FAIL',
              'c','bad vocabulary rejected','d','uppercase stack_status ACCEPTED');
   exception when check_violation then
@@ -302,6 +307,86 @@ begin
              'c','anon cannot delete events','d','permission denied, as intended');
   end;
 
+  -- 14. The menu must be invisible to devices. A device stores a slot NUMBER and
+  --     never learns or needs the dish, so anon having no access here is a
+  --     deliberate property rather than an omission -- otherwise the anon key in
+  --     32 flash images would also read the whole site's configuration.
+  begin
+    execute 'set local role anon';
+    perform 1 from public.meal_food_mapping limit 1;
+    res := res || jsonb_build_object('n',14,'r','FAIL',
+             'c','meal_food_mapping unreadable by anon',
+             'd','anon CAN read the menu');
+  exception when insufficient_privilege then
+    res := res || jsonb_build_object('n',14,'r','PASS',
+             'c','meal_food_mapping unreadable by anon',
+             'd','permission denied, as intended');
+  end;
+
+  -- 15. ...and unwritable, so a compromised device cannot rewrite the menu.
+  begin
+    execute 'set local role anon';
+    insert into public.meal_food_mapping
+      (location, meal_type, meal_date, food_slot, food_name)
+    values ('R','Lunch',MDAY,1,'anon should not manage this');
+    res := res || jsonb_build_object('n',15,'r','FAIL',
+             'c','meal_food_mapping unwritable by anon',
+             'd','anon CAN write the menu');
+  exception when insufficient_privilege then
+    res := res || jsonb_build_object('n',15,'r','PASS',
+             'c','meal_food_mapping unwritable by anon',
+             'd','permission denied, as intended');
+  end;
+
+  -- 16. Preload inherits the previous same-meal menu, and says it is inherited.
+  --     The is_saved flag is the part worth testing: a preloaded form is
+  --     pixel-identical to a saved one, so if it ever reported true for an
+  --     inherited row an admin would believe a menu was recorded when no row
+  --     exists. Verifies both directions -- inherited, then saved.
+  st := 'NO ERROR';
+  begin
+    execute 'reset role';
+    delete from public.meal_food_mapping where location = 'R' and meal_date in (MDAY, MDAY + 1);
+
+    insert into public.meal_food_mapping
+      (location, meal_type, meal_date, food_slot, food_name)
+    values ('R','Lunch',MDAY,1,'SmokeDishA');
+
+    -- Asking for the NEXT day must inherit MDAY and flag it as not saved.
+    select food_name, is_saved into v_txt, v_saved
+      from public.meal_mapping_preload('R','Lunch',MDAY + 1);
+
+    if v_txt = 'SmokeDishA' and v_saved is false then
+      -- Now save that day for real; the same call must flip to is_saved.
+      insert into public.meal_food_mapping
+        (location, meal_type, meal_date, food_slot, food_name)
+      values ('R','Lunch',MDAY + 1,1,'SmokeDishB');
+
+      select food_name, is_saved into v_txt, v_saved
+        from public.meal_mapping_preload('R','Lunch',MDAY + 1);
+
+      if v_txt = 'SmokeDishB' and v_saved is true then
+        st := 'OK';
+      else
+        st := 'saved lookup returned ' || coalesce(v_txt,'null') ||
+              '/is_saved=' || coalesce(v_saved::text,'null');
+      end if;
+    else
+      st := 'inherited lookup returned ' || coalesce(v_txt,'null') ||
+            '/is_saved=' || coalesce(v_saved::text,'null');
+    end if;
+
+    delete from public.meal_food_mapping where location = 'R' and meal_date in (MDAY, MDAY + 1);
+  exception when others then
+    st := sqlstate || ' ' || sqlerrm;
+  end;
+  res := res || jsonb_build_object('n',16,
+           'r', case when st = 'OK' then 'PASS' else 'FAIL' end,
+           'c','meal_mapping_preload inherits, and flags is_saved',
+           'd', case when st = 'OK'
+                     then 'inherited previous day as draft, then saw the save'
+                     else st end);
+
   ------------------------------------------------------------------
   -- Cleanup. Deliberately no enclosing ROLLBACK: that would discard the
   -- results along with the test data.
@@ -310,6 +395,8 @@ begin
   delete from public.status_events where device_id = DEV;
   delete from public.device_status where device_id = DEV;
   delete from public.devices       where device_id = DEV;
+  delete from public.meal_food_mapping
+   where location = 'R' and meal_date in (MDAY, MDAY + 1);
 
   for e in select * from jsonb_array_elements(res) loop
     insert into smoke_results

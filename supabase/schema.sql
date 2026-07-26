@@ -10,7 +10,7 @@
 --      3. assign_devices.sql    permanent location/food_slot assignment
 --      4. seed_meal_mapping.sql sample menus, for the front-end test bed
 --      5. reset_spares.sql      restores awaiting_deployment for the reserved 8
---      6. smoke_test.sql        14 assertions; expect ALL PASS
+--      6. smoke_test.sql        17 assertions; expect ALL PASS
 --
 --  This file is the COMPLETE schema. There is no migration to apply after it:
 --  the device assignment model (location/food_slot) and meal_food_mapping are
@@ -747,7 +747,7 @@ commit;
 --       assign_devices.sql      the permanent location/food_slot assignment
 --       seed_meal_mapping.sql   sample menus, for the front-end test bed
 --       reset_spares.sql        restores awaiting_deployment for the reserved 8
---       smoke_test.sql          14 assertions; expect ALL PASS
+--       smoke_test.sql          17 assertions; expect ALL PASS
 -- ---------------------------------------------------------------------
 
 -- ---------------------------------------------------------------------

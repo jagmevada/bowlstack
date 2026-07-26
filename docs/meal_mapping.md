@@ -29,7 +29,7 @@ supabase/register_devices.sql  -- BWL-001 .. BWL-032
 supabase/assign_devices.sql    -- the permanent assignment
 supabase/seed_meal_mapping.sql -- sample menus, for the front-end test bed
 supabase/reset_spares.sql      -- restores awaiting_deployment for the reserved 8
-supabase/smoke_test.sql        -- 14 assertions; expect ALL PASS
+supabase/smoke_test.sql        -- 17 assertions; expect ALL PASS
 ```
 
 `schema.sql` is the **complete** schema — there is no migration to apply after it.
