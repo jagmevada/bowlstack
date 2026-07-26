@@ -25,6 +25,15 @@ const uint32_t STATUS_PERIOD_MS = 60000;
 // Backoff after a failed post, so a dead uplink cannot spin the loop.
 const uint32_t RETRY_PERIOD_MS = 15000;
 
+// Floor between change-triggered posts. A genuinely unstable input -- a
+// misaligned sensor, or something intermittently clipping a beam -- can flap
+// the stack status several times a second, and each flap would otherwise be
+// its own immediate HTTP request. Observed on the bench: eight OK/DISCONTIGUOUS
+// transitions in 45 s. Every change is still ENQUEUED, so no history is lost;
+// only the network wake-up is throttled, and the next post carries the current
+// state anyway.
+const uint32_t CHANGE_POST_MIN_GAP_MS = 5000;
+
 // Backoff once the server says this device is not registered. Retrying cannot
 // fix that; only a human inserting a `devices` row can.
 const uint32_t UNPROVISIONED_RETRY_MS = 300000;
@@ -60,6 +69,13 @@ uint32_t backoffUntilMs_ = 0;
 bool statusPending_ = true;  // always report once at boot
 
 WiFiClientSecure *tls_ = nullptr;
+
+// PostgREST answers 409 for BOTH a duplicate key (23505) and a foreign-key
+// violation (23503), which mean opposite things here: the first says the rows
+// are already stored and the buffer should be dropped, the second says the
+// device is not registered and the buffer must be KEPT. Only the SQLSTATE
+// separates them.
+char lastPgCode_[8] = {0};
 
 const char *reasonName(Reason r) {
   switch (r) {
@@ -146,6 +162,8 @@ int request(const char *method, const char *path, const char *query,
 
   if (rangeOut != nullptr) *rangeOut = http.header("Content-Range");
 
+  lastPgCode_[0] = '\0';
+
   // Only read the body on failure -- on success it is empty anyway thanks to
   // return=minimal, and the error text is what we want for diagnosis.
   if (code < 200 || code >= 300) {
@@ -153,9 +171,15 @@ int request(const char *method, const char *path, const char *query,
     Serial.printf("telemetry: %s %s -> %d %s\n", method, path, code,
                   err.substring(0, 180).c_str());
 
+    // Extract the SQLSTATE so the caller can tell 23505 from 23503.
+    const int at = err.indexOf("\"code\":\"");
+    if (at >= 0 && (int)err.length() >= at + 13) {
+      err.substring(at + 8, at + 13).toCharArray(lastPgCode_, sizeof(lastPgCode_));
+    }
+
     // 23503 is a foreign-key violation: this device_id is not in `devices`.
     // No amount of retrying fixes a provisioning gap.
-    if (err.indexOf("23503") >= 0) unprovisioned_ = true;
+    if (strcmp(lastPgCode_, "23503") == 0) unprovisioned_ = true;
   }
 
   http.end();
@@ -207,14 +231,22 @@ bool flushEvents() {
     return true;
   }
 
-  // 409 is the unique-constraint violation: these events are already on the
-  // server, so the batch has done its job and must be dropped rather than
-  // retried forever.
-  if (code == 409) {
-    Serial.println("telemetry: events already recorded (409), clearing buffer");
+  // 23505, a duplicate key: these events are already stored, so the batch has
+  // done its job and must be dropped rather than retried forever.
+  if (strcmp(lastPgCode_, "23505") == 0) {
+    Serial.println("telemetry: events already recorded (23505), clearing buffer");
     head_ = 0;
     count_ = 0;
     return true;
+  }
+
+  // 23503, a foreign-key violation: the device is not registered. PostgREST
+  // reports this as 409 too, so keying off the status alone would discard the
+  // buffer here -- losing real history over a provisioning mistake that is
+  // about to be fixed. Keep it; the backoff in loop() handles the retry.
+  if (strcmp(lastPgCode_, "23503") == 0) {
+    Serial.println("telemetry: device not registered - keeping buffered events");
+    return false;
   }
 
   // Any other 4xx means the batch is malformed and will never be accepted;
@@ -311,7 +343,16 @@ void enqueue(const DeviceStatus &s, Reason reason) {
   statusPending_ = true;
 }
 
-void requestImmediateUpsert() { statusPending_ = true; }
+void requestImmediateUpsert() {
+  // Throttle the wake-up, not the data. The event is already queued by
+  // enqueue(), so history is complete either way; this only stops a flapping
+  // input turning into one HTTP request per transition.
+  static uint32_t nextAllowedMs = 0;
+  const uint32_t now = millis();
+  if ((int32_t)(now - nextAllowedMs) < 0) return;
+  nextAllowedMs = now + CHANGE_POST_MIN_GAP_MS;
+  statusPending_ = true;
+}
 
 void loop(const DeviceStatus &current) {
   if (!net::connected()) return;
