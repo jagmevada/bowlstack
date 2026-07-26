@@ -3,32 +3,31 @@
 --
 --  Run as owner in the Supabase SQL editor. Idempotent: safe to re-run.
 --
---  THIS FILE IS NOT THE WHOLE SCHEMA -- APPLY THE MIGRATION AFTER IT
---  ----------------------------------------------------------------
---      1. schema.sql                            (this file)
---      2. migrations/001_location_food_slot.sql REQUIRED
---      3. register_devices.sql                  BWL-001 .. BWL-032
---      4. assign_devices.sql                    permanent assignment
---      5. seed_meal_mapping.sql                 sample menus, for the test bed
---      6. reset_spares.sql                      restores awaiting_deployment
+--  APPLY ORDER
+--  -----------
+--      1. schema.sql            (this file -- DROPS EVERYTHING first)
+--      2. register_devices.sql  BWL-001 .. BWL-032
+--      3. assign_devices.sql    permanent location/food_slot assignment
+--      4. seed_meal_mapping.sql sample menus, for the front-end test bed
+--      5. reset_spares.sql      restores awaiting_deployment for the reserved 8
+--      6. smoke_test.sql        14 assertions; expect ALL PASS
 --
---  The migration runs BEFORE registration, not after. It is pure DDL and needs
---  no rows, and going second would leave register_devices.sql naming columns
---  that no longer exist -- which is the file most likely to be re-run later,
---  when hardware is added.
+--  This file is the COMPLETE schema. There is no migration to apply after it:
+--  the device assignment model (location/food_slot) and meal_food_mapping are
+--  defined here directly, so a fresh database and a documented one cannot drift.
 --
---  Step 2 renames `area` -> `location` (adding 'R'), `item_slot` -> `food_slot`
---  (widening to 1-8), DROPS the unique index on the pair, and adds
---  meal_food_mapping with its views and functions. It is idempotent, so it is
---  correct on a fresh database as well as an existing one.
+--  Two things worth knowing before reading on, because both invert an assumption
+--  the earlier version of this schema made:
 --
---  The new objects live in the migration rather than being copied here on
---  purpose. Two definitions of the same table drift, and the copy that stays
---  right is the one nobody runs. See docs/meal_mapping.md.
+--    - (location, food_slot) is NOT unique. Darshanarthi runs three counters per
+--      dish position, so remaining stock for a dish is the SUM across the stacks
+--      sharing a slot. public.slot_overview computes it.
 --
---  The columns below are therefore the PRE-migration shape. Do not "fix" them
---  here without deleting the migration, or a fresh install and an upgraded one
---  will stop matching.
+--    - Devices never store food names. A device stores a slot NUMBER; what that
+--      slot serves changes three times a day and lives in meal_food_mapping,
+--      keyed by date so history stays attributable to the dish.
+--
+--  See docs/meal_mapping.md for the front-end contract.
 --
 --  WRITE MODEL
 --  -----------
@@ -65,15 +64,21 @@ begin;
 -- ---------------------------------------------------------------------
 -- 0. Clean slate.
 -- ---------------------------------------------------------------------
+drop view  if exists public.slot_overview;
 drop view  if exists public.device_overview;
-drop table if exists public.status_events  cascade;
-drop table if exists public.device_status  cascade;
-drop table if exists public.service_windows cascade;
-drop table if exists public.devices        cascade;
+drop table if exists public.status_events      cascade;
+drop table if exists public.device_status      cascade;
+drop table if exists public.meal_food_mapping  cascade;
+drop table if exists public.service_windows    cascade;
+drop table if exists public.devices            cascade;
 drop function if exists public.tg_device_status_stamp()   cascade;
 drop function if exists public.tg_status_events_stamp()   cascade;
 drop function if exists public.tg_devices_create_status() cascade;
+drop function if exists public.tg_meal_food_mapping_touch() cascade;
 drop function if exists public.in_service_window(timestamptz, text, text, interval) cascade;
+drop function if exists public.current_meal_type(text, timestamptz) cascade;
+drop function if exists public.current_meal_date(text, timestamptz) cascade;
+drop function if exists public.meal_mapping_preload(text, text, date) cascade;
 
 -- ---------------------------------------------------------------------
 -- 1. devices -- human-managed registry. No device ever writes here.
@@ -82,39 +87,43 @@ create table public.devices (
   device_id   text primary key
                 check (device_id ~ '^[A-Za-z0-9_-]{3,32}$'),
 
-  -- Serving position. A unit is installed in one area and physically labelled
-  -- with one item slot, and neither changes for the life of the installation
-  -- except on failure or reassignment.
-  --   area      D = Darshanarthi, T = Tiffin, M = Mahtma
-  --   item_slot 1-5, the physical label on the station
-  -- Both stay NULL until a unit is deployed; the front-end assigns them.
-  area        text     check (area in ('D','T','M')),
-  item_slot   smallint check (item_slot between 1 and 5),
+  -- PERMANENT assignment. A unit is installed in one area at one dish position,
+  -- and neither changes for the life of the installation except on failure or
+  -- reassignment. Both stay NULL until deployed; assign_devices.sql sets them.
+  --
+  --   location   D = Darshanarthi, M = Mahatma, T = Tiffin, R = reserved/future
+  --   food_slot  1-8, the dish position on the station
+  --
+  -- NOTE: there is deliberately NO unique index on (location, food_slot).
+  -- Darshanarthi has THREE counters serving each dish position, so three stacks
+  -- share a slot. That inverts the primary dashboard number: remaining stock for
+  -- a dish is the SUM of stack_count across the devices sharing the slot, not any
+  -- one device's count. Reading a single device and calling it "Rice remaining"
+  -- under-reports 3x on exactly the busiest positions in the hall. See
+  -- public.slot_overview, which computes that sum in one place.
+  location    text     check (location in ('D','M','T','R')),
+  food_slot   smallint check (food_slot between 1 and 8),
 
-  -- Free text, set from the front-end. Not the identity -- device_id is.
+  -- Free text, set from the front-end. Not the identity -- device_id is. Names
+  -- the PHYSICAL position, never the dish: what sits in slot 3 changes with the
+  -- meal, so a label saying "Rice" would be wrong by lunchtime and would compete
+  -- with meal_food_mapping as a source of truth.
   label       text,
-  location    text,
 
   timezone    text not null default 'Asia/Kolkata',
   last_mac    text,
   created_at  timestamptz not null default now()
 );
 
--- One device per serving position. Partial, so any number of unassigned spares
--- (area and item_slot both NULL) coexist without colliding.
---
--- This assumes ONE station per area. If an area ever needs several stations
--- each with their own item 1-5, drop this index and add a station column --
--- 3 areas x 5 items is 15 positions against a 32-device fleet, so the surplus
--- is either spares or expansion, and only deployment will settle which.
-create unique index devices_position_idx
-  on public.devices (area, item_slot)
-  where area is not null and item_slot is not null;
+comment on column public.devices.location is
+  'Serving area: D Darshanarthi, M Mahatma, T Tiffin, R reserved/future. '
+  'NULL until deployed.';
 
-comment on column public.devices.item_slot is
-  'Physical slot label on the station, 1-5. What FOOD occupies a slot changes '
-  'per meal (breakfast/lunch/dinner) and is configured in the front-end -- the '
-  'slot number is the fixed physical position, not the dish.';
+comment on column public.devices.food_slot is
+  'Dish position on the station, 1-8. NOT unique -- several stacks may serve one '
+  'slot, so remaining stock for a dish is the SUM over the devices sharing it. '
+  'What FOOD occupies a slot changes per meal and lives in meal_food_mapping; '
+  'the slot number is the fixed physical position, not the dish.';
 
 comment on table public.devices is
   'Installation registry, created by humans only. Registering a device here '
@@ -361,13 +370,150 @@ create or replace function public.in_service_window(
     from applicable a;
 $$;
 
+-- Which meal is it now? Derived from service_windows -- the same rows that drive
+-- `offline` -- so there is one definition of when lunch is. Those labels are
+-- lowercase ('lunch') and meal_type is capitalised ('Lunch'), so initcap()
+-- bridges them. Reads only the fleet-wide rows: "which meal is it" is a property
+-- of the site, not of one unit.
+--
+-- Returns NULL outside every window, which is the correct answer. There is no
+-- current meal at 3pm, and the UI must show last-known rather than invent one.
+create or replace function public.current_meal_type(
+  tz    text        default 'Asia/Kolkata',
+  at_ts timestamptz default now()
+) returns text language sql stable set search_path = '' as $$
+  select initcap(w.label)
+    from public.service_windows w
+   where w.device_id is null
+     and (at_ts at time zone coalesce(tz, 'UTC'))::time
+           between w.starts_at and w.ends_at
+   order by w.starts_at
+   limit 1
+$$;
+
+-- The service date in LOCAL terms. Not now()::date -- that is the server's date,
+-- and a 21:00 dinner in Asia/Kolkata is already the next UTC day, so the evening
+-- meal would be filed against tomorrow.
+create or replace function public.current_meal_date(
+  tz    text        default 'Asia/Kolkata',
+  at_ts timestamptz default now()
+) returns date language sql stable set search_path = '' as $$
+  select (at_ts at time zone coalesce(tz, 'UTC'))::date
+$$;
+
 -- ---------------------------------------------------------------------
--- 6. Row-level security
+-- 6. meal_food_mapping -- what each slot serves, per meal per day.
+--
+-- Two things change at completely different rates, so they are stored apart:
+-- where a device IS (rare, on hardware moves) lives on devices; what its slot
+-- SERVES changes three times a day and lives here. DEVICES NEVER STORE FOOD
+-- NAMES -- a device stores a slot number, and the dashboard resolves
+-- device -> location + food_slot -> this table -> food_name.
+--
+-- Keyed by meal_date rather than holding only the current menu, so history stays
+-- attributable: a past bowl count can be joined to the dish that was actually in
+-- that slot at the time, answering "how much dal did we get through last
+-- Tuesday". Storing only the present would make every historical count
+-- unattributable the moment the menu rotated, and that is NOT recoverable after
+-- the fact -- which is why the date is in the key rather than bolted on later.
 -- ---------------------------------------------------------------------
-alter table public.devices         enable row level security;
-alter table public.device_status   enable row level security;
-alter table public.status_events   enable row level security;
-alter table public.service_windows enable row level security;
+create table public.meal_food_mapping (
+  -- Surrogate key alongside the natural one. Redundant, deliberately: PostgREST
+  -- and most client tooling want a single-column handle for an update or delete,
+  -- and rebuilding it from four columns at every call site is worse.
+  id         bigint generated always as identity,
+
+  location   text     not null check (location in ('D','M','T','R')),
+  meal_type  text     not null check (meal_type in ('Breakfast','Lunch','Dinner')),
+  meal_date  date     not null,
+  food_slot  smallint not null check (food_slot between 1 and 8),
+
+  -- A blank name is not a mapping. Without this, an admin page that submits empty
+  -- inputs for untouched slots fills the table with rows that render as an
+  -- unnamed dish rather than as no dish at all. Clearing a slot is a DELETE.
+  food_name  text     not null check (length(btrim(food_name)) > 0),
+
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+
+  constraint meal_food_mapping_pk
+    primary key (location, meal_date, meal_type, food_slot),
+  constraint meal_food_mapping_id_key unique (id)
+);
+
+-- Answers both "what is in this slot right now" and "what was in it then" -- the
+-- lookup every dashboard render makes.
+create index meal_food_mapping_lookup_idx
+  on public.meal_food_mapping (location, meal_date desc, meal_type);
+
+create or replace function public.tg_meal_food_mapping_touch()
+returns trigger language plpgsql set search_path = '' as $$
+begin
+  new.updated_at := now();
+  -- created_at is immutable: an UPDATE must not rewrite when the row first
+  -- appeared, or the column has no audit value.
+  new.created_at := old.created_at;
+  return new;
+end $$;
+
+create trigger meal_food_mapping_touch
+  before update on public.meal_food_mapping
+  for each row execute function public.tg_meal_food_mapping_touch();
+
+-- Preload a mapping from the most recent previous meal of the same type and
+-- location, so an admin edits differences instead of retyping five dishes.
+-- Today's Lunch inherits yesterday's Lunch; tomorrow's Breakfast inherits
+-- today's. Nothing at all if there is no history -- the UI starts empty.
+--
+-- `is_saved` is why this is a function and not a plain query, and the UI MUST act
+-- on it. A preloaded form is pixel-identical to a saved one, so without the flag
+-- an admin who opens tomorrow's Lunch, agrees with every inherited dish and
+-- navigates away would reasonably believe the menu was recorded -- and no row
+-- would exist. `source_date` carries the "carried over from 24 Jul" line.
+create or replace function public.meal_mapping_preload(
+  p_location  text,
+  p_meal_type text,
+  p_meal_date date
+) returns table (
+  food_slot   smallint,
+  food_name   text,
+  source_date date,
+  is_saved    boolean
+) language sql stable set search_path = '' as $$
+  with exact as (
+    select m.food_slot, m.food_name, m.meal_date as source_date, true as is_saved
+      from public.meal_food_mapping m
+     where m.location  = p_location
+       and m.meal_type = p_meal_type
+       and m.meal_date = p_meal_date
+  ),
+  previous as (
+    select m.food_slot, m.food_name, m.meal_date as source_date, false as is_saved
+      from public.meal_food_mapping m
+     where m.location  = p_location
+       and m.meal_type = p_meal_type
+       and m.meal_date = (
+         select max(m2.meal_date)
+           from public.meal_food_mapping m2
+          where m2.location  = p_location
+            and m2.meal_type = p_meal_type
+            and m2.meal_date < p_meal_date
+       )
+  )
+  select * from exact
+  union all
+  select * from previous where not exists (select 1 from exact)
+  order by food_slot
+$$;
+
+-- ---------------------------------------------------------------------
+-- 7. Row-level security
+-- ---------------------------------------------------------------------
+alter table public.devices           enable row level security;
+alter table public.device_status     enable row level security;
+alter table public.status_events     enable row level security;
+alter table public.service_windows   enable row level security;
+alter table public.meal_food_mapping enable row level security;
 
 -- devices: no anon policy at all, so anon is denied everything. The foreign
 -- keys from the other tables still work -- referential integrity checks
@@ -375,10 +521,17 @@ alter table public.service_windows enable row level security;
 create policy devices_select_staff on public.devices
   for select to authenticated using (true);
 
--- The front-end configuration page assigns area, item_slot and label. Devices
--- never touch this table -- anon has no policy here at all.
+-- The front-end configuration page assigns location, food_slot and label.
+-- Devices never touch this table -- anon has no policy here at all.
 create policy devices_update_staff on public.devices
   for update to authenticated using (true) with check (true);
+
+-- meal_food_mapping: staff-only, full CRUD. Devices get NOTHING here, and not by
+-- omission -- a device stores a slot number and never learns or needs the menu,
+-- so granting anon access would hand every field unit the whole site's
+-- configuration for no benefit.
+create policy meal_food_mapping_rw_staff on public.meal_food_mapping
+  for all to authenticated using (true) with check (true);
 
 -- device_status: the device UPDATEs only -- there is no INSERT policy because
 -- it never inserts, the row having been created when the device was registered.
@@ -411,15 +564,16 @@ create policy service_windows_select_staff on public.service_windows
   for select to authenticated using (true);
 
 -- ---------------------------------------------------------------------
--- 7. GRANTs
+-- 8. GRANTs
 --    Policies alone are NOT sufficient, and Supabase starts every new public
 --    table with ALL granted to anon via ALTER DEFAULT PRIVILEGES. Revoke
 --    first; missing this is the easiest way to believe you have RLS and not.
 -- ---------------------------------------------------------------------
-revoke all on public.devices         from anon, authenticated, public;
-revoke all on public.device_status   from anon, authenticated, public;
-revoke all on public.status_events   from anon, authenticated, public;
-revoke all on public.service_windows from anon, authenticated, public;
+revoke all on public.devices           from anon, authenticated, public;
+revoke all on public.device_status     from anon, authenticated, public;
+revoke all on public.status_events     from anon, authenticated, public;
+revoke all on public.service_windows   from anon, authenticated, public;
+revoke all on public.meal_food_mapping from anon, authenticated, public;
 
 -- Device write path.
 --
@@ -448,30 +602,51 @@ grant select on public.devices, public.device_status, public.status_events,
 -- Front-end configuration page. device_id is excluded on purpose: it is the
 -- installation's identity and the key every history row hangs off, so it must
 -- not be editable from a UI.
-grant update (area, item_slot, label, location, timezone)
+grant update (location, food_slot, label, timezone)
   on public.devices to authenticated;
+
+-- Admin page for the menu. Full CRUD, because clearing a slot is a DELETE rather
+-- than an empty name -- "no dish here" and "a dish with no name" are different,
+-- and only one of them should render.
+--
+-- The identity sequence needs no grant: `generated always as identity` skips the
+-- sequence ACL check, and the id cannot be supplied by a client.
+grant select, insert, update, delete on public.meal_food_mapping to authenticated;
 
 revoke all on function public.tg_device_status_stamp()   from public, anon, authenticated;
 revoke all on function public.tg_status_events_stamp()   from public, anon, authenticated;
 revoke all on function public.tg_devices_create_status() from public, anon, authenticated;
+revoke all on function public.tg_meal_food_mapping_touch() from public, anon, authenticated;
 revoke all on function public.in_service_window(timestamptz, text, text, interval)
   from public, anon;
+revoke all on function public.current_meal_type(text, timestamptz) from public, anon;
+revoke all on function public.current_meal_date(text, timestamptz) from public, anon;
+revoke all on function public.meal_mapping_preload(text, text, date) from public, anon;
 grant execute on function public.in_service_window(timestamptz, text, text, interval)
   to authenticated;
+grant execute on function public.current_meal_type(text, timestamptz) to authenticated;
+grant execute on function public.current_meal_date(text, timestamptz) to authenticated;
+grant execute on function public.meal_mapping_preload(text, text, date) to authenticated;
 
 -- ---------------------------------------------------------------------
--- 8. Dashboard view.
---    security_invoker is mandatory: without it the view runs as its owner and
---    silently bypasses every policy above.
+-- 9. Dashboard views.
+--    security_invoker is mandatory on both: without it a view runs as its owner
+--    and silently bypasses every policy above.
 -- ---------------------------------------------------------------------
 create view public.device_overview
 with (security_invoker = true) as
 select d.device_id,
-       d.area,
-       d.item_slot,
-       d.label,
        d.location,
+       d.food_slot,
+       d.label,
        d.timezone,
+
+       -- What this device's slot is serving RIGHT NOW. NULL outside service
+       -- hours, or when nobody has entered a mapping -- both mean "no current
+       -- dish", which is not the same as a dish with no name.
+       m.food_name                          as current_food,
+       public.current_meal_type(d.timezone) as current_meal,
+
        s.reported,
        s.updated_at,
        now() - s.updated_at as stale_for,
@@ -500,22 +675,83 @@ select d.device_id,
        s.stack_count, s.stack_status, s.levels,
        s.sensors_online, s.battery_mv, s.battery_level, s.charging,
        s.uptime_s, s.firmware, s.mac
-from public.devices d
-left join public.device_status s using (device_id);
+  from public.devices d
+  left join public.device_status s using (device_id)
+  left join public.meal_food_mapping m
+         on m.location  = d.location
+        and m.food_slot = d.food_slot
+        and m.meal_date = public.current_meal_date(d.timezone)
+        and m.meal_type = public.current_meal_type(d.timezone);
+
+-- Per-DISH stock -- the number the kitchen in-charge actually wants, and the
+-- primary screen's source.
+--
+-- This view exists because (location, food_slot) is not unique: Darshanarthi runs
+-- THREE counters per dish position, so remaining rice is the sum of three stacks.
+-- Aggregating in the client would put the same arithmetic AND the same trust rules
+-- into every screen that shows stock, and they would diverge.
+--
+-- Quantity is kept separate from trust deliberately. bowls_trusted counts only
+-- devices reporting 'ok'; a degraded device's count is a lower bound and a
+-- discontiguous one is not a count at all, so folding them into the total would
+-- silently overstate confidence. The flags say what is wrong; the number says
+-- what can be relied on.
+create view public.slot_overview
+with (security_invoker = true) as
+select d.location,
+       d.food_slot,
+       max(m.food_name)                                        as current_food,
+       public.current_meal_type(max(d.timezone))               as current_meal,
+       count(*)                                                as devices,
+       count(*) filter (where coalesce(s.reported, false))     as devices_reported,
+
+       -- Ceiling for this slot, so a progress bar need not hardcode one. If a
+       -- fourth stack joins Darshanarthi slot 1 the achievable total rises, and a
+       -- UI with "max 12" baked in would misreport the busiest position in the
+       -- hall.
+       (count(*) * 4)::bigint                                  as bowls_capacity,
+
+       -- The trustworthy total. NULL, not 0, when no device reported: no data is
+       -- not an empty counter, and the two send staff to do opposite things.
+       sum(s.stack_count) filter (where s.stack_status = 'ok') as bowls_trusted,
+       sum(s.stack_count)                                      as bowls_reported,
+
+       bool_or(s.stack_status = 'discontiguous')               as any_fault,
+       bool_or(s.stack_status = 'degraded')                    as any_degraded,
+       bool_or(s.battery_level in ('low','critical'))          as any_battery_warn,
+       bool_or(coalesce(s.reported, false)
+               and public.in_service_window(now(), d.timezone, d.device_id)
+               and s.updated_at < now() - interval '5 minutes') as any_offline,
+       min(s.updated_at)                                       as oldest_update
+  from public.devices d
+  left join public.device_status s using (device_id)
+  left join public.meal_food_mapping m
+         on m.location  = d.location
+        and m.food_slot = d.food_slot
+        and m.meal_date = public.current_meal_date(d.timezone)
+        and m.meal_type = public.current_meal_type(d.timezone)
+ where d.location is not null
+   and d.food_slot is not null
+ group by d.location, d.food_slot;
 
 revoke all on public.device_overview from anon, authenticated, public;
+revoke all on public.slot_overview   from anon, authenticated, public;
 grant select on public.device_overview to authenticated;
+grant select on public.slot_overview   to authenticated;
 
 commit;
 
 -- ---------------------------------------------------------------------
--- 9. Register your devices. The status row is created automatically.
+-- 10. Next steps. Run these as separate files, in this order:
+--       register_devices.sql    BWL-001 .. BWL-032
+--       assign_devices.sql      the permanent location/food_slot assignment
+--       seed_meal_mapping.sql   sample menus, for the front-end test bed
+--       reset_spares.sql        restores awaiting_deployment for the reserved 8
+--       smoke_test.sql          14 assertions; expect ALL PASS
 -- ---------------------------------------------------------------------
--- insert into public.devices (device_id, label, location)
--- values ('BWL-001', 'bench rig', 'workshop');
 
 -- ---------------------------------------------------------------------
--- 10. Retention (optional; enable pg_cron under Database > Extensions).
+-- 11. Retention (optional; enable pg_cron under Database > Extensions).
 --     ~30 devices x ~50 changes/day is roughly 550k rows/year, ~170 MB.
 -- ---------------------------------------------------------------------
 -- select cron.schedule('bowlstack-retention', '17 3 * * *',

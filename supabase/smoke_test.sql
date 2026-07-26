@@ -38,8 +38,11 @@ begin
   delete from public.device_status where device_id = DEV;
   delete from public.devices       where device_id = DEV;
 
-  insert into public.devices (device_id, label, location)
-  values (DEV, 'smoke test', 'transient');
+  -- 'R' (reserved) with no food_slot: a transient test device must not claim a
+  -- real serving position, and location is now a D/M/T/R enum rather than the
+  -- free text it used to be -- inserting 'transient' here would fail the CHECK.
+  insert into public.devices (device_id, label, location, food_slot)
+  values (DEV, 'smoke test', 'R', null);
 
   ------------------------------------------------------------------
   -- 0. RLS must be on. The GRANTs alone would still deny reads, but that is
@@ -49,7 +52,8 @@ begin
   select bool_and(c.relrowsecurity) into v_rls
     from pg_class c join pg_namespace nsp on nsp.oid = c.relnamespace
    where nsp.nspname = 'public'
-     and c.relname in ('devices','device_status','status_events','service_windows');
+     and c.relname in ('devices','device_status','status_events','service_windows',
+                       'meal_food_mapping');
 
   res := res || jsonb_build_object('n',0,
            'r', case when v_rls then 'PASS' else 'FAIL' end,

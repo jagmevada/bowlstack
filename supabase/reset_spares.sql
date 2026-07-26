@@ -1,7 +1,7 @@
 -- =====================================================================
 --  Reset the UNDEPLOYED units back to "never heard from"
 --
---  Run as owner, after deploy_devices.sql. Idempotent. Safe to re-run.
+--  Run as owner, after assign_devices.sql. Idempotent. Safe to re-run.
 --
 --  WHY THIS IS NEEDED
 --  ------------------
@@ -54,7 +54,8 @@ delete from public.device_status
 -- column NULL. Matches exactly what tg_devices_create_status() produces when a
 -- unit is first registered.
 insert into public.device_status (device_id)
-select device_id from public.devices where area is null
+select device_id from public.devices
+ where location = 'R' or location is null
  on conflict (device_id) do nothing;
 
 commit;

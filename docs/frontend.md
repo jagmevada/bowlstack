@@ -21,8 +21,9 @@ busy service, not an analytics dashboard. Glanceability beats completeness.
 
 ### Stock view — the primary screen
 
-Live bowl counts grouped by **area** (`D` Darshanarthi, `T` Tiffin,
-`M` Mahtma), ordered by `item_slot` 1–5.
+Live bowl counts grouped by **location** (`D` Darshanarthi, `M` Mahatma,
+`T` Tiffin), ordered by `food_slot`. Read `slot_overview`: several stacks serve one
+dish position, so the number is their sum.
 
 Design implications worth deciding early:
 
@@ -41,32 +42,43 @@ surface the one station that needs attention, not to enumerate 32 healthy ones.
 
 ### Configuration page
 
-Assigns `area`, `item_slot`, `label` per device, and — the part not yet
+Assigns `location`, `food_slot`, `label` per device, and — the part not yet
 designed — maps each slot to a food per meal.
 
 ---
 
-## 3. The slot → food mapping (not yet modelled)
+## 3. The slot → food mapping — now modelled
 
-`item_slot` is a **fixed physical position**, 1–5, painted on the station. What
+`food_slot` is a **fixed physical position**, 1–8, painted on the station. What
 food occupies it **changes with the meal**: breakfast, lunch and dinner rotate
 through Dal/Kadhi, Rice, Curry, Roti and others.
 
-This mapping is deliberately **not in the database yet**. Modelling it as a
-column on `devices` would have been wrong within a day, and the shape depends on
-questions only the front-end design answers:
+This is now in the database as `meal_food_mapping`, keyed
+`(location, meal_date, meal_type, food_slot)`. Full contract, TypeScript
+interfaces and queries: **[meal_mapping.md](meal_mapping.md)**.
 
-- Is the mapping per-area or fleet-wide?
-- Does it vary by day as well as by meal?
-- Is it edited live during service, or set in advance?
-- Does history need to record what a slot *contained* at the time, so past bowl
-  counts can be attributed to a dish?
+The open question this section used to pose has been answered, and it was the one
+that mattered:
 
-That last one matters most: if yes, the mapping must be **temporal** — a table
-keyed by `(area, item_slot, meal, effective_from)` — and `status_events` becomes
-joinable to it. If no, a single current-mapping table is enough. Deciding this
-after the fact would mean losing the attribution for everything already
-recorded.
+> Does history need to record what a slot *contained* at the time, so past bowl
+> counts can be attributed to a dish?
+
+**Yes** — so the mapping is temporal, keyed by `meal_date`. `status_events` joins
+to it through the device's location and slot, which makes *"how much dal did we get
+through last Tuesday"* answerable. Had it stored only the current menu, every
+historical count would have become unattributable the moment the menu rotated, and
+that is not recoverable retrospectively.
+
+Still to decide, and now purely front-end questions:
+
+- Is the menu edited live during service, or set in advance?
+- Should an admin be able to copy a whole day's menus to another day, rather than
+  meal by meal?
+
+The **admin UI (Part 3) is not built** — deferred until front-end development
+starts. The backend it needs is complete, including the preload behaviour that
+inherits the previous same-meal menu so an admin edits differences instead of
+retyping.
 
 ---
 
@@ -84,7 +96,8 @@ are the ones most likely to be got wrong by reasonable assumption.
 | "one change = one arrival" | Writes are batched at most every **5 s**. Rows sharing an arrival instant can describe moments up to 5 s apart — order by `recorded_at`. |
 | "`recorded_at` ≈ `received_at`" | Offline events are **backdated** from a device-reported age. A large gap is correct. |
 | "A device is a board" | A device is an **installation**. A replaced board keeps the `device_id`; only `mac` changes. |
-| "`item_slot` is a dish" | It is a **physical position**. The dish changes per meal. |
+| "`food_slot` is a dish" | It is a **physical position**. The dish changes per meal — join `meal_food_mapping`. |
+| "one device per slot" | Darshanarthi runs **three** counters per position. Stock is the **sum** — read `slot_overview`. |
 
 ---
 
@@ -93,7 +106,7 @@ are the ones most likely to be got wrong by reasonable assumption.
 | Role | Access |
 | --- | --- |
 | anonymous | **nothing** |
-| `authenticated` | SELECT everything; UPDATE `area`, `item_slot`, `label`, `location`, `timezone` on `devices` |
+| `authenticated` | SELECT everything; UPDATE `location`, `food_slot`, `label`, `timezone` on `devices`; full CRUD on `meal_food_mapping` |
 | device (`anon` key) | write-only: UPDATE its own `device_status`, INSERT `status_events` |
 
 `device_id` is not updatable from the UI — it is the installation's identity and

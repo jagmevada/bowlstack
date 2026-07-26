@@ -18,8 +18,8 @@ can, and if the schema rejects it the fleet would have been rejected too. Nothin
 here uses the service_role key -- that would prove nothing.
 
 It does not write to `devices`. The registry is human-managed and anon has no
-grant on it, correctly. Deployment (area / item_slot) is applied separately by
-an owner -- see supabase/deploy_devices.sql.
+grant on it, correctly. Deployment (location / food_slot) is applied separately by
+an owner -- see supabase/assign_devices.sql.
 
 CLOCKS
 ------

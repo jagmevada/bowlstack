@@ -1,14 +1,9 @@
 -- =====================================================================
 --  Permanent device assignment -- location + food_slot for BWL-001..032
 --
---  Run as owner, AFTER migrations/001_location_food_slot.sql. IDEMPOTENT: it
---  states the intended assignment absolutely rather than mutating what is there,
---  so re-running converges on the same result and repairs any drift.
---
---  Replaces the earlier deploy_devices.sql, which assigned 15 units across
---  3 areas x 5 slots on the assumption of ONE stack per position. That is not the
---  real deployment: Darshanarthi slot 1 has three stacks. Anything still holding
---  the old mapping should re-run this.
+--  Run as owner, after schema.sql and register_devices.sql. IDEMPOTENT: it states
+--  the intended assignment absolutely rather than mutating what is there, so
+--  re-running converges on the same result and repairs any drift.
 --
 --  ASSIGNMENT IS PERMANENT, MENU IS NOT
 --  ------------------------------------

@@ -41,22 +41,27 @@ serving area plus device health.
 
 ## Deployment
 
-**32 units**, registered once as `BWL-001` … `BWL-032`. Each is deployed to a
+**32 units**, registered once as `BWL-001` … `BWL-032`. Each is assigned a
 **serving position** of two parts:
 
 | Field | Meaning |
 | --- | --- |
-| `area` | `D` Darshanarthi, `T` Tiffin, `M` Mahtma |
-| `item_slot` | 1–5, the physical label on the station |
+| `location` | `D` Darshanarthi, `M` Mahatma, `T` Tiffin, `R` reserved/future |
+| `food_slot` | 1–8, the dish position on the station |
 
-A unit is installed in one area, physically labelled with one slot, and neither
-changes for the life of the installation — only on failure or reassignment. Both
-stay `NULL` until deployment; the front-end assigns them.
+**24 deployed across 15 dish positions, 8 reserved.** A unit stays where it is for
+the life of the installation — changing only on failure or reassignment.
 
-> **`item_slot` is a position, not a dish.** Which food occupies slot 3 changes
-> with the meal. The slot number is the fixed physical label; the food mapping
-> is front-end configuration and is deliberately not modelled in the database
-> yet — see [docs/frontend.md](docs/frontend.md).
+> **Several stacks share one dish position.** Darshanarthi runs three counters per
+> slot, so remaining stock for a dish is the **sum** of their bowl counts, not any
+> one device's. `(location, food_slot)` is deliberately not unique, and
+> `slot_overview` computes the sum — reading a single device would under-report 3×
+> on the busiest positions.
+
+> **`food_slot` is a position, not a dish.** Which food occupies slot 3 changes
+> with the meal, so it lives in `meal_food_mapping`, keyed by date so past bowl
+> counts stay attributable to the dish that was actually there —
+> see [docs/meal_mapping.md](docs/meal_mapping.md).
 
 Devices are powered **only during meal service** — breakfast 06:00–09:00, lunch
 11:30–14:00, dinner 18:30–21:00 — and dark the other ~16 hours. Absence of data
@@ -103,6 +108,9 @@ per-device JWTs to replace the shared anon key.
 ```
 supabase/schema.sql            -- drops and rebuilds; idempotent
 supabase/register_devices.sql  -- BWL-001 .. BWL-032
+supabase/assign_devices.sql    -- permanent location/food_slot assignment
+supabase/seed_meal_mapping.sql -- sample menus, for the front-end test bed
+supabase/reset_spares.sql      -- restores awaiting_deployment for the reserved 8
 supabase/smoke_test.sql        -- 14 assertions; expect ALL PASS
 ```
 

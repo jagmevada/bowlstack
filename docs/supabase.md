@@ -43,14 +43,24 @@ plain `UPDATE` instead of an upsert.
 | Column | Notes |
 | --- | --- |
 | `device_id` | PK, `^[A-Za-z0-9_-]{3,32}$` — the installation's identity |
-| `area` | `D` Darshanarthi, `T` Tiffin, `M` Mahtma |
-| `item_slot` | 1–5, the physical label on the station |
-| `label`, `location` | free text, set from the front-end |
+| `location` | `D` Darshanarthi, `M` Mahatma, `T` Tiffin, `R` reserved/future |
+| `food_slot` | 1–8, the dish position on the station |
+| `label` | free text, names the **position** — never the dish |
 | `timezone` | IANA zone, default `Asia/Kolkata` |
 | `last_mac`, `created_at` | |
 
-A partial unique index enforces one device per `(area, item_slot)`, partial so
-unassigned spares coexist.
+**`(location, food_slot)` is deliberately not unique.** Darshanarthi runs three
+counters per dish position, so three stacks share a slot and remaining stock for a
+dish is the **sum** across them — see `slot_overview`. An earlier version enforced
+uniqueness on the assumption of one stack per position; that was wrong about the
+building.
+
+### `meal_food_mapping` — what each slot serves, per meal per day
+
+PK `(location, meal_date, meal_type, food_slot)`. Devices never store food names;
+a device stores a slot number and the dashboard resolves the dish. Keyed by date so
+a past bowl count stays joinable to the dish that was actually in that slot. Full
+detail and the front-end contract: [meal_mapping.md](meal_mapping.md).
 
 ### `device_status` — current state, one row per device
 

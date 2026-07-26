@@ -24,26 +24,19 @@ device → location + food_slot → meal_food_mapping(location, meal_date, meal_
 ## 1. Apply order
 
 ```
-supabase/schema.sql                            -- fresh installs only; drops everything
-supabase/migrations/001_location_food_slot.sql -- REQUIRED, idempotent
-supabase/register_devices.sql                  -- BWL-001 .. BWL-032
-supabase/assign_devices.sql                    -- the permanent assignment
-supabase/seed_meal_mapping.sql                 -- sample menus, for the test bed
-supabase/reset_spares.sql                      -- restores awaiting_deployment
+supabase/schema.sql            -- DROPS EVERYTHING, then rebuilds
+supabase/register_devices.sql  -- BWL-001 .. BWL-032
+supabase/assign_devices.sql    -- the permanent assignment
+supabase/seed_meal_mapping.sql -- sample menus, for the front-end test bed
+supabase/reset_spares.sql      -- restores awaiting_deployment for the reserved 8
+supabase/smoke_test.sql        -- 14 assertions; expect ALL PASS
 ```
 
-**On the existing database, start at the migration** — `schema.sql` drops
-everything, including the 4300 backfilled events.
-
-The new objects live only in the migration, not copied into `schema.sql`. Two
-definitions of one table drift, and the copy that stays right is the one nobody
-runs. The migration is idempotent, so it is correct on a fresh database and an
-existing one alike.
-
-It runs **before** registration because it is pure DDL and needs no rows — and
-because `register_devices.sql` is the file most likely to be re-run later, when
-hardware is added. Going second would leave it naming columns that no longer
-exist.
+`schema.sql` is the **complete** schema — there is no migration to apply after it.
+An earlier version of this work shipped one, because there was live telemetry to
+preserve; the database has since been rebuilt from scratch, so the assignment
+model and `meal_food_mapping` are defined in `schema.sql` directly. One definition
+rather than a base plus a fix-up, which is one fewer thing to drift.
 
 ## 2. The assignment
 

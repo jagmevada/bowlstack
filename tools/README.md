@@ -33,15 +33,21 @@ correctly has no grant on it.
 ### Setup
 
 ```
-supabase/schema.sql             -- once
-supabase/register_devices.sql   -- once, BWL-001 .. BWL-032
-supabase/deploy_devices.sql     -- assigns 15 of them to serving positions
+supabase/schema.sql             -- once; drops and rebuilds
+supabase/register_devices.sql   -- BWL-001 .. BWL-032
+supabase/assign_devices.sql     -- permanent location/food_slot assignment
+supabase/seed_meal_mapping.sql  -- sample menus, so slots show dish names
+supabase/reset_spares.sql       -- restores awaiting_deployment
 ```
 
-`deploy_devices.sql` matters for front-end work: with `area` and `item_slot`
-NULL, the stock view has nothing to group by. It deploys 15 and leaves 17 as
-spares — see that file for why the spares are the point rather than an
-oversight.
+`assign_devices.sql` matters for front-end work: with `location` and `food_slot`
+NULL, the stock view has nothing to group by. It deploys 24 devices across 15 dish
+positions and leaves 8 reserved (`location = 'R'`) — the reserved units are the
+point rather than an oversight, since `awaiting_deployment` is only testable while
+something has genuinely never reported.
+
+> **Several stacks share a dish position.** Darshanarthi runs three counters per
+> slot, so stock is the **sum** — read `slot_overview`, not `device_overview`.
 
 Credentials come from the environment, or from `include/secret.h` (gitignored)
 as a convenience:
@@ -112,7 +118,8 @@ thing a real one does.
 ### Reading it back
 
 ```sql
-select * from public.device_overview order by area, item_slot;
+select * from public.slot_overview   order by location, food_slot;  -- stock per dish
+select * from public.device_overview order by location, food_slot;  -- per device
 ```
 
 Or from the front-end, per

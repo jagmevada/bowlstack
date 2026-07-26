@@ -26,10 +26,9 @@ begin;
 -- nobody has built yet.
 --
 -- Only device_id and timezone are named. Listing the assignment columns would
--- couple this file to their names, and RUN ORDER PUTS THE MIGRATION FIRST -- so
--- by the time this executes they are `location` and `food_slot`, not `area` and
--- `item_slot`. Naming only what is needed keeps this correct either way, which
--- matters because this is the file someone re-runs after adding hardware.
+-- couple this file to their names for no benefit, and this is the file someone
+-- re-runs after adding hardware -- long after anyone remembers what those columns
+-- are called.
 insert into public.devices (device_id, timezone)
 select 'BWL-' || lpad(n::text, 3, '0'),
        'Asia/Kolkata'     -- change per site if the fleet ever spans zones
