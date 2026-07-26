@@ -230,11 +230,91 @@ contiguity rule, bowl count with fault status, runtime sensor-health detection
 with backoff recovery, and the full device report (identity, firmware, MAC,
 uptime, battery, charging, per-sensor health, per-level state, stack count).
 
-**Phase 3 — telemetry (next).** POST to **Supabase**, keyed by device ID: every
-**10 s** periodically, and **immediately** on change. The report cadence and
-change detection already run — `device_status::sample()` builds the payload and
-`device_status::differs()` answers "send now?"; only WiFi and the HTTP client
-are missing. Credentials go in `include/secrets.h`, already gitignored.
+**Phase 3 — telemetry (done).** WiFi (`net`) and the Supabase uplink
+(`telemetry`), with the schema in `supabase/`. Credentials live in
+`include/secret.h`, gitignored via `include/secret*.h`.
+
+## Telemetry
+
+### Service hours
+
+Devices are powered **only during meal service** — breakfast 06:00–09:00, lunch
+11:30–14:00, dinner 18:30–21:00 — and are dark the other ~16 hours, because
+outside those times there is nothing to measure.
+
+This is why liveness cannot be "has it reported recently". Doing that would
+raise a false alarm on every healthy device for two thirds of the day and bury
+a genuinely dead unit among 30 of them. The device has no RTC and cannot know
+the time, so the logic is entirely server-side
+(`supabase/migration_002_service_windows.sql`): `device_overview.offline` is
+true only when a device *should* be awake and is not, and `data_is_stale`
+marks the numbers as last-known rather than live when outside service hours.
+
+Windows are wall-clock and evaluated per installation via `devices.timezone`.
+Adding any `service_windows` row for a device replaces the fleet defaults for
+that device.
+
+### Write model
+
+Current state is **upserted** (one row per device, no growth); history is
+**appended only on a real change**. Appending every report would be roughly
+259k rows/day across 30 devices at a 10 s cadence — enough to exhaust the free
+tier in about ten days. The heartbeat is **60 s** and only proves liveness,
+since `device_status::differs()` already forces an immediate post on any real
+change.
+
+### Clock-free timestamps
+
+Events queued while offline keep correct times without an RTC or NTP. Each
+entry stores `millis()` when queued; at send time the device reports `age_ms`,
+and a `BEFORE INSERT` trigger sets `recorded_at = now() - age_ms`. The server
+clock is authoritative and the device only ever says "this happened N ms ago".
+Unsigned arithmetic makes it correct across the `millis()` wrap.
+
+`seq` increments when an event is **enqueued**, not when it is sent, so a
+dropped entry leaves a visible gap server-side instead of vanishing. Together
+with `boot_id` it also makes retries idempotent — a POST that succeeds but
+whose response is lost is a no-op on retry, not a duplicated batch.
+
+### Wire vocabulary
+
+`BowlLogic::wireName()` returns the canonical lowercase tokens, pinned by CHECK
+constraints in the schema. It is deliberately separate from `stateName()` /
+`statusName()`, which are plotter display strings — editing those for cosmetic
+reasons would otherwise reject every device's traffic at once.
+
+### Security
+
+The device holds only the anon key. RLS grants it INSERT+UPDATE on
+`device_status` and INSERT on `status_events`, with **no read path anywhere**.
+
+> Supabase grants ALL on new public tables to `anon` by default via
+> `ALTER DEFAULT PRIVILEGES`, so the schema **revokes first**. Policies alone
+> are not sufficient — that combination is the easy way to believe you have RLS
+> and not have it.
+
+The `devices` registry is invisible to the device. That works because
+referential-integrity checks bypass row security, and it doubles as a
+provisioning gate: `BWL-000` (the `version.h` default) is deliberately left
+unregistered, so a unit flashed without `-DBOWLSTACK_DEVICE_ID` is rejected
+with `23503` instead of writing into a real installation's row.
+
+Not yet done: the anon key sits in every flash image, so anyone holding it can
+write for any `device_id`. Per-device JWTs would close that while keeping
+direct table access.
+
+### Setup
+
+```
+supabase/schema.sql                      -- tables, triggers, RLS, grants
+supabase/migration_002_service_windows.sql
+supabase/smoke_test.sql                  -- run before flashing anything
+```
+
+`smoke_test.sql` prints a PASS/FAIL line per assertion and rolls back. Several
+assertions are *supposed* to fail — a device must not be able to read your
+data — so they are wrapped in exception handlers; a bare failing statement
+would abort the transaction and stop at the first one.
 
 **Final product — TCA9548A + dual redundancy.** See below. Hardware not yet in
 hand; the current dual-bus build is the interim arrangement.

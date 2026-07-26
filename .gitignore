@@ -6,6 +6,12 @@
 CAD/*
 .DS_Store
 
+# Local Claude Code settings. Untracked deliberately: the permission allowlist
+# stores the literal text of approved shell commands, so anything typed at a
+# terminal -- including a credential passed to a grep -- can end up in it.
+.claude/settings.json
+.claude/settings.local.json
+
 # Credentials -- never commit.
 # Both spellings are listed deliberately: this file previously ignored only the
 # plural, the real file was singular, and a Supabase password reached a public
