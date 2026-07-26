@@ -27,7 +27,7 @@ namespace {
 // raised because the batch is serialised into one JsonDocument, and doubling the
 // queue doubles a ~8 KB heap allocation on a device that also holds a TLS
 // session.
-const uint8_t QUEUE_LEN = 32;
+const uint8_t QUEUE_LEN = config::TELEMETRY_QUEUE_LEN;
 
 // Heartbeat. Changes post immediately, so this only proves liveness. At 10 s
 // across 30 devices the fleet would make ~7.8M requests/month, and TLS
@@ -66,45 +66,13 @@ const uint32_t AGE_MAX_MS = 604800000;
 
 const uint32_t HTTP_TIMEOUT_MS = 8000;
 
-struct QueuedEvent {
-  uint32_t atMs;  // millis() when queued; converted to age at send time
-  uint32_t seq;
-  Reason reason;
-  uint8_t stackCount;
-  StackStatus stackStatus;
-  LevelState levels[config::SENSOR_COUNT];
-  bool sensorOk[config::SENSOR_COUNT];
-  uint8_t sensorsOnline;
-  // The band, not the percentage -- and captured at enqueue time, so a buffered
-  // event replays the battery state it was recorded with rather than whatever
-  // the cell reads when the network finally comes back.
-  battery::Level batteryLevel;
-  bool charging;
-};
+// The one channel a real unit owns. QueuedEvent and Channel now live in the
+// header, because the fleet simulator holds an array of them -- see the note
+// there on why there is one implementation rather than two.
+Channel default_;
 
-QueuedEvent queue_[QUEUE_LEN];
-uint8_t head_ = 0;  // oldest
-uint8_t count_ = 0;
-
-uint32_t bootId_ = 0;
-bool lastOk_ = false;
-bool unprovisioned_ = false;
-uint32_t nextStatusMs_ = 0;
-
-// Armed only while a backoff is actually in force. Not a bare timestamp
-// compared as (int32_t)(now - 0): that inverts once millis() passes 2^31
-// (~24.9 days), which would silently halt all telemetry on a device that had
-// never failed a post.
-bool backoffActive_ = false;
-uint32_t backoffUntilMs_ = 0;
-bool statusPending_ = true;  // always report once at boot
-
-// Enforces POST_MIN_INTERVAL_MS. everPosted_ rather than a sentinel timestamp:
-// comparing against 0 would make a device booting after the millis() wrap sit
-// out a window for no reason.
-bool everPosted_ = false;
-uint32_t lastPostMs_ = 0;
-
+// Per-PROCESS, deliberately shared by every channel: one TLS session for the
+// whole device, since re-handshaking per request is what dominates egress.
 WiFiClientSecure *tls_ = nullptr;
 
 // PostgREST answers 409 for BOTH a duplicate key (23505) and a foreign-key
@@ -217,14 +185,16 @@ int request(const char *method, const char *path, const char *query,
                   err.substring(0, 180).c_str());
 
     // Extract the SQLSTATE so the caller can tell 23505 from 23503.
+    //
+    // Extracted here but ACTED ON by the caller. This function is per-process
+    // and knows nothing about channels, while "this device is not registered" is
+    // a fact about one installation -- and a batch carrying rows for several
+    // installations cannot attribute a foreign-key violation from the SQLSTATE
+    // alone. flushChannels() resolves that by re-sending one channel at a time.
     const int at = err.indexOf("\"code\":\"");
     if (at >= 0 && (int)err.length() >= at + 13) {
       err.substring(at + 8, at + 13).toCharArray(lastPgCode_, sizeof(lastPgCode_));
     }
-
-    // 23503 is a foreign-key violation: this device_id is not in `devices`.
-    // No amount of retrying fixes a provisioning gap.
-    if (strcmp(lastPgCode_, "23503") == 0) unprovisioned_ = true;
   }
 
   http.end();
@@ -237,19 +207,13 @@ int request(const char *method, const char *path, const char *query,
 // the (device_id, boot_id, seq) unique constraint: a retried batch raises
 // 23505, which means the rows are already recorded and the batch can be
 // dropped.
-bool flushEvents() {
-  if (count_ == 0) return true;
-
-  JsonDocument doc;
-  JsonArray arr = doc.to<JsonArray>();
-
-  const uint32_t now = millis();
-  for (uint8_t i = 0; i < count_; i++) {
-    const QueuedEvent &e = queue_[(head_ + i) % QUEUE_LEN];
+void appendEvents(JsonArray arr, const Channel &ch, uint32_t now) {
+  for (uint8_t i = 0; i < ch.count; i++) {
+    const QueuedEvent &e = ch.queue[(ch.head + i) % QUEUE_LEN];
     JsonObject o = arr.add<JsonObject>();
 
-    o["device_id"] = BOWLSTACK_DEVICE_ID;
-    o["boot_id"] = bootId_;
+    o["device_id"] = ch.deviceId;
+    o["boot_id"] = ch.bootId;
     o["seq"] = e.seq;
 
     // The clock-free timestamp. The device has no RTC, so it reports how long
@@ -263,6 +227,25 @@ bool flushEvents() {
     writeCommon(o, e.stackCount, e.stackStatus, e.levels, e.sensorOk,
                 e.sensorsOnline, e.batteryLevel, e.charging);
   }
+}
+
+void clearQueue(Channel &ch) {
+  ch.head = 0;
+  ch.count = 0;
+}
+
+// Flushes the queued history of `n` channels in ONE POST. n == 1 is the
+// production path; the fleet simulator passes many.
+bool flushChannels(Channel **chs, uint8_t n) {
+  uint16_t total = 0;
+  for (uint8_t i = 0; i < n; i++) total += chs[i]->count;
+  if (total == 0) return true;
+
+  JsonDocument doc;
+  JsonArray arr = doc.to<JsonArray>();
+
+  const uint32_t now = millis();
+  for (uint8_t i = 0; i < n; i++) appendEvents(arr, *chs[i], now);
 
   String body;
   serializeJson(doc, body);
@@ -271,8 +254,7 @@ bool flushEvents() {
                            "return=minimal", body);
 
   if (code >= 200 && code < 300) {
-    head_ = 0;
-    count_ = 0;
+    for (uint8_t i = 0; i < n; i++) clearQueue(*chs[i]);
     return true;
   }
 
@@ -280,39 +262,56 @@ bool flushEvents() {
   // done its job and must be dropped rather than retried forever.
   if (strcmp(lastPgCode_, "23505") == 0) {
     Serial.println("telemetry: events already recorded (23505), clearing buffer");
-    head_ = 0;
-    count_ = 0;
+    for (uint8_t i = 0; i < n; i++) clearQueue(*chs[i]);
     return true;
   }
 
-  // 23503, a foreign-key violation: the device is not registered. PostgREST
-  // reports this as 409 too, so keying off the status alone would discard the
-  // buffer here -- losing real history over a provisioning mistake that is
-  // about to be fixed. Keep it; the backoff in loop() handles the retry.
+  // 23503, a foreign-key violation: some device in this batch is not registered.
+  // PostgREST reports this as 409 too, so keying off the status alone would
+  // discard the buffer -- losing real history over a provisioning mistake that
+  // is about to be fixed. Keep it.
   if (strcmp(lastPgCode_, "23503") == 0) {
-    Serial.println("telemetry: device not registered - keeping buffered events");
-    return false;
+    if (n == 1) {
+      chs[0]->unprovisioned = true;
+      Serial.printf("telemetry: %s not registered - keeping buffered events\n",
+                    chs[0]->deviceId);
+      return false;
+    }
+    // A shared batch cannot say WHICH device_id was rejected, and marking all of
+    // them would hide a single provisioning gap behind 30 healthy devices. Re-send
+    // one at a time to identify the offender exactly. Expensive, but only in a
+    // failure case that needs a human anyway.
+    Serial.printf("telemetry: 23503 in a %u-device batch - isolating\n", n);
+    bool allOk = true;
+    for (uint8_t i = 0; i < n; i++) {
+      if (!flushChannels(&chs[i], 1)) allOk = false;
+    }
+    return allOk;
   }
 
   // Any other 4xx means the batch is malformed and will never be accepted;
   // keeping it would block the queue permanently.
   if (code >= 400 && code < 500 && code != 401 && code != 403) {
     Serial.println("telemetry: dropping unacceptable batch");
-    head_ = 0;
-    count_ = 0;
+    for (uint8_t i = 0; i < n; i++) clearQueue(*chs[i]);
   }
   return false;
 }
 
+bool flushEvents(Channel &ch) {
+  Channel *one = &ch;
+  return flushChannels(&one, 1);
+}
+
 // Current state. A plain UPDATE via PostgREST PATCH; the row is created
 // server-side when the device is registered, so no insert path is needed.
-bool patchStatus(const DeviceStatus &s) {
+bool patchStatus(Channel &ch, const DeviceStatus &s) {
   JsonDocument doc;
   JsonObject o = doc.to<JsonObject>();
 
   // No device_id in the body: it is the URL filter, and anon holds no UPDATE
   // privilege on that column.
-  o["boot_id"] = bootId_;
+  o["boot_id"] = ch.bootId;
   o["uptime_s"] = s.uptimeSec;
   writeCommon(o, s.stackCount, s.stackStatus, s.levels, s.sensorOnline,
               s.sensorsOnline, s.batteryLevel, s.charging);
@@ -332,7 +331,7 @@ bool patchStatus(const DeviceStatus &s) {
   String body;
   serializeJson(doc, body);
 
-  const String query = String("device_id=eq.") + BOWLSTACK_DEVICE_ID;
+  const String query = String("device_id=eq.") + ch.deviceId;
 
   // count=exact is what makes an unregistered device loud. A PATCH matching no
   // rows is a perfectly successful 204 -- without the count we could not tell
@@ -347,8 +346,8 @@ bool patchStatus(const DeviceStatus &s) {
   if (range.endsWith("/0")) {
     Serial.printf("telemetry: no device_status row for '%s' - register it in "
                   "the devices table\n",
-                  BOWLSTACK_DEVICE_ID);
-    unprovisioned_ = true;
+                  ch.deviceId);
+    ch.unprovisioned = true;
     return false;
   }
 
@@ -357,8 +356,17 @@ bool patchStatus(const DeviceStatus &s) {
 
 }  // namespace
 
+void openChannel(Channel &ch, const char *deviceId) {
+  ch.deviceId = deviceId;
+  // Per channel, not per process. A virtual device must look like its own
+  // installation, and boot_id is half of the idempotency key -- sharing one
+  // across 31 nodes would make (device_id, boot_id, seq) collide the moment two
+  // nodes reached the same seq.
+  ch.bootId = esp_random();
+}
+
 void begin() {
-  bootId_ = esp_random();
+  openChannel(default_, BOWLSTACK_DEVICE_ID);
 
   tls_ = new WiFiClientSecure();
   // No certificate pinning: the anon key grants write-only access with no read
@@ -368,10 +376,11 @@ void begin() {
 
   // Print the EFFECTIVE base, not the raw macro: if normalisation changed it,
   // that difference is the first thing worth seeing when requests fail.
-  Serial.printf("telemetry: boot_id=%u -> %s\n", bootId_, apiBase().c_str());
+  Serial.printf("telemetry: boot_id=%u -> %s\n", default_.bootId,
+                apiBase().c_str());
 }
 
-void enqueue(const DeviceStatus &s, Reason reason, uint32_t seq) {
+void enqueue(Channel &ch, const DeviceStatus &s, Reason reason, uint32_t seq) {
   QueuedEvent e;
   e.atMs = millis();
   e.seq = seq;
@@ -386,93 +395,108 @@ void enqueue(const DeviceStatus &s, Reason reason, uint32_t seq) {
     e.sensorOk[i] = s.sensorOnline[i];
   }
 
-  if (count_ == QUEUE_LEN) {
-    head_ = (head_ + 1) % QUEUE_LEN;  // drop oldest
-    count_--;
+  if (ch.count == QUEUE_LEN) {
+    ch.head = (ch.head + 1) % QUEUE_LEN;  // drop oldest
+    ch.count--;
   }
-  queue_[(head_ + count_) % QUEUE_LEN] = e;
-  count_++;
+  ch.queue[(ch.head + ch.count) % QUEUE_LEN] = e;
+  ch.count++;
 
-  // statusPending_ is deliberately NOT set here: enqueueing history and asking
+  // statusPending is deliberately NOT set here: enqueueing history and asking
   // for the state row to be refreshed are separate decisions, and the caller
   // makes both explicitly. loop() posts a queued batch on its own anyway, so an
   // event is never stranded by the flag being clear.
 }
 
-void requestImmediateUpsert() {
+void requestImmediateUpsert(Channel &ch) {
   // Just arms the flag. Rate limiting lives in loop(), in one place, where it
   // covers the event POST as well -- this function used to throttle here and
   // gate only the PATCH, which left the POST path unlimited and made the limit
   // ineffective against exactly the flapping it was written for.
-  statusPending_ = true;
+  ch.statusPending = true;
 }
 
-void loop(const DeviceStatus &current) {
+bool flushMany(Channel **channels, uint8_t n) {
+  return flushChannels(channels, n);
+}
+
+void loop(Channel &ch, const DeviceStatus &current) {
   if (!net::connected()) return;
 
   const uint32_t now = millis();
-  if (backoffActive_) {
-    if ((int32_t)(now - backoffUntilMs_) < 0) return;
-    backoffActive_ = false;
+  if (ch.backoffActive) {
+    if ((int32_t)(now - ch.backoffUntilMs) < 0) return;
+    ch.backoffActive = false;
   }
 
-  if (unprovisioned_) {
+  if (ch.unprovisioned) {
     // Latched: only a human inserting a `devices` row fixes this. Back off hard
     // rather than hammering the endpoint for the life of the device.
-    backoffUntilMs_ = now + UNPROVISIONED_RETRY_MS;
-    backoffActive_ = true;
-    unprovisioned_ = false;  // allow one probe per interval
-    Serial.println("telemetry: device not registered in `devices` - backing off");
+    ch.backoffUntilMs = now + UNPROVISIONED_RETRY_MS;
+    ch.backoffActive = true;
+    ch.unprovisioned = false;  // allow one probe per interval
+    Serial.printf("telemetry: %s not registered in `devices` - backing off\n",
+                  ch.deviceId);
     return;
   }
 
-  const bool due = (int32_t)(now - nextStatusMs_) >= 0;
+  const bool due = (int32_t)(now - ch.nextStatusMs) >= 0;
 
   // Nothing to say. Checked before the rate limiter so an idle device does not
   // consume its window and then delay a change that arrives a moment later.
-  if (count_ == 0 && !statusPending_ && !due) return;
+  if (ch.count == 0 && !ch.statusPending && !due) return;
 
   // The per-device floor. Unsigned subtraction, so it is correct across the
-  // millis() wrap at ~49.7 days; everPosted_ keeps the very first report
+  // millis() wrap at ~49.7 days; everPosted keeps the very first report
   // immediate instead of making a freshly booted device wait out a window it
   // has no history for.
-  if (everPosted_ && (uint32_t)(now - lastPostMs_) < POST_MIN_INTERVAL_MS) {
+  if (ch.everPosted && (uint32_t)(now - ch.lastPostMs) < POST_MIN_INTERVAL_MS) {
     return;
   }
-  lastPostMs_ = now;
-  everPosted_ = true;
+  ch.lastPostMs = now;
+  ch.everPosted = true;
 
   // History first, oldest-first, so a reconnect replays what happened while
   // offline before the current-state row is overwritten. Everything queued
   // since the last round goes in ONE batch -- that is the clubbing: the writes
   // are coalesced, the events themselves are not merged or dropped, so each
   // keeps its own recorded_at and the transition history stays intact.
-  if (count_ > 0 && !flushEvents()) {
-    backoffUntilMs_ = now + RETRY_PERIOD_MS;
-    backoffActive_ = true;
-    lastOk_ = false;
+  if (ch.count > 0 && !flushEvents(ch)) {
+    ch.backoffUntilMs = now + RETRY_PERIOD_MS;
+    ch.backoffActive = true;
+    ch.lastOk = false;
     return;
   }
 
-  if (!statusPending_ && !due) return;
+  if (!ch.statusPending && !due) return;
 
   // `current` is the caller's latest snapshot, so the state row always carries
   // the newest values regardless of how many changes were clubbed into the
   // batch above.
-  if (patchStatus(current)) {
-    statusPending_ = false;
-    nextStatusMs_ = now + STATUS_PERIOD_MS;
-    lastOk_ = true;
+  if (patchStatus(ch, current)) {
+    ch.statusPending = false;
+    ch.nextStatusMs = now + STATUS_PERIOD_MS;
+    ch.lastOk = true;
   } else {
-    backoffUntilMs_ = now + RETRY_PERIOD_MS;
-    backoffActive_ = true;
-    lastOk_ = false;
+    ch.backoffUntilMs = now + RETRY_PERIOD_MS;
+    ch.backoffActive = true;
+    ch.lastOk = false;
   }
 }
 
-uint8_t queued() { return count_; }
-uint32_t bootId() { return bootId_; }
-bool lastPostOk() { return lastOk_; }
-bool unprovisioned() { return unprovisioned_; }
+// --- default-channel wrappers ----------------------------------------------
+// The production firmware calls only these, so nothing outside this file needs
+// to know channels exist.
+
+void enqueue(const DeviceStatus &s, Reason reason, uint32_t seq) {
+  enqueue(default_, s, reason, seq);
+}
+void requestImmediateUpsert() { requestImmediateUpsert(default_); }
+void loop(const DeviceStatus &current) { loop(default_, current); }
+
+uint8_t queued() { return default_.count; }
+uint32_t bootId() { return default_.bootId; }
+bool lastPostOk() { return default_.lastOk; }
+bool unprovisioned() { return default_.unprovisioned; }
 
 }  // namespace telemetry

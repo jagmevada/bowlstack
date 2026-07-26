@@ -355,6 +355,17 @@ static const uint16_t BATTERY_PLAUSIBLE_BELOW_MV = 4300;    // invalid -> valid
 // divider is broken -- which is the entire reason battery_mv is published.
 static const uint16_t BATTERY_PUBLISH_MAX_MV = 6000;
 
+// --- telemetry sizing -------------------------------------------------------
+// Depth of the per-device offline history buffer. A real unit gets 32; the fleet
+// simulator overrides this down because it holds one buffer PER VIRTUAL DEVICE,
+// and 31 x 32 entries would be several times the RAM the exercise needs. The
+// simulator is not testing buffer depth -- it is testing the wire interface and
+// the front-end's handling of what arrives.
+#ifndef BOWLSTACK_TELEMETRY_QUEUE_LEN
+#define BOWLSTACK_TELEMETRY_QUEUE_LEN 32
+#endif
+static const uint8_t TELEMETRY_QUEUE_LEN = BOWLSTACK_TELEMETRY_QUEUE_LEN;
+
 // --- battery: band hysteresis (percent) ------------------------------------
 // One rising and one falling threshold per boundary. A band must be HARDER to
 // leave than it was to enter, or a reading sitting on a boundary oscillates
