@@ -12,6 +12,23 @@ void begin() {
   // 11 dB attenuation puts full scale near 3.3 V, which covers a single Li-ion
   // cell once the divider has halved it.
   analogSetPinAttenuation(config::PIN_BATTERY_ADC, ADC_11db);
+
+  // Plain INPUT: no internal pull. An internal pull-down is ~45k, which against
+  // the 4.7k series resistor from 5 V would sit the pin near 4.5 V -- further
+  // out of spec than leaving it alone.
+  pinMode(config::PIN_CHARGING, INPUT);
+}
+
+// Majority vote. The pin floats when no charger is attached, so a single read
+// is not trustworthy; this does not make a floating input correct, but it stops
+// one noise sample flipping the reported charge state.
+static bool readCharging() {
+  uint8_t high = 0;
+  for (uint8_t i = 0; i < config::CHARGING_SAMPLES; i++) {
+    if (digitalRead(config::PIN_CHARGING) == HIGH) high++;
+  }
+  const bool pinHigh = (high * 2 > config::CHARGING_SAMPLES);
+  return config::CHARGING_ACTIVE_LOW ? !pinHigh : pinHigh;
 }
 
 // Raw millivolts at the ADC pin, before the divider is undone. Exposed
@@ -67,6 +84,7 @@ DeviceStatus sample(const SensorArray &sensors, const BowlLogic &logic) {
   s.batteryPinMv = readPinMv();
   s.batteryMv = (uint16_t)(s.batteryPinMv * config::BATTERY_DIVIDER);
   s.batteryPercent = batteryPercent(s.batteryMv);
+  s.charging = readCharging();
 
   s.sensorsOnline = sensors.onlineCount();
   for (uint8_t i = 0; i < config::SENSOR_COUNT; i++) {
@@ -83,6 +101,15 @@ bool differs(const DeviceStatus &a, const DeviceStatus &b) {
   if (a.stackCount != b.stackCount) return true;
   if (a.stackStatus != b.stackStatus) return true;
   if (a.sensorsOnline != b.sensorsOnline) return true;
+  if (a.charging != b.charging) return true;
+
+  // Compares the BAND, not the percentage: a percentage drifts continuously
+  // and would make every report a "change", defeating the whole point of an
+  // append-on-change history.
+  if (battery::levelFromSoc(a.batteryPercent) !=
+      battery::levelFromSoc(b.batteryPercent)) {
+    return true;
+  }
   for (uint8_t i = 0; i < config::SENSOR_COUNT; i++) {
     if (a.levels[i] != b.levels[i]) return true;
     if (a.sensorOnline[i] != b.sensorOnline[i]) return true;
@@ -103,13 +130,17 @@ void printBattery(const DeviceStatus &s) {
     const char *why = (s.batteryMv > config::BATTERY_IMPLAUSIBLE_ABOVE_MV)
                           ? "IMPLAUSIBLE - check divider / floating pin"
                           : "no cell detected";
-    Serial.printf("battery: pin %u mV -> cell %u mV : %s\n", s.batteryPinMv,
-                  s.batteryMv, why);
+    Serial.printf("battery: pin %u mV -> cell %u mV : %s  charging=%s\n",
+                  s.batteryPinMv, s.batteryMv, why, s.charging ? "yes" : "no");
     return;
   }
-  Serial.printf("battery: pin %u mV -> cell %u mV : %d%% (%s)\n",
+  // The percentage is shown HERE but not published: locally it is the number
+  // you calibrate against, upstream it would imply precision the measurement
+  // does not have.
+  Serial.printf("battery: pin %u mV -> cell %u mV : %d%% -> %s  charging=%s\n",
                 s.batteryPinMv, s.batteryMv, s.batteryPercent,
-                battery::levelName(battery::levelFromSoc(s.batteryPercent)));
+                battery::levelName(battery::levelFromSoc(s.batteryPercent)),
+                s.charging ? "yes" : "no");
 }
 
 void print(const DeviceStatus &s) {

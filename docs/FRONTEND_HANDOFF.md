@@ -64,8 +64,8 @@ const { data } = await supabase.from('device_overview').select('*')
 | `stack_status` | text | `ok` / `discontiguous` / `degraded` |
 | `levels` | text[] | 4 entries, bottom-up: `present` / `absent` / `unknown` |
 | `sensors_online` | int | 0–4 |
-| `battery_mv` | int | millivolts at the cell |
-| `battery_pct` | int | 0–100, or **`null` when no battery is detected** |
+| `battery_mv` | int | millivolts at the cell — raw measurement, for diagnosis |
+| `battery_level` | text | `good` / `medium` / `low` / `critical`, or **`null`** |
 | `charging` | bool | |
 | `uptime_s` | int | seconds since the device booted |
 | `firmware` | text | e.g. `0.2.0` |
@@ -104,25 +104,29 @@ each other and cannot float, so this indicates a failed sensor, a misaligned
 mount, or an obstruction. Showing "2 bowls" there would be worse than showing
 an error.
 
-### `battery_pct` can be `null`
+### Battery is a band, not a percentage
 
-`null` means **no cell detected**, not 0%. Render "—" or "no battery", never a
-flat-battery icon.
+**There is no `battery_pct`, deliberately.** The device computes one internally
+from a measured Li-ion discharge curve, but does not publish it: a
+resting-voltage estimate moves several points with load, temperature, cell age
+and per-unit ADC calibration, so a number on screen would imply a precision the
+measurement does not have.
 
-`battery_pct` comes from a **measured Li-ion discharge curve**, not a linear
-map — so it is meaningful, but it is still a resting-voltage estimate that load,
-temperature and cell age all shift. Present it in the same four bands the device
-uses, so the UI and the front-panel LED agree:
-
-| Band | SoC | Suggested treatment |
+| `battery_level` | SoC | Suggested treatment |
 | --- | --- | --- |
-| good | > 70% | normal |
-| medium | > 35% | normal |
-| low | > 10% | warn |
-| critical | ≤ 10% | alert — needs charging or swapping |
-| unknown | `null` | "—", not 0% |
+| `good` | > 70% | normal |
+| `medium` | > 35% | normal |
+| `low` | > 10% | warn |
+| `critical` | ≤ 10% | alert — charge or swap |
+| `null` | — | "no battery", **never** a flat-battery icon |
 
-`battery_mv` is the ground truth if you ever need the underlying number.
+`null` means **no cell detected**, which is not the same as flat. The device
+also rejects implausible readings — anything a lithium cell cannot produce
+means the *measurement* is broken, and it reports `null` rather than a
+confident value.
+
+`battery_mv` carries the raw cell voltage if you ever need the underlying
+number, e.g. to spot a wiring fault a band would disguise.
 
 ### `levels` is bottom-up
 

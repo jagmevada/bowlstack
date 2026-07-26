@@ -1,4 +1,4 @@
--- =====================================================================
+﻿-- =====================================================================
 --  Bowlstack telemetry schema  (v2 -- full rebuild, drops everything first)
 --
 --  Run as owner in the Supabase SQL editor. Idempotent: safe to re-run.
@@ -123,7 +123,7 @@ create table public.device_status (
   battery_mv     integer     check (battery_mv between 0 and 6000),
   -- NULL, never -1: the firmware reports -1 for "no cell detected", and
   -- serialising that as a number would poison any average over this column.
-  battery_pct    smallint    check (battery_pct between 0 and 100),
+  battery_level  text        check (battery_level in ('good','medium','low','critical')),
   charging       boolean,
 
   firmware       text,
@@ -198,7 +198,7 @@ create table public.status_events (
   sensors_ok     boolean[]   not null
                    check (cardinality(sensors_ok) = cardinality(levels)),
   sensors_online smallint    not null check (sensors_online >= 0),
-  battery_pct    smallint    check (battery_pct between 0 and 100),
+  battery_level  text        check (battery_level in ('good','medium','low','critical')),
   -- Nullable and never sent by the current hardware: charge state drives the
   -- charger's own indicator and no signal reaches the ESP32. NULL reads as
   -- "unknown", which is true; a NOT NULL column would have forced the firmware
@@ -390,14 +390,14 @@ revoke all on public.service_windows from anon, authenticated, public;
 -- request, so it reveals nothing new.
 grant select (device_id) on public.device_status to anon;
 grant update (boot_id, uptime_s, stack_count, stack_status, levels, sensors_ok,
-              sensors_online, battery_mv, battery_pct, charging, firmware, mac)
+              sensors_online, battery_mv, battery_level, charging, firmware, mac)
   on public.device_status to anon;
 
 -- Plain INSERT; no SELECT of any kind. A duplicate raises 23505, which is the
 -- idempotency mechanism.
 grant insert (device_id, boot_id, seq, age_ms, reason, stack_count,
               stack_status, levels, sensors_ok, sensors_online,
-              battery_pct, charging, firmware)
+              battery_level, charging, firmware)
   on public.status_events to anon;
 -- `charging` stays in the grant although the firmware does not currently send
 -- it, so a hardware revision that adds the sense line needs no privilege change.
@@ -460,7 +460,7 @@ select d.device_id,
         and s.updated_at is not null) as data_is_stale,
 
        s.stack_count, s.stack_status, s.levels,
-       s.sensors_online, s.battery_mv, s.battery_pct, s.charging,
+       s.sensors_online, s.battery_mv, s.battery_level, s.charging,
        s.uptime_s, s.firmware, s.mac
 from public.devices d
 left join public.device_status s using (device_id);

@@ -204,12 +204,32 @@ static const float HEALTH_BLINK_WIFI_HZ = 2.0f;
 // mandatory given the telemetry phase to come.
 static const uint8_t PIN_BATTERY_ADC = 35;
 
-// NO CHARGING INPUT. Charge state is shown by the charger's own indicator and
-// never reaches the ESP32, so the firmware cannot know it and does not claim
-// to: `charging` is simply not sent, and the server column is nullable, which
-// reads as "unknown" rather than the lie that "false" would be.
+// --- charger sense ---------------------------------------------------------
+// Charger 5 V rail through a 4.7k series resistor to GPIO27. ACTIVE HIGH, and
+// no internal pull is enabled -- an internal pull-down is ~45k, which against
+// 4.7k would hold the pin near 4.5 V, worse than none at all.
 //
-// GPIO27 was previously reserved for this and is now free.
+// Two consequences of series-resistor-only wiring, both accepted deliberately:
+//
+//   Over-voltage. ESP32 pins are not 5 V tolerant (absolute max ~3.6 V). A
+//   series resistor does not divide; it meters ~340 uA into the internal clamp
+//   diode, which passes it to the 3.3 V rail. Within what the clamp tolerates,
+//   but outside datasheet limits.
+//
+//   Floating when unplugged. With nothing pulling the pin down, "not charging"
+//   is an undriven input, so it is debounced below rather than trusted.
+//
+// A single 6.8k from GPIO27 to GND resolves both: 2.96 V plugged, a solid 0 V
+// unplugged, and no clamp current.
+static const uint8_t PIN_CHARGING = 27;
+
+// FALSE: this senses the charger's 5 V rail, so the pin is HIGH while charging.
+// True would suit a TP4056-style open-drain STAT output, which pulls low.
+static const bool CHARGING_ACTIVE_LOW = false;
+
+// Majority vote over this many reads. Does not make a floating input correct,
+// but it stops a single noise sample from flipping the reported charge state.
+static const uint8_t CHARGING_SAMPLES = 5;
 
 // How often the battery line is printed to the console. 2 s is a bring-up
 // cadence for validating the divider and the SoC curve -- raise it once the

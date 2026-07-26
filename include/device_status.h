@@ -23,12 +23,14 @@ struct DeviceStatus {
   // --- power ---
   uint16_t batteryPinMv;   // raw at the ADC pin, before the divider
   uint16_t batteryMv;      // at the cell
-  int8_t batteryPercent;   // -1 when no cell is detected; never fabricated
+  int8_t batteryPercent;   // -1 when unknown. LOCAL ONLY -- see below.
+  bool charging;
 
-  // Charge state is NOT sensed -- the charger drives its own indicator and
-  // nothing reaches the ESP32. There is deliberately no `charging` field:
-  // carrying one would force every consumer to invent a value, and "false"
-  // would be indistinguishable from "genuinely not charging".
+  // batteryPercent is kept for the console and for deriving the band, but only
+  // the BAND is sent upstream. A percentage from a resting-voltage curve is not
+  // worth its own precision -- load, temperature, cell age and per-unit ADC
+  // calibration all move it several points -- so publishing a number would
+  // invite the UI to render a confidence the measurement does not have.
 
   // --- sensor health ---
   bool sensorOnline[config::SENSOR_COUNT];

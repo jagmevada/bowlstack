@@ -4,6 +4,7 @@
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 
+#include "battery_soc.h"
 #include "bowl_logic.h"
 #include "net.h"
 #include "secret.h"
@@ -53,6 +54,7 @@ struct QueuedEvent {
   bool sensorOk[config::SENSOR_COUNT];
   uint8_t sensorsOnline;
   int8_t batteryPercent;
+  bool charging;
 };
 
 QueuedEvent queue_[QUEUE_LEN];
@@ -94,7 +96,7 @@ const char *reasonName(Reason r) {
 // column, while the event INSERT adds it separately.
 void writeCommon(JsonObject o, uint8_t stackCount, StackStatus stackStatus,
                  const LevelState *levels, const bool *sensorOk,
-                 uint8_t sensorsOnline, int8_t batteryPercent) {
+                 uint8_t sensorsOnline, int8_t batteryPercent, bool charging) {
   o["stack_count"] = stackCount;
   o["stack_status"] = BowlLogic::wireName(stackStatus);
 
@@ -108,14 +110,19 @@ void writeCommon(JsonObject o, uint8_t stackCount, StackStatus stackStatus,
 
   o["sensors_online"] = sensorsOnline;
 
-  // null, never -1. The server column is CHECKed 0..100, and a sentinel number
-  // would silently poison any average taken over it.
-  if (batteryPercent < 0) {
-    o["battery_pct"] = nullptr;
+  // The BAND, not the percentage. A resting-voltage SoC estimate moves several
+  // points with load, temperature, cell age and per-unit ADC calibration, so
+  // publishing a number would invite the UI to render precision that is not
+  // there. null when no cell is detected -- never a fabricated "critical",
+  // which would be indistinguishable from a genuinely flat battery.
+  const battery::Level lvl = battery::levelFromSoc(batteryPercent);
+  if (lvl == battery::Level::Unknown) {
+    o["battery_level"] = nullptr;
   } else {
-    o["battery_pct"] = batteryPercent;
+    o["battery_level"] = battery::levelName(lvl);
   }
 
+  o["charging"] = charging;
   o["firmware"] = BOWLSTACK_FW_VERSION;
 }
 
@@ -219,7 +226,7 @@ bool flushEvents() {
 
     o["reason"] = reasonName(e.reason);
     writeCommon(o, e.stackCount, e.stackStatus, e.levels, e.sensorOk,
-                e.sensorsOnline, e.batteryPercent);
+                e.sensorsOnline, e.batteryPercent, e.charging);
   }
 
   String body;
@@ -273,7 +280,7 @@ bool patchStatus(const DeviceStatus &s) {
   o["boot_id"] = bootId_;
   o["uptime_s"] = s.uptimeSec;
   writeCommon(o, s.stackCount, s.stackStatus, s.levels, s.sensorOnline,
-              s.sensorsOnline, s.batteryPercent);
+              s.sensorsOnline, s.batteryPercent, s.charging);
   o["battery_mv"] = s.batteryMv;
   o["mac"] = s.mac;
 
@@ -328,6 +335,7 @@ void enqueue(const DeviceStatus &s, Reason reason, uint32_t seq) {
   e.stackStatus = s.stackStatus;
   e.sensorsOnline = s.sensorsOnline;
   e.batteryPercent = s.batteryPercent;
+  e.charging = s.charging;
   for (uint8_t i = 0; i < config::SENSOR_COUNT; i++) {
     e.levels[i] = s.levels[i];
     e.sensorOk[i] = s.sensorOnline[i];
