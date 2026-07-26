@@ -382,6 +382,52 @@ to `SensorArray` internals.
    direct-bus mode, a mux channel write in mux mode.
 3. Make addressing conditional — the XSHUT walk is not needed behind the mux.
 
+## Deployment model
+
+The fleet is **32 units**, registered once as `BWL-001` … `BWL-032`
+(`supabase/register_devices.sql`). Each is deployed to a **serving position**
+made of two parts:
+
+| Field | Meaning |
+| --- | --- |
+| `area` | `D` Darshanarthi, `T` Tiffin, `M` Mahtma |
+| `item_slot` | 1–5, the physical label on the station |
+
+A unit is installed in one area, physically labelled with one item slot, and
+**neither changes for the life of the installation** — only on device failure or
+a deliberate reassignment. Both stay `NULL` until deployment; the front-end
+assigns them from its configuration page, which is why
+`register_devices.sql` leaves every unit unnamed and unassigned.
+
+> **`item_slot` is a position, not a dish.** Which food occupies slot 3 changes
+> with the meal — breakfast, lunch and dinner rotate through Dal/Kadhi, Rice,
+> Curry, Roti and so on. The slot number is the fixed physical label; the
+> food mapping is front-end configuration and is deliberately **not** modelled
+> here yet, pending its design.
+
+A partial unique index enforces one device per `(area, item_slot)`. That
+assumes **one station per area** — 3 areas x 5 slots is 15 positions against a
+32-unit fleet, so the surplus is spares or expansion. If an area ever needs
+several stations each with their own slots 1–5, drop `devices_position_idx` and
+add a station column.
+
+### Front-end (planned)
+
+Used by the **kitchen in-charge**, reading `device_overview`:
+
+- **Stock view** — live bowl counts grouped by area, so remaining stock per
+  item is visible at a glance across all three areas.
+- **Health view** — battery level, charging state, per-sensor health and
+  `offline` / `awaiting_deployment`, so the in-charge can tell the service
+  counter in-charge which station needs attention.
+- **Configuration page** — assigns `area`, `item_slot` and `label` per device,
+  and maps slots to foods per meal.
+
+`authenticated` holds SELECT on everything and UPDATE on
+`area, item_slot, label, location, timezone`. `device_id` is deliberately **not**
+updatable from the UI: it is the installation's identity and the key every
+history row hangs off.
+
 ## Device identity
 
 Devices report against a unique ID, and 30+ units are planned after field

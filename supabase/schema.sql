@@ -54,12 +54,40 @@ drop function if exists public.in_service_window(timestamptz, text, text, interv
 create table public.devices (
   device_id   text primary key
                 check (device_id ~ '^[A-Za-z0-9_-]{3,32}$'),
+
+  -- Serving position. A unit is installed in one area and physically labelled
+  -- with one item slot, and neither changes for the life of the installation
+  -- except on failure or reassignment.
+  --   area      D = Darshanarthi, T = Tiffin, M = Mahtma
+  --   item_slot 1-5, the physical label on the station
+  -- Both stay NULL until a unit is deployed; the front-end assigns them.
+  area        text     check (area in ('D','T','M')),
+  item_slot   smallint check (item_slot between 1 and 5),
+
+  -- Free text, set from the front-end. Not the identity -- device_id is.
   label       text,
   location    text,
+
   timezone    text not null default 'Asia/Kolkata',
   last_mac    text,
   created_at  timestamptz not null default now()
 );
+
+-- One device per serving position. Partial, so any number of unassigned spares
+-- (area and item_slot both NULL) coexist without colliding.
+--
+-- This assumes ONE station per area. If an area ever needs several stations
+-- each with their own item 1-5, drop this index and add a station column --
+-- 3 areas x 5 items is 15 positions against a 32-device fleet, so the surplus
+-- is either spares or expansion, and only deployment will settle which.
+create unique index devices_position_idx
+  on public.devices (area, item_slot)
+  where area is not null and item_slot is not null;
+
+comment on column public.devices.item_slot is
+  'Physical slot label on the station, 1-5. What FOOD occupies a slot changes '
+  'per meal (breakfast/lunch/dinner) and is configured in the front-end -- the '
+  'slot number is the fixed physical position, not the dish.';
 
 comment on table public.devices is
   'Installation registry, created by humans only. Registering a device here '
@@ -301,6 +329,11 @@ alter table public.service_windows enable row level security;
 create policy devices_select_staff on public.devices
   for select to authenticated using (true);
 
+-- The front-end configuration page assigns area, item_slot and label. Devices
+-- never touch this table -- anon has no policy here at all.
+create policy devices_update_staff on public.devices
+  for update to authenticated using (true) with check (true);
+
 -- device_status: the device UPDATEs only -- there is no INSERT policy because
 -- it never inserts, the row having been created when the device was registered.
 create policy device_status_update_device on public.device_status
@@ -366,6 +399,12 @@ grant select on public.devices, public.device_status, public.status_events,
                 public.service_windows
   to authenticated;
 
+-- Front-end configuration page. device_id is excluded on purpose: it is the
+-- installation's identity and the key every history row hangs off, so it must
+-- not be editable from a UI.
+grant update (area, item_slot, label, location, timezone)
+  on public.devices to authenticated;
+
 revoke all on function public.tg_device_status_stamp()   from public, anon, authenticated;
 revoke all on function public.tg_status_events_stamp()   from public, anon, authenticated;
 revoke all on function public.tg_devices_create_status() from public, anon, authenticated;
@@ -382,6 +421,8 @@ grant execute on function public.in_service_window(timestamptz, text, text, inte
 create view public.device_overview
 with (security_invoker = true) as
 select d.device_id,
+       d.area,
+       d.item_slot,
        d.label,
        d.location,
        d.timezone,
