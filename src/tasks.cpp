@@ -13,10 +13,16 @@
 namespace tasks {
 namespace {
 
-// Core 1 is reserved for measurement. The WiFi driver and the LwIP/TLS stacks
-// run on core 0, so isolating the sensor task means a portal scan, a TLS
-// handshake or a WiFiManager save physically cannot preempt a ranging poll --
-// they are not even on the same processor.
+// Core 1 carries measurement; the WiFi driver, LwIP and the TLS stacks live on
+// core 0, so a portal scan, a TLS handshake or a WiFiManager save cannot preempt
+// a ranging poll -- they are not even on the same processor.
+//
+// One caveat, since the isolation is not absolute: the Arduino WiFi EVENT task
+// is pinned to core 1 by this core's defaults, at priority 19 -- far above
+// sensorTask. It does preempt ranging. That is tolerable because it only
+// dispatches connection events and returns in microseconds, unlike the driver
+// and TLS work it hands off; but it does mean "nothing on core 0 can touch us"
+// is the accurate claim, not "nothing WiFi-related runs on core 1".
 const BaseType_t CORE_MEASURE = 1;
 const BaseType_t CORE_NETWORK = 0;
 
@@ -72,7 +78,14 @@ QueueHandle_t changeQueue = nullptr;
 struct QueuedChange {
   DeviceStatus status;
   telemetry::Reason reason;
+  uint32_t seq;
 };
+
+// Allocated when a change is OBSERVED, not when it reaches telemetry's buffer.
+// A change dropped between those two points must still consume a seq, or the
+// server sees a contiguous sequence and has no evidence anything was lost --
+// which is the sole purpose of seq.
+uint32_t nextSeq_ = 0;
 
 TaskHandle_t hSensor = nullptr;
 TaskHandle_t hNet = nullptr;
@@ -91,13 +104,27 @@ void postChange(const DeviceStatus &s, telemetry::Reason reason) {
   QueuedChange c;
   c.status = s;
   c.reason = reason;
+  c.seq = nextSeq_++;
 
-  // Non-blocking send: the measurement task must never wait on the network,
-  // even for queue space. A full queue means telemetry is badly backed up, and
-  // dropping the oldest observation there is preferable to stalling ranging.
-  if (xQueueSend(changeQueue, &c, 0) != pdTRUE) {
-    Serial.println("tasks: change queue full - telemetry is not keeping up");
+  // Non-blocking: the measurement task must never wait on the network, even for
+  // queue space.
+  if (xQueueSend(changeQueue, &c, 0) == pdTRUE) return;
+
+  // Full. Drop the OLDEST and keep the newest -- xQueueSend on its own discards
+  // what you are sending, which is exactly backwards here: the newest change is
+  // the current state of the stack, and the stale one is the expendable entry.
+  //
+  // The discarded seq is logged and, more importantly, is simply never sent, so
+  // the server sees a gap and knows history is incomplete. Silently discarding
+  // the new one would have advanced lastReported past a state that was never
+  // transmitted, making a transient 3 -> 4 -> 3 vanish without trace.
+  QueuedChange dropped;
+  if (xQueueReceive(changeQueue, &dropped, 0) == pdTRUE) {
+    Serial.printf("tasks: change queue full - dropped seq %u (telemetry is "
+                  "not keeping up)\n",
+                  dropped.seq);
   }
+  xQueueSend(changeQueue, &c, 0);
 }
 
 // --- sensor task -----------------------------------------------------------
@@ -184,7 +211,7 @@ void telemetryTask(void *) {
     // while nothing changes. The timeout is what paces the periodic heartbeat.
     QueuedChange c;
     while (xQueueReceive(changeQueue, &c, 0) == pdTRUE) {
-      telemetry::enqueue(c.status, c.reason);
+      telemetry::enqueue(c.status, c.reason, c.seq);
       telemetry::requestImmediateUpsert();
     }
 

@@ -59,7 +59,6 @@ struct QueuedEvent {
 QueuedEvent queue_[QUEUE_LEN];
 uint8_t head_ = 0;  // oldest
 uint8_t count_ = 0;
-uint32_t nextSeq_ = 0;
 
 uint32_t bootId_ = 0;
 bool lastOk_ = false;
@@ -322,12 +321,10 @@ void begin() {
   Serial.printf("telemetry: boot_id=%u -> %s\n", bootId_, apiBase().c_str());
 }
 
-void enqueue(const DeviceStatus &s, Reason reason) {
-  // seq increments on ENQUEUE, not on send, so a dropped entry leaves a visible
-  // gap in the server-side sequence instead of vanishing silently.
+void enqueue(const DeviceStatus &s, Reason reason, uint32_t seq) {
   QueuedEvent e;
   e.atMs = millis();
-  e.seq = nextSeq_++;
+  e.seq = seq;
   e.reason = reason;
   e.stackCount = s.stackCount;
   e.stackStatus = s.stackStatus;
@@ -346,7 +343,10 @@ void enqueue(const DeviceStatus &s, Reason reason) {
   queue_[(head_ + count_) % QUEUE_LEN] = e;
   count_++;
 
-  statusPending_ = true;
+  // statusPending_ is deliberately NOT set here. It is owned by
+  // requestImmediateUpsert(), whose rate limiter would otherwise be dead code:
+  // the only caller invokes both back to back, so setting the flag here made
+  // the 5 s floor gate nothing and every flap cost a PATCH as well as a POST.
 }
 
 void requestImmediateUpsert() {

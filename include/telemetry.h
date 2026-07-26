@@ -25,7 +25,13 @@ void begin();
 // entries are held in RAM and flushed on reconnect. The ring buffer is
 // intentionally small -- if it overflows, the oldest entries are dropped and
 // the gap is visible server-side as a jump in `seq`.
-void enqueue(const DeviceStatus &s, Reason reason);
+//
+// `seq` is supplied by the caller rather than allocated here. It must be
+// allocated at the moment a change is OBSERVED, not when it reaches this
+// buffer: anything dropped between those two points would otherwise consume no
+// seq, leaving the server a contiguous sequence and no evidence that data was
+// lost -- which is the one thing seq exists to prove.
+void enqueue(const DeviceStatus &s, Reason reason, uint32_t seq);
 
 // Call every loop. Flushes queued history oldest-first, then upserts current
 // state when due. Never blocks the sensor loop for long: one HTTP transaction

@@ -55,13 +55,20 @@ networking in turn:
 | HTTP timeout | 8 s |
 
 Cooperative scheduling could not fix these — the blocking lives inside
-third-party libraries. **Core 1 is reserved for measurement**: the WiFi driver
-and the LwIP/TLS stacks run on core 0, so a scan, a handshake or a portal save
-is not merely lower priority, it is on a different processor and cannot preempt
-ranging at all.
+third-party libraries. **Core 1 carries measurement**: the WiFi driver and the
+LwIP/TLS stacks run on core 0, so a scan, a handshake or a portal save is not
+merely lower priority, it is on a different processor and cannot preempt ranging
+at all.
 
 This was confirmed on hardware: a log captured the net task blocked mid-join for
 12 s while the plotter kept streaming at 9.78 Hz from the other core.
+
+> **The isolation is not absolute.** The Arduino WiFi *event* task is pinned to
+> core 1 by this core's defaults at priority 19 — far above `sensorTask` — so it
+> does preempt ranging. That is tolerable because it only dispatches connection
+> events and returns in microseconds, unlike the driver and TLS work it hands
+> off. The accurate claim is "nothing on core 0 can touch measurement", not
+> "nothing WiFi-related runs on core 1".
 
 ### Concurrency rules
 
