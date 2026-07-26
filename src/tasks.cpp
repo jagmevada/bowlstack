@@ -27,13 +27,23 @@ const UBaseType_t PRIO_NET = 2;
 const UBaseType_t PRIO_TELEMETRY = 2;
 const UBaseType_t PRIO_DEBUG = 1;
 
-// TLS needs the most: mbedtls handshake buffers plus ArduinoJson plus
-// HTTPClient. WiFiManager runs a web server and a DNS server. The sensor task
-// only needs the driver and some float maths.
+// Sized from measured high-water marks, not guesses -- see printStackHeadroom().
+// Observed free after a TLS post and a full plot/heartbeat cycle:
+//   sensor 2044/4096   net 6460/8192   telemetry 4632/10240   debug 876/3072
+//
+// debug was raised because 876 bytes is too thin a margin: its heartbeat uses
+// %f, and float formatting drags in a deep and stack-hungry path, on top of the
+// 320-byte line buffer it builds. telemetry was raised because TLS alone
+// consumed ~5 KB the first time it ran, and a full handshake against a longer
+// certificate chain can spike further.
+//
+// net's figure is the optimistic one: that boot joined directly, so the captive
+// portal -- a web server plus a DNS server -- never ran. Treat 8 KB as
+// unvalidated until a portal session has been measured.
 const uint32_t STACK_SENSOR = 4096;
 const uint32_t STACK_NET = 8192;
-const uint32_t STACK_TELEMETRY = 10240;
-const uint32_t STACK_DEBUG = 3072;
+const uint32_t STACK_TELEMETRY = 12288;
+const uint32_t STACK_DEBUG = 4096;
 
 // Sensor cadence. Sensors conclude a measurement every TIMING_BUDGET_US, so
 // polling far faster than that is wasted -- but the delay also YIELDS, which a
@@ -246,14 +256,18 @@ bool ready() {
 }
 
 void printStackHeadroom() {
-  // uxTaskGetStackHighWaterMark returns the minimum free stack ever observed,
-  // in words. Anything under a few hundred bytes is a task about to overflow --
-  // which on ESP32 shows up as a corrupt-looking crash far from the cause.
-  Serial.printf("tasks: stack free  sensor=%u net=%u telemetry=%u debug=%u bytes\n",
-                hSensor ? uxTaskGetStackHighWaterMark(hSensor) * 4 : 0,
-                hNet ? uxTaskGetStackHighWaterMark(hNet) * 4 : 0,
-                hTelemetry ? uxTaskGetStackHighWaterMark(hTelemetry) * 4 : 0,
-                hDebug ? uxTaskGetStackHighWaterMark(hDebug) * 4 : 0);
+  // Minimum free stack ever observed. NOT multiplied by 4: ESP-IDF defines
+  // StackType_t as uint8_t, so this is already in bytes -- scaling it the way
+  // vanilla FreeRTOS requires reported 12 KB free on a 4 KB stack, which would
+  // have hidden a task heading for overflow behind a comfortable-looking
+  // number. Overflow on ESP32 surfaces as a corrupt-looking crash far from the
+  // cause, so this figure has to be right to be worth printing.
+  Serial.printf("tasks: stack free  sensor=%u/%u net=%u/%u telemetry=%u/%u "
+                "debug=%u/%u bytes\n",
+                hSensor ? uxTaskGetStackHighWaterMark(hSensor) : 0, STACK_SENSOR,
+                hNet ? uxTaskGetStackHighWaterMark(hNet) : 0, STACK_NET,
+                hTelemetry ? uxTaskGetStackHighWaterMark(hTelemetry) : 0, STACK_TELEMETRY,
+                hDebug ? uxTaskGetStackHighWaterMark(hDebug) : 0, STACK_DEBUG);
 }
 
 }  // namespace tasks

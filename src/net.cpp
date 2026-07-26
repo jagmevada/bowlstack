@@ -149,7 +149,12 @@ void storeCommissioned(const char *ssid, const char *pass) {
 bool tryJoin(const char *ssid, const char *pass) {
   if (ssid == nullptr || ssid[0] == '\0') return false;
 
-  Serial.printf("wifi: trying '%s' ... ", ssid);
+  // Complete lines only. Leaving a line open across the blocking wait below
+  // let the sensor task -- which now runs on the other core and keeps printing
+  // throughout -- interleave into it. The result was a plotter sample prefixed
+  // with "wifi: trying...", which no longer starts with '>' and is silently
+  // discarded by the plotter.
+  Serial.printf("wifi: trying '%s'\n", ssid);
   WiFi.begin(ssid, pass);
 
   const uint32_t deadline = millis() + JOIN_TIMEOUT_MS;
@@ -159,8 +164,8 @@ bool tryJoin(const char *ssid, const char *pass) {
 
   if (WiFi.status() == WL_CONNECTED) {
     snprintf(joinedSsid, sizeof(joinedSsid), "%s", ssid);
-    Serial.printf("ok, %s (%d dBm)\n", WiFi.localIP().toString().c_str(),
-                  WiFi.RSSI());
+    Serial.printf("wifi: joined '%s', %s (%d dBm)\n", ssid,
+                  WiFi.localIP().toString().c_str(), WiFi.RSSI());
     // Seed the transition tracker so loop() does not log a duplicate CONNECTED
     // line for a link this function already reported.
     wasConnected = true;
@@ -169,7 +174,7 @@ bool tryJoin(const char *ssid, const char *pass) {
   }
 
   const wl_status_t st = WiFi.status();
-  Serial.printf("failed (%d: %s)\n", (int)st, statusText(st));
+  Serial.printf("wifi: '%s' failed (%d: %s)\n", ssid, (int)st, statusText(st));
   WiFi.disconnect();
   return false;
 }
