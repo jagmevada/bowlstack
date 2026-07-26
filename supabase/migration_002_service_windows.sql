@@ -107,7 +107,13 @@ $$;
 --    not. `stale_for` is kept raw so you can still see exactly how long it has
 --    been dark.
 -- ---------------------------------------------------------------------
-create or replace view public.device_overview
+-- DROP first, not CREATE OR REPLACE: replacing a view can only APPEND columns
+-- at the end, never insert or reorder them. Adding `timezone` after `location`
+-- shifts every later column, which fails with
+--   42P16: cannot change name of view column "updated_at" to "timezone"
+drop view if exists public.device_overview;
+
+create view public.device_overview
 with (security_invoker = true) as
 select d.device_id,
        d.label,
