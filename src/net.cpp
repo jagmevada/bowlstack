@@ -174,35 +174,80 @@ bool tryJoin(const char *ssid, const char *pass) {
   return false;
 }
 
-// Lists what the radio can actually see. The commonest cause of a silent join
-// failure on ESP32 is a 2.4 GHz-only radio pointed at a 5 GHz network -- which
-// is invisible rather than merely unreachable, so "wrong password" and "wrong
-// band" look identical without this.
-void scanNetworks() {
+// Scans once, then joins the strongest KNOWN network that is actually on air.
+//
+// A single radio cannot associate with several APs at once -- each WiFi.begin()
+// supersedes the last -- but a SCAN does examine every SSID on every channel in
+// one operation, which is as close to "all at once" as the hardware gets.
+//
+// Joining blind instead costs JOIN_TIMEOUT_MS for every network that is not
+// there: in the field that meant 12 s burned on a 5 GHz SSID the radio cannot
+// even see, before the reachable network was attempted at all. Scanning first
+// spends ~2-3 s once and then makes exactly one join attempt per network that
+// genuinely exists, strongest first.
+//
+// It doubles as the diagnostic: a configured SSID missing from the scan
+// explains itself, where a bare join failure cannot distinguish a wrong
+// password from a network on a band this radio cannot receive.
+bool joinBestVisible() {
   Serial.println("wifi: scanning (ESP32 is 2.4 GHz only; 5 GHz APs cannot appear)");
   const int n = WiFi.scanNetworks();
+
   if (n <= 0) {
-    Serial.println("wifi:   no networks visible at all - check the antenna");
-    return;
+    Serial.println("wifi:   nothing visible at all - check the antenna");
+    WiFi.scanDelete();
+    return false;
   }
 
-  for (int i = 0; i < n && i < 20; i++) {
+  int32_t rssi[3] = {-127, -127, -127};
+  bool present[3] = {false, false, false};
+
+  for (int i = 0; i < n && i < 30; i++) {
     Serial.printf("wifi:   %-24s ch%-3d %4d dBm\n", WiFi.SSID(i).c_str(),
                   WiFi.channel(i), WiFi.RSSI(i));
+    for (uint8_t s = 0; s < 3; s++) {
+      const char *ssid, *pass;
+      if (!credentialAt(s, &ssid, &pass)) continue;
+      if (WiFi.SSID(i) != ssid) continue;
+      if (!present[s] || WiFi.RSSI(i) > rssi[s]) {
+        present[s] = true;
+        rssi[s] = WiFi.RSSI(i);
+      }
+    }
   }
+  WiFi.scanDelete();
 
+  // Account for every configured slot, so a missing one is explained rather
+  // than silently skipped.
   for (uint8_t s = 0; s < 3; s++) {
     const char *ssid, *pass;
     if (!credentialAt(s, &ssid, &pass)) continue;
-    bool seen = false;
-    for (int i = 0; i < n; i++) {
-      if (WiFi.SSID(i) == ssid) { seen = true; break; }
+    if (present[s]) {
+      Serial.printf("wifi: '%s' visible (%d dBm)\n", ssid, rssi[s]);
+    } else {
+      Serial.printf("wifi: '%s' NOT visible - wrong name, out of range, or 5 GHz\n",
+                    ssid);
     }
-    Serial.printf("wifi: '%s' %s\n", ssid,
-                  seen ? "IS visible -> the password is the likely problem"
-                       : "NOT visible -> wrong name, out of range, or 5 GHz");
   }
-  WiFi.scanDelete();
+
+  // Strongest first: with several known networks on air, the one with the best
+  // signal is the one most likely to hold up.
+  for (uint8_t attempt = 0; attempt < 3; attempt++) {
+    int8_t best = -1;
+    for (uint8_t s = 0; s < 3; s++) {
+      if (!present[s]) continue;
+      if (best < 0 || rssi[s] > rssi[best]) best = s;
+    }
+    if (best < 0) break;
+    present[best] = false;  // consumed
+
+    const char *ssid, *pass;
+    credentialAt((uint8_t)best, &ssid, &pass);
+    if (tryJoin(ssid, pass)) return true;
+  }
+
+  Serial.println("wifi: no known network could be joined");
+  return false;
 }
 
 // Opens the commissioning portal, non-blocking.
@@ -263,14 +308,7 @@ void begin() {
 
   loadCommissioned();
 
-  for (uint8_t s = 0; s < 3; s++) {
-    const char *ssid, *pass;
-    if (credentialAt(s, &ssid, &pass) && tryJoin(ssid, pass)) return;
-  }
-
-  // Say WHY before falling back, so a bad password is distinguishable from a
-  // network that was never visible.
-  scanNetworks();
+  if (joinBestVisible()) return;
 
   // Nothing known is reachable. Open the portal so the unit can be commissioned
   // on site without a rebuild -- the reason one binary can serve the fleet.
