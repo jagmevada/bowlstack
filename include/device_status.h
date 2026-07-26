@@ -21,9 +21,14 @@ struct DeviceStatus {
   uint32_t uptimeSec;
 
   // --- power ---
-  uint16_t batteryMv;      // at the cell, after undoing the divider
+  uint16_t batteryPinMv;   // raw at the ADC pin, before the divider
+  uint16_t batteryMv;      // at the cell
   int8_t batteryPercent;   // -1 when no cell is detected; never fabricated
-  bool charging;
+
+  // Charge state is NOT sensed -- the charger drives its own indicator and
+  // nothing reaches the ESP32. There is deliberately no `charging` field:
+  // carrying one would force every consumer to invent a value, and "false"
+  // would be indistinguishable from "genuinely not charging".
 
   // --- sensor health ---
   bool sensorOnline[config::SENSOR_COUNT];
@@ -49,5 +54,9 @@ DeviceStatus sample(const SensorArray &sensors, const BowlLogic &logic);
 bool differs(const DeviceStatus &a, const DeviceStatus &b);
 
 void print(const DeviceStatus &s);
+
+// One line: pin voltage, cell voltage, percent and band. Printed on its own
+// cadence during bring-up, and included in print().
+void printBattery(const DeviceStatus &s);
 
 }  // namespace device_status

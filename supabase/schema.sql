@@ -199,7 +199,13 @@ create table public.status_events (
                    check (cardinality(sensors_ok) = cardinality(levels)),
   sensors_online smallint    not null check (sensors_online >= 0),
   battery_pct    smallint    check (battery_pct between 0 and 100),
-  charging       boolean     not null,
+  -- Nullable and never sent by the current hardware: charge state drives the
+  -- charger's own indicator and no signal reaches the ESP32. NULL reads as
+  -- "unknown", which is true; a NOT NULL column would have forced the firmware
+  -- to invent `false`, indistinguishable from "genuinely not charging". Kept
+  -- rather than dropped so a future revision that does sense it needs no
+  -- migration.
+  charging       boolean,
   firmware       text        not null,
 
   constraint status_events_once unique (device_id, boot_id, seq)
@@ -393,6 +399,8 @@ grant insert (device_id, boot_id, seq, age_ms, reason, stack_count,
               stack_status, levels, sensors_ok, sensors_online,
               battery_pct, charging, firmware)
   on public.status_events to anon;
+-- `charging` stays in the grant although the firmware does not currently send
+-- it, so a hardware revision that adds the sense line needs no privilege change.
 
 -- Human read path.
 grant select on public.devices, public.device_status, public.status_events,

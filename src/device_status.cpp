@@ -12,13 +12,13 @@ void begin() {
   // 11 dB attenuation puts full scale near 3.3 V, which covers a single Li-ion
   // cell once the divider has halved it.
   analogSetPinAttenuation(config::PIN_BATTERY_ADC, ADC_11db);
-  // Plain INPUT in the active-high case: the divider's lower resistor already
-  // holds the pin at 0 V when no charger is present, and an internal pull-down
-  // fighting the divider would shift the sensed level.
-  pinMode(config::PIN_CHARGING, config::CHARGING_ACTIVE_LOW ? INPUT_PULLUP : INPUT);
 }
 
-static uint16_t readBatteryMv() {
+// Raw millivolts at the ADC pin, before the divider is undone. Exposed
+// separately because it is the number to compare against a multimeter when
+// deriving BATTERY_DIVIDER, and because a divider fault shows up here as an
+// implausible pin voltage while the scaled figure still looks like a battery.
+static uint16_t readPinMv() {
   // Oversample. A single ESP32 ADC conversion carries tens of millivolts of
   // noise, which the steep end of the discharge curve turns into several
   // percent of apparent charge -- enough to flap a battery band on nothing but
@@ -31,8 +31,7 @@ static uint16_t readBatteryMv() {
   for (uint8_t i = 0; i < samples; i++) {
     sum += analogReadMilliVolts(config::PIN_BATTERY_ADC);
   }
-  const uint32_t atPin = sum / samples;
-  return (uint16_t)(atPin * config::BATTERY_DIVIDER);
+  return (uint16_t)(sum / samples);
 }
 
 static int8_t batteryPercent(uint16_t mv) {
@@ -40,6 +39,13 @@ static int8_t batteryPercent(uint16_t mv) {
   // plausible-looking 0%, which would be indistinguishable upstream from a
   // genuinely flat battery.
   if (mv < config::BATTERY_ABSENT_BELOW_MV) return -1;
+
+  // Bound the OTHER end too. The SoC curve clamps anything above its top point
+  // to 100%, so without this a floating pin -- which swings high as readily as
+  // low -- reports a healthy full battery. A reading no lithium cell can
+  // produce means the measurement is broken, and saying so is the only honest
+  // answer available.
+  if (mv > config::BATTERY_IMPLAUSIBLE_ABOVE_MV) return -1;
 
   // Interpolate the MEASURED discharge curve rather than assuming a straight
   // line between 3.0 V and 4.2 V. Li-ion is markedly non-linear: the real cell
@@ -58,10 +64,9 @@ DeviceStatus sample(const SensorArray &sensors, const BowlLogic &logic) {
 
   s.uptimeSec = millis() / 1000;
 
-  s.batteryMv = readBatteryMv();
+  s.batteryPinMv = readPinMv();
+  s.batteryMv = (uint16_t)(s.batteryPinMv * config::BATTERY_DIVIDER);
   s.batteryPercent = batteryPercent(s.batteryMv);
-  const int level = digitalRead(config::PIN_CHARGING);
-  s.charging = config::CHARGING_ACTIVE_LOW ? (level == LOW) : (level == HIGH);
 
   s.sensorsOnline = sensors.onlineCount();
   for (uint8_t i = 0; i < config::SENSOR_COUNT; i++) {
@@ -77,7 +82,6 @@ DeviceStatus sample(const SensorArray &sensors, const BowlLogic &logic) {
 bool differs(const DeviceStatus &a, const DeviceStatus &b) {
   if (a.stackCount != b.stackCount) return true;
   if (a.stackStatus != b.stackStatus) return true;
-  if (a.charging != b.charging) return true;
   if (a.sensorsOnline != b.sensorsOnline) return true;
   for (uint8_t i = 0; i < config::SENSOR_COUNT; i++) {
     if (a.levels[i] != b.levels[i]) return true;
@@ -86,19 +90,33 @@ bool differs(const DeviceStatus &a, const DeviceStatus &b) {
   return false;
 }
 
+void printBattery(const DeviceStatus &s) {
+  // The pin voltage is printed alongside the cell voltage on purpose: it is
+  // what you compare against a multimeter to derive BATTERY_DIVIDER, and an
+  // implausible value there identifies a divider fault that the scaled figure
+  // would disguise as a merely flat battery.
+  if (s.batteryPercent < 0) {
+    // Distinguish the two ways a reading can be invalid: too low is an open or
+    // unconnected input, too high means the divider is wrong or the pin is
+    // floating high. Lumping them together as "no cell" would have sent
+    // someone hunting for a dead battery when the fault was in the wiring.
+    const char *why = (s.batteryMv > config::BATTERY_IMPLAUSIBLE_ABOVE_MV)
+                          ? "IMPLAUSIBLE - check divider / floating pin"
+                          : "no cell detected";
+    Serial.printf("battery: pin %u mV -> cell %u mV : %s\n", s.batteryPinMv,
+                  s.batteryMv, why);
+    return;
+  }
+  Serial.printf("battery: pin %u mV -> cell %u mV : %d%% (%s)\n",
+                s.batteryPinMv, s.batteryMv, s.batteryPercent,
+                battery::levelName(battery::levelFromSoc(s.batteryPercent)));
+}
+
 void print(const DeviceStatus &s) {
   Serial.printf("[%s] fw=%s mac=%s up=%us\n", s.deviceId, s.firmware, s.mac,
                 s.uptimeSec);
 
-  if (s.batteryPercent < 0) {
-    Serial.printf("  battery: no cell detected (%u mV)  charging=%s\n",
-                  s.batteryMv, s.charging ? "yes" : "no");
-  } else {
-    Serial.printf("  battery: %u mV (%d%%, %s)  charging=%s\n", s.batteryMv,
-                  s.batteryPercent,
-                  battery::levelName(battery::levelFromSoc(s.batteryPercent)),
-                  s.charging ? "yes" : "no");
-  }
+  printBattery(s);
 
   Serial.print("  levels:");
   for (uint8_t i = 0; i < config::SENSOR_COUNT; i++) {

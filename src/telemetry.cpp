@@ -53,7 +53,6 @@ struct QueuedEvent {
   bool sensorOk[config::SENSOR_COUNT];
   uint8_t sensorsOnline;
   int8_t batteryPercent;
-  bool charging;
 };
 
 QueuedEvent queue_[QUEUE_LEN];
@@ -95,7 +94,7 @@ const char *reasonName(Reason r) {
 // column, while the event INSERT adds it separately.
 void writeCommon(JsonObject o, uint8_t stackCount, StackStatus stackStatus,
                  const LevelState *levels, const bool *sensorOk,
-                 uint8_t sensorsOnline, int8_t batteryPercent, bool charging) {
+                 uint8_t sensorsOnline, int8_t batteryPercent) {
   o["stack_count"] = stackCount;
   o["stack_status"] = BowlLogic::wireName(stackStatus);
 
@@ -117,7 +116,6 @@ void writeCommon(JsonObject o, uint8_t stackCount, StackStatus stackStatus,
     o["battery_pct"] = batteryPercent;
   }
 
-  o["charging"] = charging;
   o["firmware"] = BOWLSTACK_FW_VERSION;
 }
 
@@ -221,7 +219,7 @@ bool flushEvents() {
 
     o["reason"] = reasonName(e.reason);
     writeCommon(o, e.stackCount, e.stackStatus, e.levels, e.sensorOk,
-                e.sensorsOnline, e.batteryPercent, e.charging);
+                e.sensorsOnline, e.batteryPercent);
   }
 
   String body;
@@ -275,7 +273,7 @@ bool patchStatus(const DeviceStatus &s) {
   o["boot_id"] = bootId_;
   o["uptime_s"] = s.uptimeSec;
   writeCommon(o, s.stackCount, s.stackStatus, s.levels, s.sensorOnline,
-              s.sensorsOnline, s.batteryPercent, s.charging);
+              s.sensorsOnline, s.batteryPercent);
   o["battery_mv"] = s.batteryMv;
   o["mac"] = s.mac;
 
@@ -330,7 +328,6 @@ void enqueue(const DeviceStatus &s, Reason reason, uint32_t seq) {
   e.stackStatus = s.stackStatus;
   e.sensorsOnline = s.sensorsOnline;
   e.batteryPercent = s.batteryPercent;
-  e.charging = s.charging;
   for (uint8_t i = 0; i < config::SENSOR_COUNT; i++) {
     e.levels[i] = s.levels[i];
     e.sensorOk[i] = s.sensorOnline[i];

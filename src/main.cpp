@@ -26,6 +26,7 @@
 #include <Arduino.h>
 
 #include "config.h"
+#include "device_status.h"
 #include "tasks.h"
 #include "version.h"
 
@@ -45,9 +46,31 @@ void setup() {
 }
 
 void loop() {
-  // The Arduino loop task has nothing left to do -- all work runs in the tasks
-  // created above. It stays alive only to report stack headroom; deleting it
-  // would save a few hundred bytes but lose a cheap early warning.
-  tasks::printStackHeadroom();
-  vTaskDelay(pdMS_TO_TICKS(STACK_REPORT_MS));
+  // The Arduino loop task has no measurement work -- that all runs in the tasks
+  // created above. It stays alive as the reporting task: stack headroom as a
+  // cheap early warning, and the battery line, which is deliberately here
+  // rather than in debug_plot so it survives in the PRODUCTION build where the
+  // plotter compiles to nothing.
+  static bool armed = false;
+  static uint32_t nextBattery = 0;
+  static uint32_t nextStack = 0;
+
+  const uint32_t now = millis();
+  if (!armed) {
+    armed = true;
+    nextBattery = now;
+    nextStack = now;
+  }
+
+  if ((int32_t)(now - nextBattery) >= 0) {
+    nextBattery = now + config::BATTERY_REPORT_MS;
+    if (tasks::ready()) device_status::printBattery(tasks::snapshot());
+  }
+
+  if ((int32_t)(now - nextStack) >= 0) {
+    nextStack = now + STACK_REPORT_MS;
+    tasks::printStackHeadroom();
+  }
+
+  vTaskDelay(pdMS_TO_TICKS(100));
 }
