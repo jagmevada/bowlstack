@@ -324,16 +324,19 @@ begin
   end loop;
 end $$;
 
--- Results.
+-- Results AND verdict in ONE result set. The Supabase SQL editor displays only
+-- the last statement's output, so two separate SELECTs would show the verdict
+-- and silently discard the rows that say what actually failed.
 select n, result, check_name, detail
   from smoke_results
- order by n;
-
--- Verdict.
-select case
-         when count(*) filter (where result = 'FAIL') = 0
-           then 'ALL PASS - schema is ready, safe to flash devices'
-         else count(*) filter (where result = 'FAIL')::text ||
-              ' FAILED - do not flash until fixed'
-       end as verdict
-  from smoke_results;
+union all
+select 99,
+       case when count(*) filter (where result = 'FAIL') = 0 then 'PASS' else 'FAIL' end,
+       '== VERDICT ==',
+       case when count(*) filter (where result = 'FAIL') = 0
+            then 'all checks passed - schema is ready, safe to flash devices'
+            else count(*) filter (where result = 'FAIL')::text ||
+                 ' failed - do not flash until fixed'
+       end
+  from smoke_results
+ order by 1;
