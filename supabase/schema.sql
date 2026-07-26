@@ -123,6 +123,13 @@ create table public.device_status (
   -- Raw cell millivolts: a measurement, kept for diagnosis. An implausible
   -- value here identifies a divider or wiring fault that a band alone would
   -- disguise as a merely flat battery.
+  --
+  -- COUPLED TO FIRMWARE: config::BATTERY_PUBLISH_MAX_MV clamps to this 6000
+  -- ceiling before sending. Do not narrow this bound without changing that
+  -- constant. A value the firmware can produce but this CHECK rejects is not a
+  -- rejected battery reading -- PostgREST answers 400, the whole PATCH fails,
+  -- and the device stops reporting its BOWL COUNT until the wiring is fixed.
+  -- A floating ADC pin measured 6365 mV on this hardware, so the case is real.
   battery_mv     integer     check (battery_mv between 0 and 6000),
 
   -- A BAND, not a percentage. A resting-voltage SoC estimate moves several

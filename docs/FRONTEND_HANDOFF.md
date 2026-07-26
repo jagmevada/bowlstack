@@ -120,6 +120,19 @@ measurement does not have.
 | `critical` | ≤ 10% | alert — charge or swap |
 | `null` | — | "no battery", **never** a flat-battery icon |
 
+**The band is hysteretic**, so those percentages are the *falling* edges. A
+discharging cell leaves `medium` below 35%, but a charging one does not re-enter
+it until 40%. This is deliberate — without it a cell resting on a boundary
+alternates bands indefinitely on measurement noise, and every alternation is a
+row in `status_events`.
+
+Two consequences for the UI:
+
+- **Do not infer a percentage from the band**, in either direction. The band
+  edges are not fixed points.
+- A band that has not changed while `battery_mv` clearly has is **correct**, not
+  a stale reading. Render the band; if you need the trend, use `battery_mv`.
+
 `null` means **no cell detected**, which is not the same as flat. The device
 also rejects implausible readings — anything a lithium cell cannot produce
 means the *measurement* is broken, and it reports `null` rather than a
@@ -174,6 +187,11 @@ const { data } = await supabase.from('status_events')
 Rows exist **only on real change**, not per report — so consecutive rows are
 genuine transitions, and the gaps between them are steady state. Good for a
 step chart; wrong for assuming regular sampling.
+
+A device sends at most **one round of writes every 5 s**. Changes occurring
+inside a window are batched into the next one, each keeping its own
+`recorded_at` — so several rows can share an arrival instant while describing
+moments up to 5 s apart. Order by `recorded_at`, never by `id` or `received_at`.
 
 | Column | Notes |
 | --- | --- |

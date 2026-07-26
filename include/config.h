@@ -289,23 +289,114 @@ static const uint32_t POWER_REPORT_MS = 10000;
 // current but push source impedance out of spec.
 static const float BATTERY_DIVIDER = BOWLSTACK_BATTERY_CAL;
 
-// Li-ion endpoints for the percentage estimate. The real discharge curve is
-// far from linear, so treat the percentage as indicative and the millivolt
-// figure as the ground truth.
+// Li-ion endpoints, kept for reference. The real discharge curve is far from
+// linear -- see include/battery_soc.h -- so these bound the range rather than
+// define the mapping.
 static const uint16_t BATTERY_MIN_MV = 3300;
 static const uint16_t BATTERY_MAX_MV = 4200;
 
-// Below this the input is floating rather than measuring a cell. Reported as
-// "unknown" instead of a fabricated 0%, which matters whenever no battery is
-// wired.
-static const uint16_t BATTERY_ABSENT_BELOW_MV = 2500;
+// --- battery: sampling and filtering ---------------------------------------
+// How often the ADC is actually read -- 10 Hz. device_status::sample() runs
+// from the sensor task every SENSOR_TICK_MS (2 ms), and 16 conversions at
+// ~100 us each is ~1.6 ms of work: reading the battery on every call meant
+// ~8000 conversions/second, consuming most of the measurement task to track a
+// quantity that moves over hours. 10 Hz is 160 conversions/second for the same
+// answer.
+//
+// It also gives the EMA below a meaningful time base. Filtering is about time,
+// and back-to-back reads leave none -- averaging samples taken 60 us apart
+// mostly averages the same noise excursion.
+static const uint32_t BATTERY_SAMPLE_INTERVAL_MS = 100;
 
-// ABOVE this there is no lithium cell either -- a single Li-ion tops out at
-// 4.2 V and a charger holds it at most a little over that. Without this bound
-// the SoC curve clamps anything past its top point to 100%, so a disconnected
-// or floating ADC pin reads out as a healthy FULL battery: observed on the
-// bench at 6365 mV reported as "100% (good)". An implausible voltage means the
-// measurement is wrong, not that the battery is excellent.
-static const uint16_t BATTERY_IMPLAUSIBLE_ABOVE_MV = 4400;
+// Exponential moving average across those reads, on top of the 16-sample
+// oversample within each. At alpha 0.2 and a 100 ms interval the time constant
+// is ~500 ms, cutting residual noise about threefold while still settling
+// faster than the 10 s console cadence. Measured swing before filtering was
+// +/-23 mV, about +/-3% of SoC on the steep part of the curve -- enough on its
+// own to straddle a band boundary indefinitely.
+static const float BATTERY_EMA_ALPHA = 0.20f;
+
+// --- battery: presence hysteresis ------------------------------------------
+// SEPARATE rising and falling thresholds, and the pair that matters most in
+// practice. With a single threshold, the contact bounce of inserting a cell
+// drags the reading back and forth across it, and each crossing flips the band
+// between a real level and "unknown" -- every flip a state change, every change
+// a telemetry event. Observed as a burst of report(change) lines during a
+// battery swap that settled only once the cell was seated.
+static const uint16_t BATTERY_PRESENT_ABOVE_MV = 2700;  // absent -> present
+static const uint16_t BATTERY_ABSENT_BELOW_MV = 2500;   // present -> absent
+
+// ...and a DWELL on top of those thresholds. Amplitude hysteresis alone cannot
+// survive a cell being inserted, because during the contact bounce the reading
+// genuinely is at 0 and at 4150 in alternate samples -- it crosses both
+// thresholds legitimately, so no threshold pair can reject it. Only requiring
+// the reading to stay present for a continuous interval can. 500 ms is ~5
+// samples at the 10 Hz rate, comfortably longer than a contact settles.
+static const uint32_t BATTERY_PRESENCE_DEBOUNCE_MS = 500;
+
+// Upper bound, likewise hysteretic. Above this no lithium cell can be present:
+// without it the SoC curve clamps anything past its top point to 100%, so a
+// floating pin reads as a healthy FULL battery -- measured on the bench at
+// 6365 mV reported as "100% (good)".
+static const uint16_t BATTERY_IMPLAUSIBLE_ABOVE_MV = 4400;  // valid -> invalid
+static const uint16_t BATTERY_PLAUSIBLE_BELOW_MV = 4300;    // invalid -> valid
+
+// Ceiling applied to battery_mv before it is PUBLISHED. Must not exceed the
+// `check (battery_mv between 0 and 6000)` bound in supabase/schema.sql.
+//
+// This is a wire constraint, not a measurement one. The floating-pin fault this
+// firmware already hit read 6365 mV, which the CHECK rejects -- and PostgREST
+// answers 400, so patchStatus() fails, backs off 15 s, and retries forever
+// without ever succeeding. A unit with a disconnected divider would therefore
+// never report its BOWL COUNT: the product lost to a battery-wiring fault.
+//
+// Clamping rather than sending null keeps the diagnostic. 6000 mV is still
+// impossible for a single Li-ion cell, so a dashboard seeing it still knows the
+// divider is broken -- which is the entire reason battery_mv is published.
+static const uint16_t BATTERY_PUBLISH_MAX_MV = 6000;
+
+// --- battery: band hysteresis (percent) ------------------------------------
+// One rising and one falling threshold per boundary. A band must be HARDER to
+// leave than it was to enter, or a reading sitting on a boundary oscillates
+// forever on ADC noise alone -- and each oscillation is a published state
+// change, not merely a cosmetic wobble.
+//
+// The FALLING thresholds are the nominal band edges -- 10 / 35 / 70 -- because
+// those are the numbers documented to the front-end, and a battery in service
+// is discharging. The rising thresholds sit 5 points above them.
+//
+// 5 points is sized from measured noise. Unfiltered swing was +/-23 mV, about
+// +/-3% of SoC where the curve is steep; the EMA cuts that to roughly +/-1%, so
+// 5 points is about 5 sigma. 3 would have been the tempting choice and is not
+// enough -- the EMA output is correlated sample to sample, so excursions
+// persist rather than averaging away within a band crossing, and a cell parked
+// near an edge would still flip occasionally. The cost of the wider band is
+// that a charging cell reads one band low for a few extra percent, which is
+// invisible in a 4-band indicator.
+//
+// This is the fault that prompted it: a charging cell sat at 3577-3623 mV,
+// reading 35-41%, with the low/medium boundary at exactly 35. It alternated
+// low/medium for minutes, and every alternation was a published state change.
+static const float BAT_CRITICAL_TO_LOW_UP = 15.0f;
+static const float BAT_LOW_TO_CRITICAL_DOWN = 10.0f;
+static const float BAT_LOW_TO_MEDIUM_UP = 40.0f;
+static const float BAT_MEDIUM_TO_LOW_DOWN = 35.0f;
+static const float BAT_MEDIUM_TO_GOOD_UP = 75.0f;
+static const float BAT_GOOD_TO_MEDIUM_DOWN = 70.0f;
+
+// --- battery: reported percentage ------------------------------------------
+// The console figure only moves once it has moved this far, so a stationary
+// cell shows a stationary number. Only the BAND is published, so this is
+// presentation rather than protocol -- but a percentage that jitters by a point
+// every line makes the console harder to read during calibration.
+static const int8_t BATTERY_PCT_DEADBAND = 2;
+
+// --- charger sense: debounce ------------------------------------------------
+// A new charging state must hold for this long before it is accepted. The
+// majority vote in readCharging() samples microseconds apart, which rejects a
+// noise spike but not a genuinely bouncing contact -- plugging a charger in is
+// a mechanical event lasting tens of milliseconds, and every bounce would
+// otherwise be a published change.
+static const uint32_t CHARGING_DEBOUNCE_MS = 2000;
 
 }  // namespace config

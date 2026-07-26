@@ -88,7 +88,32 @@ Fleet defaults plus optional per-device overrides.
 
 Appending every report would be ~30 devices × 8640/day ≈ **259k rows/day**,
 exhausting the free tier in about ten days. The heartbeat is **60 s** and only
-proves liveness, since the firmware posts immediately on any real change.
+proves liveness, since the firmware posts on any real change.
+
+### One telemetry round per 5 s per device
+
+`POST_MIN_INTERVAL_MS` puts a hard floor between rounds. A round is at most two
+requests — the queued history batch, then the current-state PATCH.
+
+This throttles the **wake-up, not the data**. Every change is still enqueued the
+instant it is observed, with its own `age_ms`, so `recorded_at` keeps full
+resolution; changes falling inside one window are simply **clubbed into the next
+round**. The whole batch goes in one POST and the state row carries the latest
+values by construction, so nothing is merged away or dropped.
+
+> The floor exists because an unstable input turns into one HTTP request per
+> transition. Measured: eight `ok`/`discontiguous` flips in 45 s from a
+> misaligned sensor, and separately dozens of battery-band flips per minute from
+> a cell resting on a threshold.
+>
+> An earlier version of this limiter **did not work**. It lived inside
+> `requestImmediateUpsert()` and gated only the PATCH, leaving the event POST
+> completely unthrottled — so a flapping input still produced a request per
+> transition, which is the exact thing it was written to prevent. There is now
+> one limiter, in `telemetry::loop()`, covering both paths.
+
+The floor does not delay the boot report: the first round after power-up is
+always immediate.
 
 ### No upserts anywhere — this is deliberate
 

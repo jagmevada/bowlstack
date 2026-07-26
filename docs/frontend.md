@@ -79,7 +79,9 @@ are the ones most likely to be got wrong by reasonable assumption.
 | --- | --- |
 | "No data for hours = broken" | Devices are dark ~16 h/day **by design**. Use `offline`, which is service-hour aware. |
 | "there is a battery percentage" | There is **`battery_level`** — a band. `null` means no cell detected, not flat. |
+| "the band edges are fixed" | They are **hysteretic**. A cell leaves `medium` at 35% but re-enters at 40%. Do not infer a percentage from a band. |
 | "History is regularly sampled" | Rows exist only on **change**. Gaps are steady state. |
+| "one change = one arrival" | Writes are batched at most every **5 s**. Rows sharing an arrival instant can describe moments up to 5 s apart — order by `recorded_at`. |
 | "`recorded_at` ≈ `received_at`" | Offline events are **backdated** from a device-reported age. A large gap is correct. |
 | "A device is a board" | A device is an **installation**. A replaced board keeps the `device_id`; only `mac` changes. |
 | "`item_slot` is a dish" | It is a **physical position**. The dish changes per meal. |

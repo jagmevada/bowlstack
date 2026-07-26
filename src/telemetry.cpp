@@ -16,6 +16,17 @@ namespace {
 // Events held while offline. Small on purpose: the current state is re-sent on
 // every reconnect and every boot, so the buffer preserves only the TIMING of
 // intermediate changes, not the truth of the present.
+//
+// POST_MIN_INTERVAL_MS below also parks up to 5 s of changes here even while
+// ONLINE, which is new -- the queue used to drain on the next loop() pass. In
+// normal service that is a handful of entries: bowl changes are seconds apart,
+// and the battery band and charger state are both hysteretic now. A sensor
+// flapping at tick rate could still overflow it, which drops the OLDEST and
+// leaves a gap in `seq` -- visible server-side as exactly what it is, rather
+// than silently pretending the history is complete. 32 is kept rather than
+// raised because the batch is serialised into one JsonDocument, and doubling the
+// queue doubles a ~8 KB heap allocation on a device that also holds a TLS
+// session.
 const uint8_t QUEUE_LEN = 32;
 
 // Heartbeat. Changes post immediately, so this only proves liveness. At 10 s
@@ -26,14 +37,25 @@ const uint32_t STATUS_PERIOD_MS = 60000;
 // Backoff after a failed post, so a dead uplink cannot spin the loop.
 const uint32_t RETRY_PERIOD_MS = 15000;
 
-// Floor between change-triggered posts. A genuinely unstable input -- a
-// misaligned sensor, or something intermittently clipping a beam -- can flap
-// the stack status several times a second, and each flap would otherwise be
-// its own immediate HTTP request. Observed on the bench: eight OK/DISCONTIGUOUS
-// transitions in 45 s. Every change is still ENQUEUED, so no history is lost;
-// only the network wake-up is throttled, and the next post carries the current
-// state anyway.
-const uint32_t CHANGE_POST_MIN_GAP_MS = 5000;
+// Hard floor between telemetry rounds for this device. A genuinely unstable
+// input -- a misaligned sensor, something intermittently clipping a beam, a
+// battery resting on a band boundary -- can flap state several times a second,
+// and each flap would otherwise be its own HTTP request. Observed on the bench:
+// eight OK/DISCONTIGUOUS transitions in 45 s, and separately dozens of battery
+// band flips per minute.
+//
+// This throttles the WAKE-UP, not the data. Every change is still enqueued the
+// moment it happens with its own timestamp, so history keeps full resolution;
+// changes occurring inside one window are simply clubbed into the next round --
+// the whole batch in one POST, and the current-state PATCH carrying the latest
+// values by construction.
+//
+// This is the ONLY rate limiter on the uplink, deliberately. There used to be a
+// second one inside requestImmediateUpsert(), which gated only the PATCH and
+// left the event POST completely unthrottled -- so a flapping input still made
+// one request per transition, which is exactly what the limiter was there to
+// prevent.
+const uint32_t POST_MIN_INTERVAL_MS = 5000;
 
 // Backoff once the server says this device is not registered. Retrying cannot
 // fix that; only a human inserting a `devices` row can.
@@ -53,7 +75,10 @@ struct QueuedEvent {
   LevelState levels[config::SENSOR_COUNT];
   bool sensorOk[config::SENSOR_COUNT];
   uint8_t sensorsOnline;
-  int8_t batteryPercent;
+  // The band, not the percentage -- and captured at enqueue time, so a buffered
+  // event replays the battery state it was recorded with rather than whatever
+  // the cell reads when the network finally comes back.
+  battery::Level batteryLevel;
   bool charging;
 };
 
@@ -73,6 +98,12 @@ uint32_t nextStatusMs_ = 0;
 bool backoffActive_ = false;
 uint32_t backoffUntilMs_ = 0;
 bool statusPending_ = true;  // always report once at boot
+
+// Enforces POST_MIN_INTERVAL_MS. everPosted_ rather than a sentinel timestamp:
+// comparing against 0 would make a device booting after the millis() wrap sit
+// out a window for no reason.
+bool everPosted_ = false;
+uint32_t lastPostMs_ = 0;
 
 WiFiClientSecure *tls_ = nullptr;
 
@@ -96,7 +127,8 @@ const char *reasonName(Reason r) {
 // column, while the event INSERT adds it separately.
 void writeCommon(JsonObject o, uint8_t stackCount, StackStatus stackStatus,
                  const LevelState *levels, const bool *sensorOk,
-                 uint8_t sensorsOnline, int8_t batteryPercent, bool charging) {
+                 uint8_t sensorsOnline, battery::Level batteryLevel,
+                 bool charging) {
   o["stack_count"] = stackCount;
   o["stack_status"] = BowlLogic::wireName(stackStatus);
 
@@ -115,11 +147,14 @@ void writeCommon(JsonObject o, uint8_t stackCount, StackStatus stackStatus,
   // publishing a number would invite the UI to render precision that is not
   // there. null when no cell is detected -- never a fabricated "critical",
   // which would be indistinguishable from a genuinely flat battery.
-  const battery::Level lvl = battery::levelFromSoc(batteryPercent);
-  if (lvl == battery::Level::Unknown) {
+  //
+  // Taken as decided by the hysteresis upstream, never recomputed here: the
+  // band is the output of a state machine, and re-deriving it from a raw
+  // percentage would reintroduce the boundary oscillation it exists to stop.
+  if (batteryLevel == battery::Level::Unknown) {
     o["battery_level"] = nullptr;
   } else {
-    o["battery_level"] = battery::levelName(lvl);
+    o["battery_level"] = battery::levelName(batteryLevel);
   }
 
   o["charging"] = charging;
@@ -226,7 +261,7 @@ bool flushEvents() {
 
     o["reason"] = reasonName(e.reason);
     writeCommon(o, e.stackCount, e.stackStatus, e.levels, e.sensorOk,
-                e.sensorsOnline, e.batteryPercent, e.charging);
+                e.sensorsOnline, e.batteryLevel, e.charging);
   }
 
   String body;
@@ -280,8 +315,18 @@ bool patchStatus(const DeviceStatus &s) {
   o["boot_id"] = bootId_;
   o["uptime_s"] = s.uptimeSec;
   writeCommon(o, s.stackCount, s.stackStatus, s.levels, s.sensorOnline,
-              s.sensorsOnline, s.batteryPercent, s.charging);
-  o["battery_mv"] = s.batteryMv;
+              s.sensorsOnline, s.batteryLevel, s.charging);
+
+  // Clamped to the schema's CHECK bound. A floating ADC pin reads far above any
+  // real cell -- 6365 mV was measured on this hardware -- and the raw value
+  // would violate `check (battery_mv between 0 and 6000)`, which PostgREST
+  // reports as 400. patchStatus() would then fail on every attempt for the life
+  // of the fault, so a broken battery divider would silently stop the BOWL COUNT
+  // from ever reaching Supabase. The clamped value is still impossible for a
+  // Li-ion cell, so it remains the wiring diagnostic it exists to be.
+  o["battery_mv"] = s.batteryMv > config::BATTERY_PUBLISH_MAX_MV
+                        ? config::BATTERY_PUBLISH_MAX_MV
+                        : s.batteryMv;
   o["mac"] = s.mac;
 
   String body;
@@ -334,7 +379,7 @@ void enqueue(const DeviceStatus &s, Reason reason, uint32_t seq) {
   e.stackCount = s.stackCount;
   e.stackStatus = s.stackStatus;
   e.sensorsOnline = s.sensorsOnline;
-  e.batteryPercent = s.batteryPercent;
+  e.batteryLevel = s.batteryLevel;
   e.charging = s.charging;
   for (uint8_t i = 0; i < config::SENSOR_COUNT; i++) {
     e.levels[i] = s.levels[i];
@@ -348,20 +393,17 @@ void enqueue(const DeviceStatus &s, Reason reason, uint32_t seq) {
   queue_[(head_ + count_) % QUEUE_LEN] = e;
   count_++;
 
-  // statusPending_ is deliberately NOT set here. It is owned by
-  // requestImmediateUpsert(), whose rate limiter would otherwise be dead code:
-  // the only caller invokes both back to back, so setting the flag here made
-  // the 5 s floor gate nothing and every flap cost a PATCH as well as a POST.
+  // statusPending_ is deliberately NOT set here: enqueueing history and asking
+  // for the state row to be refreshed are separate decisions, and the caller
+  // makes both explicitly. loop() posts a queued batch on its own anyway, so an
+  // event is never stranded by the flag being clear.
 }
 
 void requestImmediateUpsert() {
-  // Throttle the wake-up, not the data. The event is already queued by
-  // enqueue(), so history is complete either way; this only stops a flapping
-  // input turning into one HTTP request per transition.
-  static uint32_t nextAllowedMs = 0;
-  const uint32_t now = millis();
-  if ((int32_t)(now - nextAllowedMs) < 0) return;
-  nextAllowedMs = now + CHANGE_POST_MIN_GAP_MS;
+  // Just arms the flag. Rate limiting lives in loop(), in one place, where it
+  // covers the event POST as well -- this function used to throttle here and
+  // gate only the PATCH, which left the POST path unlimited and made the limit
+  // ineffective against exactly the flapping it was written for.
   statusPending_ = true;
 }
 
@@ -384,8 +426,27 @@ void loop(const DeviceStatus &current) {
     return;
   }
 
+  const bool due = (int32_t)(now - nextStatusMs_) >= 0;
+
+  // Nothing to say. Checked before the rate limiter so an idle device does not
+  // consume its window and then delay a change that arrives a moment later.
+  if (count_ == 0 && !statusPending_ && !due) return;
+
+  // The per-device floor. Unsigned subtraction, so it is correct across the
+  // millis() wrap at ~49.7 days; everPosted_ keeps the very first report
+  // immediate instead of making a freshly booted device wait out a window it
+  // has no history for.
+  if (everPosted_ && (uint32_t)(now - lastPostMs_) < POST_MIN_INTERVAL_MS) {
+    return;
+  }
+  lastPostMs_ = now;
+  everPosted_ = true;
+
   // History first, oldest-first, so a reconnect replays what happened while
-  // offline before the current-state row is overwritten.
+  // offline before the current-state row is overwritten. Everything queued
+  // since the last round goes in ONE batch -- that is the clubbing: the writes
+  // are coalesced, the events themselves are not merged or dropped, so each
+  // keeps its own recorded_at and the transition history stays intact.
   if (count_ > 0 && !flushEvents()) {
     backoffUntilMs_ = now + RETRY_PERIOD_MS;
     backoffActive_ = true;
@@ -393,9 +454,11 @@ void loop(const DeviceStatus &current) {
     return;
   }
 
-  const bool due = (int32_t)(now - nextStatusMs_) >= 0;
   if (!statusPending_ && !due) return;
 
+  // `current` is the caller's latest snapshot, so the state row always carries
+  // the newest values regardless of how many changes were clubbed into the
+  // batch above.
   if (patchStatus(current)) {
     statusPending_ = false;
     nextStatusMs_ = now + STATUS_PERIOD_MS;

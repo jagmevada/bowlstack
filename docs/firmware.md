@@ -201,10 +201,27 @@ ADC needs, while drawing ~210 µA — about 1.7 mAh/day at 8 h service, negligib
 against a 3.4 Ah cell. Larger resistors would save current but push source
 impedance out of spec.
 
-Each reading is the **mean of 16 conversions**: a single ESP32 sample carries
-tens of millivolts of noise, which the steep end of the discharge curve turns
-into several percent of apparent charge — enough to flap a battery band on
-sampling noise alone.
+#### Sampling and filtering
+
+Three stages, each doing something the others cannot:
+
+| Stage | What it removes |
+| --- | --- |
+| **mean of 16 conversions** per read | per-conversion noise — a single ESP32 sample carries tens of millivolts |
+| **read at 10 Hz** (`BATTERY_SAMPLE_INTERVAL_MS`) | — |
+| **EMA, α = 0.20** across reads (~500 ms τ) | the slower wander that survives oversampling |
+
+The 10 Hz rate is not arbitrary. `device_status::sample()` runs from the sensor
+task every 2 ms, and 16 conversions at ~100 µs is ~1.6 ms of work — measuring on
+every call meant **~8000 conversions/second**, consuming most of the measurement
+task to track a quantity that moves over hours. At 10 Hz it is 160/s for the
+same answer.
+
+> The interval is also what makes the EMA a filter rather than decoration.
+> Averaging samples taken 60 µs apart largely averages the *same* noise
+> excursion; 100 ms apart they are independent. Measured residual before
+> filtering was ±23 mV — about ±3% of SoC where the curve is steep — and the EMA
+> cuts that roughly threefold.
 
 Voltage is converted through a **measured discharge curve**
 (`include/battery_soc.h`), not a straight line between 3.0 V and 4.2 V. Li-ion
@@ -218,31 +235,120 @@ optimistic in mid-range and collapses without warning near the end.
 > battery as 100% — an inversion that looks entirely plausible on a bench where
 > the cell is always near full. The header stores `SoC = 100 − column`.
 
+#### Bands, and why every threshold is doubled
+
 Four coarse bands, because a percentage from a resting-voltage curve is far
 less precise than its decimals suggest — load, temperature, cell age and
-per-unit ADC calibration all shift it:
+per-unit ADC calibration all shift it.
 
-| Band | SoC |
-| --- | --- |
-| `good` | > 70% |
-| `medium` | > 35% |
-| `low` | > 10% |
-| `critical` | ≤ 10% |
-| `unknown` | no cell, or an implausible reading |
+Every boundary is a **Schmitt trigger**: one threshold to enter a band from
+below, a lower one to fall back out of it.
+
+| Band | Enter rising at | Leave falling at |
+| --- | --- | --- |
+| `good` | ≥ 75% | < 70% |
+| `medium` | ≥ 40% | < 35% |
+| `low` | ≥ 15% | < 10% |
+| `critical` | — | — |
+| `unknown` | cell ≥ 2700 mV *and* ≤ 4300 mV | cell < 2500 mV *or* > 4400 mV |
+
+The **falling** thresholds are the nominal edges — 10 / 35 / 70 — because those
+are the numbers documented to the front-end and a battery in service is
+discharging.
+
+The **first** classification after a cell appears uses the falling edges too.
+There is no history to preserve on a first look, so hysteresis has nothing to do.
+Without this a device booting with a 72% cell would report `medium` and stay
+there for the whole discharge, since it could never rise to the 75% entry
+threshold.
+
+> **This exists because of a measured failure.** A charging cell sat at
+> 3577–3623 mV, which the curve maps to 35–41%, with the low/medium boundary at
+> exactly 35. It alternated `low` / `medium` for minutes:
+>
+> ```
+> cell 3583 mV : 35% -> low
+> cell 3619 mV : 41% -> medium
+> cell 3579 mV : 35% -> low
+> ```
+>
+> The cell was fine and the ADC was working. Every alternation was a published
+> state change and a Supabase write. A single-threshold classifier oscillates
+> whenever its input rests on the threshold — and for a battery band that is
+> most of its life, because the whole point of a band is that the cell spends a
+> long time near each edge.
+
+Filtering and hysteresis are **both** required. The filter alone only narrows
+the noise; a quiet input parked exactly on a threshold still flips on the last
+surviving millivolt. Hysteresis alone works but needs a band wide enough to
+swallow raw noise, costing real resolution. Together each stays modest — 5
+points, about 5σ of the filtered signal.
+
+> The gap is 5 rather than 3 because the EMA output is **correlated** sample to
+> sample: excursions persist rather than averaging away within a crossing.
+
+Hysteresis is applied **after** filtering, never before. Feeding a latched value
+back into a filter builds a system whose output depends on its own history in a
+way that is very hard to reason about.
+
+The band is decided once, in `battery::Monitor`, and then **carried** through
+`DeviceStatus`, the event queue and both JSON payloads. Nothing downstream
+re-derives it. That is load-bearing rather than tidiness: the band is the output
+of a state machine, so recomputing it from a percentage would discard exactly
+the history that stops it oscillating. There is deliberately no stateless
+`soc → Level` function left in the codebase.
 
 **Only the band is published.** The percentage is computed and printed locally —
 it is what you calibrate against — but sending a number would invite the UI to
-render precision the measurement does not have. `battery_mv` goes up alongside
-it because that is a *measurement*, and an implausible value there identifies a
-wiring fault the band would disguise.
+render precision the measurement does not have. It also carries a **2-point
+deadband**, so a stationary cell shows a stationary figure. `battery_mv` goes up
+alongside the band because that is a *measurement*, and an implausible value
+there identifies a wiring fault the band would disguise.
 
-Readings are bounded at **both** ends. Below `BATTERY_ABSENT_BELOW_MV` the input
-is open; above `BATTERY_IMPLAUSIBLE_ABOVE_MV` no lithium cell can produce it, so
-the measurement is broken. Both report unknown rather than a number.
+Presence is bounded at **both** ends, hysteretically. Below
+`BATTERY_ABSENT_BELOW_MV` the input is open; above
+`BATTERY_IMPLAUSIBLE_ABOVE_MV` no lithium cell can produce it, so the
+measurement is broken. Both report `unknown` rather than a number.
 
 > The upper bound exists because of a real failure: the SoC curve clamps
 > anything above its top point to 100%, so a floating pin read **6365 mV as
 > "100% (good)"** — a disconnected sensor presenting as a healthy full battery.
+
+Presence carries a **500 ms dwell** on top of those thresholds, and is decided
+on the **raw** reading rather than the filtered one. Both details are
+load-bearing, and each was a bug first.
+
+**Why a dwell, not just thresholds.** Amplitude hysteresis cannot survive a cell
+being inserted: during the contact bounce the reading genuinely *is* 0 mV and
+4150 mV in alternate samples, so it crosses both thresholds legitimately and no
+threshold pair can reject it. Only requiring the reading to stay present for a
+continuous interval can. This is the same `HoldDebounce` the charger sense uses —
+hysteresis in the time domain rather than the amplitude domain, which is the
+right tool for anything mechanical.
+
+**Why presence comes from the raw value.** Presence *gates* the filter, so
+deciding it from the filter's own output couples the two and lets the absent
+period leak into the present one. The first implementation filtered first, and
+an adversarial review caught the consequence:
+
+> With no cell fitted the EMA decays toward 0 mV, and the seed flag latched true
+> forever so it never re-seeded. Fitting a full 4150 mV cell into a *running*
+> unit had the EMA climb from ~0, cross the presence threshold partway up, and
+> get classified on a voltage the cell never had — `critical` → `low` → `medium`
+> → `good` over 1.4 s. **Four published band changes and a `critical` battery
+> alert for a cell at 99%**, which the front-end renders as "charge or swap".
+>
+> The mirror case was worse. Recovering from the floating-pin fault, the EMA
+> decayed from 6365 mV and re-entered the plausible window at 4259 mV, which the
+> curve clamps to 100% — publishing a confident **FULL** battery for a
+> half-charged cell.
+
+Deciding presence on the raw sample makes the two independent: the filter never
+sees a sample from the wrong regime, so it has nothing to unlearn. The filter
+state is discarded whenever the cell goes absent, so the next cell is seeded from
+its own first sample. Verified by simulation against the real curve — each of
+those scenarios now produces exactly **one** transition, straight to the correct
+band.
 
 The stated 3.0 V cutoff and the curve's 2.750 V floor are not in conflict: 3.0 V
 lands at roughly 5% on this curve, so the cutoff keeps a small reserve rather
@@ -269,7 +375,19 @@ divider and sat the pin near 4.5 V, which is why the resistor value and the pull
 choice are a matched pair, not independent decisions.
 
 Read as a **majority vote over 5 samples** to guard transition edges and harness
-coupling.
+coupling — and that is *all* the vote does. The samples are microseconds apart,
+so a contact that is genuinely bouncing gives the same wrong answer to all five.
+
+A **2 s time-domain debounce** (`CHARGING_DEBOUNCE_MS`, evaluated at the same
+10 Hz) handles that: a new state must hold for the full interval before it is
+accepted, and any bounce restarts the dwell. This is the time-domain equivalent
+of the voltage hysteresis above, and it exists for the same reason — plugging a
+charger in is a mechanical event lasting tens of milliseconds, and every bounce
+during it would otherwise be a published state change.
+
+> The first observation is **adopted**, not debounced away from a default.
+> Otherwise a device that boots on charge spends 2 s claiming it is not
+> charging, then reports a transition that never happened.
 
 ### Power console line
 

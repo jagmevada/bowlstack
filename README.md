@@ -169,3 +169,12 @@ inside third-party libraries.
 bowl". An impossible stack reports a fault, not a count. Each of these started
 as a bug where the firmware sounded confident and was wrong — the pattern is
 deliberate throughout.
+
+**Every threshold in this firmware is doubled.** Bowl presence, battery band,
+cell presence, charger sense — each has a separate rising and falling edge. A
+single-threshold classifier oscillates whenever its input rests on the
+threshold, and real inputs rest on thresholds constantly: that is what a
+threshold *is*. Filtering alone is not a substitute, because a quiet signal
+parked on an edge still flips on the last surviving millivolt. Both battery
+faults found on the bench were this, and each one turned measurement noise into
+a stream of Supabase writes.

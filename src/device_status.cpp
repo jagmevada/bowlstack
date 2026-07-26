@@ -21,10 +21,19 @@ void begin() {
   pinMode(config::PIN_CHARGING, INPUT_PULLDOWN);
 }
 
-// Majority vote. The pull-down makes a single read sound in principle; this
-// guards transition edges and any coupling along the harness, for the cost of a
-// few microseconds.
-static bool readCharging() {
+// Filtering and hysteresis state. Single instances, owned by this module and
+// touched only from sample(), which the sensor task calls -- so no locking.
+static battery::Monitor monitor_;
+static battery::ChargeDebounce chargeDebounce_;
+static uint16_t pinMv_ = 0;
+static uint32_t nextSampleMs_ = 0;
+static bool everSampled_ = false;
+
+// Majority vote across a few back-to-back reads. This rejects an isolated noise
+// spike, and that is ALL it does: the samples are microseconds apart, so a
+// contact that is genuinely bouncing gives the same wrong answer to all five.
+// The time-domain debounce in battery::ChargeDebounce is what handles that.
+static bool readChargingRaw() {
   uint8_t high = 0;
   for (uint8_t i = 0; i < config::CHARGING_SAMPLES; i++) {
     if (digitalRead(config::PIN_CHARGING) == HIGH) high++;
@@ -53,25 +62,27 @@ static uint16_t readPinMv() {
   return (uint16_t)(sum / samples);
 }
 
-static int8_t batteryPercent(uint16_t mv) {
-  // No cell wired, so the input floats. Report unknown rather than inventing a
-  // plausible-looking 0%, which would be indistinguishable upstream from a
-  // genuinely flat battery.
-  if (mv < config::BATTERY_ABSENT_BELOW_MV) return -1;
+// Reads the power inputs at BATTERY_SAMPLE_INTERVAL_MS and feeds the filters.
+//
+// Rate-limited because sample() is called from the sensor task every 2 ms,
+// while readPinMv() costs ~1.6 ms of ADC conversions: measuring on every call
+// spent most of the measurement task tracking a quantity that moves over hours.
+// The interval is also what makes the EMA a filter rather than decoration --
+// averaging samples taken 60 us apart largely averages the same noise
+// excursion, whereas 100 ms apart they are independent.
+//
+// Presence bounds, curve interpolation and band selection all live inside
+// battery::Monitor now, so there is exactly one place where a millivolt reading
+// becomes a band.
+static void servicePower() {
+  const uint32_t now = millis();
+  if (everSampled_ && (int32_t)(now - nextSampleMs_) < 0) return;
+  nextSampleMs_ = now + config::BATTERY_SAMPLE_INTERVAL_MS;
+  everSampled_ = true;
 
-  // Bound the OTHER end too. The SoC curve clamps anything above its top point
-  // to 100%, so without this a floating pin -- which swings high as readily as
-  // low -- reports a healthy full battery. A reading no lithium cell can
-  // produce means the measurement is broken, and saying so is the only honest
-  // answer available.
-  if (mv > config::BATTERY_IMPLAUSIBLE_ABOVE_MV) return -1;
-
-  // Interpolate the MEASURED discharge curve rather than assuming a straight
-  // line between 3.0 V and 4.2 V. Li-ion is markedly non-linear: the real cell
-  // sits above 3.6 V for the first ~60% of its capacity and then falls away
-  // sharply, so a linear fit reads roughly 20 points optimistic in mid-range
-  // and collapses without warning near the end.
-  return (int8_t)lroundf(battery::socFromMillivolts(mv));
+  pinMv_ = readPinMv();
+  monitor_.update((uint16_t)lroundf((float)pinMv_ * config::BATTERY_DIVIDER), now);
+  chargeDebounce_.update(readChargingRaw(), now, config::CHARGING_DEBOUNCE_MS);
 }
 
 DeviceStatus sample(const SensorArray &sensors, const BowlLogic &logic) {
@@ -83,10 +94,21 @@ DeviceStatus sample(const SensorArray &sensors, const BowlLogic &logic) {
 
   s.uptimeSec = millis() / 1000;
 
-  s.batteryPinMv = readPinMv();
-  s.batteryMv = (uint16_t)(s.batteryPinMv * config::BATTERY_DIVIDER);
-  s.batteryPercent = batteryPercent(s.batteryMv);
-  s.charging = readCharging();
+  servicePower();
+  s.batteryMv = monitor_.millivolts();
+
+  // Derived back from the filtered cell figure rather than reported raw, so the
+  // two numbers on the console are consistent with each other and with the
+  // divider constant. Printing a raw pin voltage beside a filtered cell voltage
+  // makes them disagree by more than the rounding, which is confusing in the
+  // one situation the pin figure exists for: comparing against a multimeter
+  // while deriving BATTERY_DIVIDER.
+  s.batteryPinMv =
+      (uint16_t)lroundf((float)s.batteryMv / config::BATTERY_DIVIDER);
+
+  s.batteryPercent = monitor_.percent();
+  s.batteryLevel = monitor_.level();
+  s.charging = chargeDebounce_.state();
 
   s.sensorsOnline = sensors.onlineCount();
   for (uint8_t i = 0; i < config::SENSOR_COUNT; i++) {
@@ -105,13 +127,18 @@ bool differs(const DeviceStatus &a, const DeviceStatus &b) {
   if (a.sensorsOnline != b.sensorsOnline) return true;
   if (a.charging != b.charging) return true;
 
-  // Compares the BAND, not the percentage: a percentage drifts continuously
-  // and would make every report a "change", defeating the whole point of an
-  // append-on-change history.
-  if (battery::levelFromSoc(a.batteryPercent) !=
-      battery::levelFromSoc(b.batteryPercent)) {
-    return true;
-  }
+  // The band as the hysteresis DECIDED it -- not levelFromSoc() recomputed from
+  // the percentage, which is what this used to do. Recomputing threw away the
+  // state that makes the classification stable, so a cell resting on a boundary
+  // alternated bands on ADC noise alone and every alternation became a report
+  // and a Supabase write. Measured: dozens of change reports per minute from a
+  // battery that was simply sitting at 35%.
+  if (a.batteryLevel != b.batteryLevel) return true;
+
+  // The PERCENTAGE is deliberately not compared, even after its deadband. Only
+  // the band is published, so a percentage-only change produces a byte-identical
+  // payload -- it would be a network write that says nothing. The deadbanded
+  // percentage still exists for the console, where it is read by a person.
   for (uint8_t i = 0; i < config::SENSOR_COUNT; i++) {
     if (a.levels[i] != b.levels[i]) return true;
     if (a.sensorOnline[i] != b.sensorOnline[i]) return true;
@@ -124,12 +151,18 @@ void printPower(const DeviceStatus &s) {
   // what you compare against a multimeter to derive BATTERY_DIVIDER, and an
   // implausible value there identifies a divider fault that the scaled figure
   // would disguise as a merely flat battery.
-  if (s.batteryPercent < 0) {
+  if (s.batteryLevel == battery::Level::Unknown) {
     // Distinguish the two ways a reading can be invalid: too low is an open or
     // unconnected input, too high means the divider is wrong or the pin is
     // floating high. Lumping them together as "no cell" would have sent
     // someone hunting for a dead battery when the fault was in the wiring.
-    const char *why = (s.batteryMv > config::BATTERY_IMPLAUSIBLE_ABOVE_MV)
+    //
+    // Discriminated against the PRESENT threshold, not the implausible one.
+    // Both bounds are hysteretic, so a reading recovering from the high fault
+    // sits between 4300 and 4400 while still classified unknown -- testing
+    // against 4400 would call that "no cell detected" and point the diagnosis
+    // at the opposite end of the circuit.
+    const char *why = (s.batteryMv >= config::BATTERY_PRESENT_ABOVE_MV)
                           ? "IMPLAUSIBLE - check divider / floating pin"
                           : "no cell detected";
     Serial.printf("battery: pin %u mV -> cell %u mV : %s  charging=%s\n",
@@ -138,11 +171,12 @@ void printPower(const DeviceStatus &s) {
   }
   // The percentage is shown HERE but not published: locally it is the number
   // you calibrate against, upstream it would imply precision the measurement
-  // does not have.
+  // does not have. The band beside it is the hysteresed one, so this line shows
+  // what was actually sent -- a percentage a point or two past a boundary while
+  // the band has not yet flipped is the hysteresis working, not a discrepancy.
   Serial.printf("battery: pin %u mV -> cell %u mV : %d%% -> %s  charging=%s\n",
                 s.batteryPinMv, s.batteryMv, s.batteryPercent,
-                battery::levelName(battery::levelFromSoc(s.batteryPercent)),
-                s.charging ? "yes" : "no");
+                battery::levelName(s.batteryLevel), s.charging ? "yes" : "no");
 }
 
 void print(const DeviceStatus &s) {
