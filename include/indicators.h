@@ -24,6 +24,12 @@ namespace indicators {
 // until a pin is an output it floats, and the common anode lights the LED.
 void begin();
 
+// Sweeps each LED then flashes all five. Blocks ~1.5 s in its own task.
+// Proves every indicator is wired and the polarity correct at the one moment
+// someone is watching -- otherwise a dead LED reads as an absent bowl and an
+// inverted one as a present bowl.
+void selfTest();
+
 // Call regularly; it does its own blink timing. `sensorFault` and
 // `wifiDown` decide the health pattern.
 void update(const tasks::PlotFrame &f, bool sensorFault, bool wifiDown);

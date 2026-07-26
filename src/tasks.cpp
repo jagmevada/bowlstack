@@ -244,6 +244,7 @@ void debugTask(void *) {
 
 void indicatorTask(void *) {
   indicators::begin();
+  indicators::selfTest();
 
   for (;;) {
     if (ready()) {

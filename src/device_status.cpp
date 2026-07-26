@@ -12,13 +12,26 @@ void begin() {
   // 11 dB attenuation puts full scale near 3.3 V, which covers a single Li-ion
   // cell once the divider has halved it.
   analogSetPinAttenuation(config::PIN_BATTERY_ADC, ADC_11db);
+  // Plain INPUT in the active-high case: the divider's lower resistor already
+  // holds the pin at 0 V when no charger is present, and an internal pull-down
+  // fighting the divider would shift the sensed level.
   pinMode(config::PIN_CHARGING, config::CHARGING_ACTIVE_LOW ? INPUT_PULLUP : INPUT);
 }
 
 static uint16_t readBatteryMv() {
-  // analogReadMilliVolts applies the chip's factory ADC calibration, which
-  // matters here: the raw ESP32 ADC is markedly non-linear near its rails.
-  const uint32_t atPin = analogReadMilliVolts(config::PIN_BATTERY_ADC);
+  // Oversample. A single ESP32 ADC conversion carries tens of millivolts of
+  // noise, which the steep end of the discharge curve turns into several
+  // percent of apparent charge -- enough to flap a battery band on nothing but
+  // sampling noise. Averaging 16 reads costs microseconds and cuts that ~4x.
+  //
+  // analogReadMilliVolts applies the chip's factory calibration, which matters
+  // because the raw ADC is markedly non-linear near its rails.
+  const uint8_t samples = 16;
+  uint32_t sum = 0;
+  for (uint8_t i = 0; i < samples; i++) {
+    sum += analogReadMilliVolts(config::PIN_BATTERY_ADC);
+  }
+  const uint32_t atPin = sum / samples;
   return (uint16_t)(atPin * config::BATTERY_DIVIDER);
 }
 

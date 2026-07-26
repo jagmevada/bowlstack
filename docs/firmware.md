@@ -182,7 +182,28 @@ image — the front-panel status must not vanish with the test harness.
 
 ### Battery
 
-Voltage is read on ADC1 and converted through a **measured discharge curve**
+Sensed through a **10k + 10k divider** on GPIO35 (ADC1), so a full 4.2 V cell
+reads 2.10 V at the pin.
+
+> The ratio is set by where the ADC is *accurate*, not by what fits. At
+> `ADC_11db` the nominal full scale is 3.3 V, but the datasheet's recommended
+> input range is **150–2450 mV** — beyond that the converter goes non-linear
+> and saturates early. Halving puts the entire useful battery span
+> (2.75–4.2 V → 1.38–2.10 V) inside that window. A 5k/10k divider would put a
+> *fully charged* cell at 2.80 V, i.e. error exactly where the reading is used
+> to judge the battery healthy.
+
+Equal 10k resistors also give a 5 kΩ source impedance, within the ~10 kΩ the
+ADC needs, while drawing ~210 µA — about 1.7 mAh/day at 8 h service, negligible
+against a 3.4 Ah cell. Larger resistors would save current but push source
+impedance out of spec.
+
+Each reading is the **mean of 16 conversions**: a single ESP32 sample carries
+tens of millivolts of noise, which the steep end of the discharge curve turns
+into several percent of apparent charge — enough to flap a battery band on
+sampling noise alone.
+
+Voltage is converted through a **measured discharge curve**
 (`include/battery_soc.h`), not a straight line between 3.0 V and 4.2 V. Li-ion
 is markedly non-linear: a real cell sits above 3.6 V for the first ~60% of its
 capacity then falls away sharply, so a linear fit reads roughly 20 points

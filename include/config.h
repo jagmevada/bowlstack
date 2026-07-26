@@ -204,17 +204,52 @@ static const float HEALTH_BLINK_WIFI_HZ = 2.0f;
 // mandatory given the telemetry phase to come.
 static const uint8_t PIN_BATTERY_ADC = 35;
 
-// GPIO27 has an internal pull-up. GPIO34-39 do NOT (input-only pins have no
-// pull resistors at all), so using one of those would force an external
-// pull-up on the charger's open-drain STAT output.
+// Charger presence, sensed from the charger's 5 V rail through a DIVIDER:
+//
+//     charger 5V --[4.7k]--+-- GPIO27
+//                          |
+//                        [6.8k]
+//                          |
+//                         GND        -> 2.96 V present, 0 V absent
+//
+// ESP32 pins are NOT 5 V tolerant -- absolute maximum is VDD + 0.3 V, about
+// 3.6 V. A series resistor ALONE does not divide anything; it merely limits
+// current into the internal clamp diode, which then injects that current into
+// the 3.3 V rail. The lower resistor is what makes this safe, and it also
+// holds the pin low when no charger is attached, so no internal pull is used.
+//
+// Relying on the internal pull-down instead would be worse than nothing: at
+// ~45k against 4.7k the pin would sit near 4.5 V.
 static const uint8_t PIN_CHARGING = 27;
 
-// True when the charger pulls STAT low while charging, as TP4056 and similar
-// parts do.
-static const bool CHARGING_ACTIVE_LOW = true;
+// FALSE here: this senses the charger's 5 V rail, so the pin is HIGH while
+// charging. It would be true only for a TP4056-style open-drain STAT output,
+// which pulls low instead.
+static const bool CHARGING_ACTIVE_LOW = false;
 
-// Ratio of the battery sense divider, e.g. 2.0 for equal-value resistors.
-// A single Li-ion cell tops out at 4.2 V, above the ADC's usable range.
+// Battery sense divider: 10k + 10k, so 2.0.
+//
+//     battery + --[10k]--+-- GPIO35
+//                        |
+//                      [10k]
+//                        |
+//                       GND
+//
+// The ratio is chosen by where the ADC is actually accurate, not by what fits.
+// At ADC_11db the nominal full scale is 3.3 V, but the datasheet's recommended
+// input range is 150-2450 mV; beyond that the converter goes non-linear and
+// saturates early. Halving puts a full 4.2 V cell at 2.10 V and an empty
+// 2.75 V one at 1.38 V, so the ENTIRE useful battery range sits inside the
+// accurate window.
+//
+// A 5k/10k divider was the alternative and is rejected: it would put a fully
+// charged cell at 2.80 V, past the recommended limit -- error precisely where
+// the reading is used to judge the battery healthy.
+//
+// Equal 10k resistors also give a 5k source impedance, within the ~10k the ADC
+// needs to sample accurately, while drawing only ~210 uA (about 1.7 mAh/day at
+// 8 h service, negligible against a 3.4 Ah cell). Larger resistors would save
+// current but push source impedance out of spec.
 static const float BATTERY_DIVIDER = 2.0f;
 
 // Li-ion endpoints for the percentage estimate. The real discharge curve is
