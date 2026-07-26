@@ -124,9 +124,40 @@ void buildStatus(Node &n) {
       s.levels[i] = (i < n.stack) ? LevelState::Present : LevelState::Absent;
     }
   }
-  s.stackCount = n.stack;
-  s.stackStatus =
-      (online == config::SENSOR_COUNT) ? StackStatus::Ok : StackStatus::Degraded;
+
+  // The count is DERIVED from the levels, never copied from the simulated stack.
+  //
+  // Copying it emits states no real device can produce -- observed on the bench
+  // as "cnt=4 degraded 0/4", i.e. four bowls counted with every sensor dead. A
+  // front-end built against that learns to trust a number the hardware cannot
+  // justify, which is the one habit this whole design exists to prevent. The
+  // simulator has to be bound by the same rule as the firmware: report what the
+  // sensors support, not what the fiction says is there.
+  //
+  // Mirrors BowlLogic. A bowl cannot float, so the count is the height of the
+  // highest observed bowl, and an Unknown BELOW one is inferred present -- a dead
+  // sensor under a bowl does not make the bowl disappear. An Unknown at or above
+  // the top cannot be resolved either way, so it is not counted, which makes the
+  // reported count a LOWER BOUND. That is precisely what `degraded` tells the UI.
+  int8_t topPresent = -1;
+  for (int8_t i = config::SENSOR_COUNT - 1; i >= 0; i--) {
+    if (s.levels[i] == LevelState::Present) { topPresent = i; break; }
+  }
+  s.stackCount = (uint8_t)(topPresent + 1);
+
+  bool gap = false, unresolved = false;
+  for (uint8_t i = 0; i < config::SENSOR_COUNT; i++) {
+    if ((int8_t)i < topPresent && s.levels[i] == LevelState::Absent) gap = true;
+    if (s.levels[i] == LevelState::Unknown && (int8_t)i > topPresent) {
+      unresolved = true;
+    }
+  }
+
+  s.stackStatus = gap          ? StackStatus::Discontiguous
+                : (unresolved || online < config::SENSOR_COUNT)
+                               ? StackStatus::Degraded
+                               : StackStatus::Ok;
+  if (gap) s.stackCount = 0;  // a fault reports no count, not a guess
 }
 
 // Exactly the fields device_status::differs() compares, so a simulated change
@@ -247,7 +278,30 @@ void begin() {
 
     n.stack = config::SENSOR_COUNT;
     for (uint8_t k = 0; k < config::SENSOR_COUNT; k++) n.sensorOk[k] = true;
-    n.cellMv = 4050 - (uint16_t)(i * 7);  // spread, so bands are not uniform
+
+    // Spread the healthy cells so the bands are not uniform...
+    n.cellMv = 4050 - (uint16_t)(i * 7);
+
+    // ...then start the battery scenarios ALREADY IN the band they exist to
+    // demonstrate. Left on the default spread they all read `good` and drift
+    // down at a few mV per tick, so `low` would not appear for ~20 minutes and
+    // `critical` for longer. A test bed whose states show up eventually is not
+    // much use to someone building a screen right now: every band must be on
+    // screen from the first report.
+    //
+    // Voltages are picked off the measured curve in battery_soc.h, not guessed.
+    switch (n.scenario) {
+      case Scenario::BatteryLow:      n.cellMv = 3520; break;  // ~29% -> low
+      case Scenario::BatteryCritical: n.cellMv = 3150; break;  // ~9%  -> critical
+      case Scenario::BatteryAbsent:   n.cellMv = 40;   break;  // open input
+      case Scenario::BatteryImplausible: n.cellMv = 6365; break;  // floating pin
+      // Starts mid-range and charges upward, so the front-end sees a band
+      // RISING as well as falling -- and it is the only node that supplies
+      // `medium`, which the healthy spread above never reaches.
+      case Scenario::Charging:        n.cellMv = 3700; break;  // ~52% -> medium
+      default: break;
+    }
+
     n.band = battery::Level::Unknown;     // first look uses the nominal edges
     n.charging = false;
     n.quiet = false;
