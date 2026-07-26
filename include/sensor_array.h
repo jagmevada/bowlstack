@@ -41,7 +41,15 @@ class SensorArray {
   Reading reading(uint8_t level) const;
 
   SensorState state(uint8_t level) const { return ch_[level].state; }
+
+  // Sensors producing readings. Excludes Warming by design.
   uint8_t onlineCount() const;
+
+  // Sensors that initialised, whether or not they have concluded a measurement
+  // yet. This -- not onlineCount() -- is the test for "did the bus work":
+  // immediately after begin() every healthy sensor is still Warming, so
+  // onlineCount() is legitimately 0 and would misreport a perfect bus as dead.
+  uint8_t initialisedCount() const;
 
   // millis() of the last accepted in-range sample, for staleness detection.
   // Zero until the sensor has ever produced one.

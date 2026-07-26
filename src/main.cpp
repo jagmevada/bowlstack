@@ -55,7 +55,12 @@ void setup() {
   device_status::begin();
   sensors.begin();
 
-  if (sensors.onlineCount() == 0) {
+  // initialisedCount, not onlineCount: begin() leaves every healthy sensor in
+  // Warming until it concludes its first measurement, so onlineCount() is
+  // legitimately 0 here. Testing it would print a bus fault -- and the
+  // "XSHUT is not wired" diagnosis that follows -- for a perfectly working
+  // array that had just reported all four ready.
+  if (sensors.initialisedCount() == 0) {
     Serial.println("no sensors responded - check I2C0 SDA=17/SCL=16, "
                    "I2C1 SDA=21/SCL=22, XSHUT wiring, 3V3");
     sensors.printDiagnostics();

@@ -228,6 +228,13 @@ uint8_t SensorArray::onlineCount() const {
   return n;
 }
 
+uint8_t SensorArray::initialisedCount() const {
+  uint8_t n = 0;
+  for (uint8_t i = 0; i < config::SENSOR_COUNT; i++)
+    if (ch_[i].state != SensorState::Offline) n++;
+  return n;
+}
+
 void SensorArray::printDiagnostics() const {
   scanBus(Wire, "I2C0");
   scanBus(Wire1, "I2C1");

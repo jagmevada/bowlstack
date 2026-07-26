@@ -111,11 +111,24 @@ bool credentialAt(uint8_t i, const char **ssid, const char **pass) {
 }
 
 void loadCommissioned() {
-  prefs.begin("bowlstack", true);
+  // Read-WRITE, not read-only. Opening a namespace read-only before it has
+  // ever been written fails with NOT_FOUND and logs an error, and returns
+  // nothing -- so the first boot after flashing looks identical to a corrupt
+  // store. Opening read-write creates it; no flash is written unless we put
+  // something.
+  if (!prefs.begin("bowlstack", false)) {
+    Serial.println("wifi: NVS unavailable - commissioned network cannot persist");
+    return;
+  }
   prefs.getString("ssid", credSsid2, sizeof(credSsid2));
   prefs.getString("pass", credPass2, sizeof(credPass2));
   prefs.end();
-  if (credSsid2[0]) Serial.printf("wifi: commissioned network on file: '%s'\n", credSsid2);
+
+  if (credSsid2[0]) {
+    Serial.printf("wifi: commissioned network on file: '%s'\n", credSsid2);
+  } else {
+    Serial.println("wifi: no commissioned network stored yet");
+  }
 }
 
 void storeCommissioned(const char *ssid, const char *pass) {
@@ -293,22 +306,25 @@ void loop() {
       offlineTracked = false;
       retryArmed = false;
 
+      // Remember ANY network that is not compiled in -- by definition someone
+      // commissioned it, and it must survive the next boot.
+      //
+      // Deliberately NOT gated on portalRunning. WiFiManager's save path calls
+      // shutdownConfigPortal() from inside wm.process(), so by the time this
+      // transition is seen the portal has already gone inactive and
+      // portalRunning has been cleared by the branch below -- the commissioned
+      // network would never be stored, which is exactly how a unit configured
+      // through the AP came back after a reboot still hunting only the static
+      // SSIDs.
+      const bool isStatic = (WIFI_SSID_1[0] && strcmp(joinedSsid, WIFI_SSID_1) == 0) ||
+                            (WIFI_SSID_2[0] && strcmp(joinedSsid, WIFI_SSID_2) == 0);
+      if (!isStatic) {
+        storeCommissioned(WiFi.SSID().c_str(), WiFi.psk().c_str());
+      }
+
       if (portalRunning) {
-        // The link came up while the AP was open -- either someone
-        // commissioned it, or one of the known networks came back while the
-        // retries kept running. Either way the AP has done its job: take it
-        // down rather than leaving it advertising the device and burning
-        // power.
-        //
-        // Only record a network as commissioned when it is NOT one of the
-        // compiled-in ones. Otherwise a routine reconnect to a static SSID
-        // during an open portal would overwrite the network someone
-        // deliberately configured.
-        const bool isStatic = (WIFI_SSID_1[0] && strcmp(joinedSsid, WIFI_SSID_1) == 0) ||
-                              (WIFI_SSID_2[0] && strcmp(joinedSsid, WIFI_SSID_2) == 0);
-        if (!isStatic) {
-          storeCommissioned(WiFi.SSID().c_str(), WiFi.psk().c_str());
-        }
+        // The AP has done its job: take it down rather than leaving it
+        // advertising the device and burning power.
         wm.stopConfigPortal();
         portalRunning = false;
         Serial.println("wifi: link is up - closing config portal");
