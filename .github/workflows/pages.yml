@@ -70,8 +70,11 @@ jobs:
           if [ -n "$DASHBOARD_EMAIL" ]; then MODE=account; else MODE=anonymous; fi
           echo "Wrote web/config.js (auto-login: $MODE)"
 
-      # enablement turns Pages on via the API if it is not already, so the
-      # first deploy does not fail on a setting nobody has clicked yet.
+      # enablement only helps once Pages already exists. Creating the site
+      # needs admin rights GITHUB_TOKEN does not have, so on a repo where
+      # Pages has never been turned on this step fails with the unhelpful
+      # "Resource not accessible by integration". That is a ONE-TIME manual
+      # step -- see web/README.md -- not something to debug here.
       - uses: actions/configure-pages@v5
         with:
           enablement: true

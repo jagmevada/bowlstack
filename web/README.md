@@ -79,13 +79,40 @@ python -m http.server 8080
 
 ### 5. Publish to GitHub Pages
 
-Repo → **Settings → Pages → Source: GitHub Actions**. Push to `main`;
-`.github/workflows/pages.yml` publishes `web/` to the site root.
+**Live at https://jagmevada.github.io/bowlstack/**, deployed from the
+`frontend` branch by `.github/workflows/pages.yml`.
 
-Set repository secrets `SUPABASE_URL` and `SUPABASE_ANON_KEY`; the workflow
-writes `config.js` at deploy time so the key stays out of git history. Add
-`DASHBOARD_EMAIL` and `DASHBOARD_PASSWORD` too if you chose the account route
-over anonymous sign-in.
+Three one-time steps, in this order:
+
+1. **Secrets.** `SUPABASE_URL` and `SUPABASE_ANON_KEY`, so the key stays out of
+   git history. Pipe them from `secret.h` rather than pasting, and they never
+   touch a terminal or a shell history file:
+
+   ```powershell
+   gh secret set SUPABASE_URL      # paste when prompted, or pipe from secret.h
+   gh secret set SUPABASE_ANON_KEY
+   ```
+
+   Add `DASHBOARD_EMAIL` / `DASHBOARD_PASSWORD` too if you chose the account
+   route over anonymous sign-in.
+
+2. **Turn Pages on** — repo → **Settings → Pages → Source: GitHub Actions**, or
+
+   ```powershell
+   gh api -X PUT repos/OWNER/REPO/pages -f build_type=workflow
+   ```
+
+   The workflow cannot do this itself. `configure-pages` has an `enablement`
+   input, but *creating* a Pages site needs admin rights `GITHUB_TOKEN` does
+   not have, and the failure reads "Resource not accessible by integration".
+   Worse, a repo that has never had Pages can auto-enable as a **legacy**
+   Jekyll site serving the repo root — the README, not the dashboard. If the
+   site shows your README, that is what happened; the `PUT` above fixes it.
+
+3. **Push.** Any push touching `web/**` on `main` or `frontend` redeploys.
+
+> `frontend` is in the trigger list so the trial can deploy before the
+> dashboard is merged. Drop it once this lands on `main`.
 
 The anon key is built to live in a browser and row-level security is what
 protects the data — but the devices hold the same key, so publishing it widens
