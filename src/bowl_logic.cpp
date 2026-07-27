@@ -1,15 +1,25 @@
 #include "bowl_logic.h"
 
 void BowlLogic::update(const SensorArray &sensors) {
+  SensorState states[config::SENSOR_COUNT];
+  Reading readings[config::SENSOR_COUNT];
   for (uint8_t i = 0; i < config::SENSOR_COUNT; i++) {
-    if (sensors.state(i) != SensorState::Online) {
+    states[i] = sensors.state(i);
+    readings[i] = sensors.reading(i);
+  }
+  update(states, readings);
+}
+
+void BowlLogic::update(const SensorState *states, const Reading *readings) {
+  for (uint8_t i = 0; i < config::SENSOR_COUNT; i++) {
+    if (states[i] != SensorState::Online) {
       // Do NOT touch present_: an offline sensor tells us nothing about the
       // bowl, so the last observation is preserved for when it returns.
       level_[i] = LevelState::Unknown;
       continue;
     }
 
-    const Reading r = sensors.reading(i);
+    const Reading r = readings[i];
 
     if (!r.valid) {
       // No target anywhere in range. That is a direct observation of absence,

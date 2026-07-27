@@ -13,6 +13,11 @@ struct Node {
   telemetry::Channel ch;
   DeviceStatus st;
 
+  // The REAL presence hysteresis, contiguity rule, count and status. One per
+  // node, because the hysteresis carries state. The simulator synthesises the
+  // sensor layer beneath this and nothing above it.
+  BowlLogic logic;
+
   char id[12];       // "BWL-002" -- ch.deviceId and st.deviceId point here
   Scenario scenario;
   uint32_t seq;      // allocated when a change is OBSERVED, as on a real device
@@ -21,6 +26,8 @@ struct Node {
 
   uint8_t stack;
   bool sensorOk[config::SENSOR_COUNT];
+  bool stuck[config::SENSOR_COUNT];  // returns a frozen distance, see below
+  float stuckMm[config::SENSOR_COUNT];
   uint16_t cellMv;
   battery::Level band;
   bool charging;
@@ -108,83 +115,74 @@ void buildStatus(Node &n) {
   }
   s.sensorsOnline = online;
 
-  // Levels are bottom-up, and a real stack is contiguous from f1 because bowls
-  // rest on each other and cannot float. Discontiguous deliberately violates
-  // that, which is the point of the scenario.
-  if (n.scenario == Scenario::Discontiguous) {
-    for (uint8_t i = 0; i < config::SENSOR_COUNT; i++) {
-      s.levels[i] = LevelState::Absent;
-    }
-    s.levels[1] = LevelState::Present;  // a bowl above a gap
-    s.stackCount = 0;                   // a fault reports no count, not a guess
-    s.stackStatus = StackStatus::Discontiguous;
-    return;
-  }
+  // ---------------------------------------------------------------------
+  // Synthesise the SENSOR LAYER, then let production code do everything above
+  // it. That is the whole point: the count, the status, the presence hysteresis
+  // and the contiguity rule all come from BowlLogic, so the simulator CANNOT
+  // disagree with the firmware, because there is only one implementation.
+  //
+  // Reimplementing them drifted, exactly as you would expect. The hand-rolled
+  // copy differed from recompute() on 23 of the 80 reachable states, and had
+  // reintroduced a bug bowl_logic.cpp had already found and fixed. Deleting it
+  // removes that whole class of defect rather than patching this instance.
+  //
+  // What is faked now stops at a distance in millimetres and a SensorState --
+  // which is precisely what the VL53L0X layer produces.
+  // ---------------------------------------------------------------------
+  SensorState states[config::SENSOR_COUNT];
+  Reading readings[config::SENSOR_COUNT];
 
   for (uint8_t i = 0; i < config::SENSOR_COUNT; i++) {
-    if (!n.sensorOk[i]) {
-      s.levels[i] = LevelState::Unknown;  // no data is not "no bowl"
+    states[i] = n.sensorOk[i] ? SensorState::Online : SensorState::Offline;
+
+    Reading &r = readings[i];
+    r.samples = (uint8_t)(config::AVG_WINDOW - 2 * config::TRIM);
+
+    // A bowl sits close to its sensor; an empty level returns no target at all.
+    // Discontiguous puts a bowl above a gap -- physically impossible, so only
+    // reachable through a sensor or mounting fault, which is the scenario.
+    bool bowl = (i < n.stack);
+    if (n.scenario == Scenario::Discontiguous) bowl = (i == 1);
+
+    if (n.stuck[i]) {
+      // A frozen reading. Real ToF output jitters by a millimetre or two even
+      // against a motionless target, so a perfectly constant value is itself a
+      // fault signature. It is in the bed because the CURRENT firmware does NOT
+      // detect it: SensorArray demotes on I/O failures, the 0xFFFF signature and
+      // staleness, and a plausible constant trips none of them. The twin
+      // reproduces that blind spot rather than papering over it -- a front-end
+      // must not assume a stuck sensor will announce itself.
+      r.distanceMm = n.stuckMm[i];
+      r.stdevMm = 0.0f;
+      r.valid = true;
+      continue;
+    }
+
+    if (bowl) {
+      // Bowl face, with the millimetre-scale noise a real sensor shows. The
+      // spread is not decoration: it is what the presence hysteresis in
+      // BowlLogic exists to absorb, so a bed without it would never exercise
+      // that path at all.
+      r.distanceMm = 50.0f + (float)((int32_t)(rnd(n) % 7) - 3);
+      r.stdevMm = 1.0f + (float)(rnd(n) % 3);
+      r.valid = true;
     } else {
-      s.levels[i] = (i < n.stack) ? LevelState::Present : LevelState::Absent;
+      // Nothing in range. BowlLogic treats this as a DIRECT observation of
+      // absence rather than a missing measurement, so it drives the trigger low
+      // outright instead of going through the distance thresholds.
+      r.distanceMm = (float)config::NO_TARGET_MM;
+      r.stdevMm = 0.0f;
+      r.valid = false;
     }
   }
 
-  // The count is DERIVED from the levels, never copied from the simulated stack.
-  //
-  // Copying it emits states no real device can produce -- observed on the bench
-  // as "cnt=4 degraded 0/4", i.e. four bowls counted with every sensor dead. A
-  // front-end built against that learns to trust a number the hardware cannot
-  // justify, which is the one habit this whole design exists to prevent. The
-  // simulator has to be bound by the same rule as the firmware: report what the
-  // sensors support, not what the fiction says is there.
-  //
-  // Mirrors BowlLogic. A bowl cannot float, so the count is the height of the
-  // highest observed bowl, and an Unknown BELOW one is inferred present -- a dead
-  // sensor under a bowl does not make the bowl disappear. An Unknown at or above
-  // the top cannot be resolved either way, so it is not counted, which makes the
-  // reported count a LOWER BOUND. That is precisely what `degraded` tells the UI.
-  // TRANSCRIBED FROM BowlLogic::recompute(), not re-derived. Keep the two in
-  // step: any divergence is a state the front-end will be built against and the
-  // hardware cannot produce.
-  int8_t topPresent = -1;
-  for (int8_t i = 0; i < (int8_t)config::SENSOR_COUNT; i++) {
-    if (s.levels[i] == LevelState::Present) topPresent = i;
+  n.logic.update(states, readings);   // production logic, unmodified
+
+  for (uint8_t i = 0; i < config::SENSOR_COUNT; i++) {
+    s.levels[i] = n.logic.level(i);
   }
-
-  // An Absent BELOW the highest bowl is a floating bowl -- physically impossible,
-  // so a fault rather than a count.
-  for (int8_t i = 0; i < topPresent; i++) {
-    if (s.levels[i] == LevelState::Absent) {
-      s.stackCount = 0;
-      s.stackStatus = StackStatus::Discontiguous;
-      return;
-    }
-  }
-
-  bool ambiguous = false;
-  for (int8_t i = topPresent + 1; i < (int8_t)config::SENSOR_COUNT; i++) {
-    // BREAK at the first observed Absent. Nothing can rest above an empty level,
-    // so contiguity has already settled everything beyond it and an Unknown up
-    // there proves nothing.
-    //
-    // Omitting this break is a bug bowl_logic.cpp had already found and fixed --
-    // it flagged 12 of the 81 level combinations as ambiguous when the count was
-    // exact -- and the simulator reintroduced it. Reachable and permanent: the
-    // Degraded node kills f4 and drains, so at an empty stack it published
-    // levels [absent,absent,absent,unknown] as `degraded` where the firmware
-    // publishes `ok`. An adversarial review found 23 of 80 states disagreeing.
-    if (s.levels[i] == LevelState::Absent) break;
-    if (s.levels[i] == LevelState::Unknown) ambiguous = true;
-  }
-
-  s.stackCount = (uint8_t)(topPresent + 1);
-
-  // AMBIGUITY decides this, never sensor health. A dead sensor BELOW the top bowl
-  // costs nothing, because contiguity proves what it cannot see -- so `ok` with
-  // sensors_online < 4 and an `unknown` level is ordinary production output. The
-  // simulator previously degraded on `online < SENSOR_COUNT` and so could never
-  // emit it, teaching a front-end the false invariant "ok implies 4/4".
-  s.stackStatus = ambiguous ? StackStatus::Degraded : StackStatus::Ok;
+  s.stackCount = n.logic.count();
+  s.stackStatus = n.logic.status();
 }
 
 // Exactly the fields device_status::differs() compares, so a simulated change
@@ -238,6 +236,19 @@ void evolve(Node &n) {
 
     case Scenario::Discontiguous:
       break;  // held, so the fault is always visible somewhere in the fleet
+
+    case Scenario::StuckSensor:
+      // f3 froze reading a bowl face, and the stack drains beneath it. Nothing
+      // in the firmware can tell a frozen reading from a real one, so the node
+      // passes through a window where it over-reports by one with status `ok`
+      // and 4/4 sensors online -- and only once the stack falls below the frozen
+      // level does contiguity see a floating bowl and raise `discontiguous`.
+      // See the enum comment for the full sequence.
+      n.stuck[2] = true;
+      n.stuckMm[2] = 52.0f;
+      if (n.stack > 0 && chance(n, 30)) n.stack--;
+      else if (n.stack == 0 && chance(n, 25)) n.stack = config::SENSOR_COUNT;
+      break;
 
     case Scenario::GoesQuiet:
       // Reports normally for a while, then stops. `offline` in device_overview
@@ -296,6 +307,7 @@ const char *scenarioName(Scenario s) {
     case Scenario::Charging:           return "charging";
     case Scenario::GoesQuiet:          return "goes-quiet";
     case Scenario::Flapping:           return "flapping";
+    case Scenario::StuckSensor:        return "stuck-sensor";
     default:                           return "?";
   }
 }
@@ -313,8 +325,15 @@ void begin() {
     n.scenario = (i < scenarioCount) ? (Scenario)i
                                      : (Scenario)(i % scenarioCount);
 
+    // Sensors default to HEALTHY. A fault appears only where a scenario asks for
+    // one, so an unrelated node never quietly drifts into a degraded state and
+    // muddies what the front-end is looking at.
     n.stack = config::SENSOR_COUNT;
-    for (uint8_t k = 0; k < config::SENSOR_COUNT; k++) n.sensorOk[k] = true;
+    for (uint8_t k = 0; k < config::SENSOR_COUNT; k++) {
+      n.sensorOk[k] = true;
+      n.stuck[k] = false;
+      n.stuckMm[k] = 0.0f;
+    }
 
     // Spread the healthy cells so the bands are not uniform...
     n.cellMv = 4050 - (uint16_t)(i * 7);

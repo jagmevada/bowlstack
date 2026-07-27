@@ -99,6 +99,24 @@ enum class Scenario : uint8_t {
   GoesQuiet,          // reports, then stops -- `offline` must raise the alarm
   Flapping,           // changes fast; exercises the 5 s per-device rate limit
                       //   and proves history keeps its resolution
+  StuckSensor,        // f3 frozen at a plausible distance. Real ToF output
+                      //   jitters by a millimetre or two even against a
+                      //   motionless target, so a perfectly constant value is a
+                      //   fault -- and nothing in the firmware detects it
+                      //   directly: SensorArray demotes on I/O failures, the
+                      //   0xFFFF signature and staleness, none of which a
+                      //   plausible constant trips.
+                      //
+                      //   What happens instead is worth knowing, and only became
+                      //   visible once the simulator started running the real
+                      //   BowlLogic. As the stack drains past the frozen level:
+                      //     4,3 bowls  count correct    -- the lie agrees
+                      //     2 bowls    reports 3, `ok`  -- SILENTLY WRONG
+                      //     1,0 bowls  `discontiguous`  -- contiguity catches it
+                      //   So the fault is invisible, then over-reports by one
+                      //   with full confidence, and only becomes a fault once
+                      //   the stack falls below it. A UI cannot be told to
+                      //   expect a warning during that middle window.
   COUNT
 };
 
