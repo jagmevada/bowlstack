@@ -237,6 +237,27 @@ void evolve(Node &n) {
     case Scenario::Discontiguous:
       break;  // held, so the fault is always visible somewhere in the fleet
 
+    case Scenario::BusFailure:
+      // Bus 0 is gone, taking f1 and f2 with it (config.cpp puts them both on
+      // Wire). The stack is held full so the surviving pair sees bowls at f3 and
+      // f4 -- contiguity then proves f1 and f2 must be occupied, giving an EXACT
+      // count of 4 and status `ok` on two working sensors. Held rather than
+      // drained, because that combination is the whole reason for the scenario.
+      n.sensorOk[0] = false;
+      n.sensorOk[1] = false;
+      n.stack = config::SENSOR_COUNT;
+      break;
+
+    case Scenario::IntermittentSensor:
+      // f2 drops out and comes back, the way maybeRecover() brings a demoted
+      // channel back without anyone visiting the device. Every other fault in
+      // this bed latches, so this is the only source of a sensors_online RISE
+      // inside one run.
+      n.sensorOk[1] = ((n.ticks / 4) % 3) != 0;
+      if (n.stack > 0 && chance(n, 20)) n.stack--;
+      else if (n.stack == 0) n.stack = config::SENSOR_COUNT;
+      break;
+
     case Scenario::StuckSensor:
       // f3 froze reading a bowl face, and the stack drains beneath it. Nothing
       // in the firmware can tell a frozen reading from a real one, so the node
@@ -307,6 +328,8 @@ const char *scenarioName(Scenario s) {
     case Scenario::Charging:           return "charging";
     case Scenario::GoesQuiet:          return "goes-quiet";
     case Scenario::Flapping:           return "flapping";
+    case Scenario::BusFailure:         return "bus-failure";
+    case Scenario::IntermittentSensor: return "intermittent";
     case Scenario::StuckSensor:        return "stuck-sensor";
     default:                           return "?";
   }

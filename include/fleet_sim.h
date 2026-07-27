@@ -99,6 +99,21 @@ enum class Scenario : uint8_t {
   GoesQuiet,          // reports, then stops -- `offline` must raise the alarm
   Flapping,           // changes fast; exercises the 5 s per-device rate limit
                       //   and proves history keeps its resolution
+  BusFailure,         // a whole I2C BUS dies -- f1+f2 share Wire, f3+f4 share
+                      //   Wire1, so one dead bus takes two adjacent sensors and
+                      //   sensors_online reads 2. This is the failure mode the
+                      //   two-bus split exists to contain, and it produces a
+                      //   striking row: with a full stack the levels are
+                      //   [unknown,unknown,present,present], which contiguity
+                      //   resolves to count 4, status `ok` -- a FULLY TRUSTED
+                      //   count with half the array dead. Without this node the
+                      //   bed can only ever show 4, 3 or 0 sensors online.
+  IntermittentSensor, // drops out and RECOVERS on a cycle. Real channels do:
+                      //   SensorArray::maybeRecover() retries a demoted sensor
+                      //   on a backoff, so sensors_online rises again without
+                      //   anyone visiting the device. Every other fault here is
+                      //   latched, so this is the only node that produces the
+                      //   false->true edge within a single run.
   StuckSensor,        // f3 frozen at a plausible distance. Real ToF output
                       //   jitters by a millimetre or two even against a
                       //   motionless target, so a perfectly constant value is a
