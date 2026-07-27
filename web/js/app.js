@@ -8,7 +8,8 @@
 // ====================================================================
 
 import {
-  getClient, readConfig, saveConfig, clearConfig, readAutoLogin, unwrap, describeError,
+  getClient, readConfig, saveConfig, clearConfig, readAutoLogin, dashboardUrl,
+  unwrap, describeError,
 } from './supa.js';
 import { h, mount, clear, toast, copyText } from './ui.js';
 import { fleetSummary, serviceState, fmtRelative, fmtClock } from './domain.js';
@@ -89,14 +90,29 @@ async function autoSignIn(auto) {
 
   show('connecting');
   msg.textContent = 'Could not sign in.';
-  // Anonymous sign-in is off by default in Supabase, and the resulting error
-  // says nothing about which switch to flip. Say it here instead.
+
+  // Anonymous sign-in is off by default in Supabase, and the error it returns
+  // names neither the setting nor the page it lives on. Say both, and link
+  // straight to it — this is the one step between a fresh deploy and a working
+  // dashboard, so it should take a click rather than a search.
   const isDisabled = auto.mode === 'anonymous'
     && /anonymous|disabled|not enabled/i.test(error.message || '');
-  errBox.textContent = isDisabled
-    ? `${error.message} — turn on Authentication → Sign In / Providers → `
-      + `"Allow anonymous sign-ins" in the Supabase dashboard.`
-    : describeError(error);
+  const providers = dashboardUrl('/auth/providers');
+
+  errBox.replaceChildren();
+  if (isDisabled) {
+    errBox.append(
+      h('div', {}, error.message),
+      h('div', { style: 'margin-top:.4rem' },
+        'Turn on ',
+        h('b', {}, 'Allow anonymous sign-ins'),
+        ' under User Signups, then press Try again.'),
+      providers ? h('div', { style: 'margin-top:.4rem' },
+        h('a', { href: providers, target: '_blank', rel: 'noopener' },
+          'Open Authentication → Sign In / Providers ↗')) : null);
+  } else {
+    errBox.textContent = describeError(error);
+  }
   errBox.hidden = false;
   document.getElementById('connecting-retry').hidden = false;
   document.getElementById('connecting-manual').hidden = false;

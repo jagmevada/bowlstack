@@ -76,6 +76,16 @@ export function unwrap({ data, error }) {
   return data;
 }
 
+/**
+ * The Supabase dashboard page for this project, or null if the URL is not a
+ * hosted supabase.co project (self-hosted has no such console).
+ */
+export function dashboardUrl(path = '') {
+  const cfg = readConfig();
+  const ref = cfg && /^https:\/\/([a-z0-9]+)\.supabase\.co$/i.exec(cfg.url.replace(/\/+$/, ''));
+  return ref ? `https://supabase.com/dashboard/project/${ref[1]}${path}` : null;
+}
+
 export function describeError(err) {
   if (!err) return 'Unknown error';
   const parts = [err.message];

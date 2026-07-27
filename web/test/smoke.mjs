@@ -199,8 +199,13 @@ window.supabase = {
         session = { user: { email: 'kitchen@example.test' } };
         return { error: null };
       },
+      // First attempt fails the way a fresh Supabase project does — the
+      // feature is off by default. That exercises the remedy card AND the
+      // retry, and everything downstream still runs.
       signInAnonymously: async () => {
-        anonSignIns++;
+        if (++anonSignIns === 1) {
+          return { error: { message: 'Anonymous sign-ins are disabled' } };
+        }
         session = { user: { id: 'anon-1', is_anonymous: true } };
         return { error: null };
       },
@@ -232,8 +237,25 @@ const text = () => view.textContent.replace(/\s+/g, ' ');
 
 const hidden = id => window.document.getElementById(id).hasAttribute('hidden');
 
-console.log('\n[auto-login]');
-ok('signed in without a prompt', anonSignIns === 1);
+console.log('\n[auto-login: anonymous sign-ins still off]');
+ok('attempted sign-in on boot', anonSignIns === 1);
+ok('shows the remedy, not a raw error', !hidden('connecting'));
+{
+  const box = window.document.getElementById('connecting-error');
+  ok('names the setting to turn on', /Allow anonymous sign-ins/.test(box.textContent));
+  ok('links to the right dashboard page',
+    box.querySelector('a')?.getAttribute('href')
+      === 'https://supabase.com/dashboard/project/x/auth/providers');
+  ok('offers the account route as a way out',
+    !window.document.getElementById('connecting-manual').hidden);
+}
+
+// Flip the switch and press Try again.
+window.document.getElementById('connecting-retry').dispatchEvent(new window.Event('click'));
+await new Promise(r => setTimeout(r, 150));
+
+console.log('\n[auto-login: after retry]');
+ok('signed in without a prompt', anonSignIns === 2);
 ok('login form never shown', hidden('login'));
 ok('setup form never shown', hidden('setup'));
 ok('connecting gate cleared', hidden('connecting'));
