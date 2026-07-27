@@ -12,7 +12,9 @@ name: Deploy dashboard to Pages
 
 on:
   push:
-    branches: [main]
+    # `frontend` is here so the trial can deploy without first merging a
+    # dashboard into main. Drop it once this lands on main.
+    branches: [main, frontend]
     paths:
       - 'web/**'
       - '.github/workflows/pages.yml'
@@ -68,7 +70,11 @@ jobs:
           if [ -n "$DASHBOARD_EMAIL" ]; then MODE=account; else MODE=anonymous; fi
           echo "Wrote web/config.js (auto-login: $MODE)"
 
+      # enablement turns Pages on via the API if it is not already, so the
+      # first deploy does not fail on a setting nobody has clicked yet.
       - uses: actions/configure-pages@v5
+        with:
+          enablement: true
       - uses: actions/upload-pages-artifact@v3
         with:
           path: web
