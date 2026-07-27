@@ -1,0 +1,14 @@
+{
+  "name": "Bowlstack",
+  "short_name": "Bowlstack",
+  "description": "Live bowl stock and device health across the serving areas.",
+  "start_url": "./#/stock",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#f9f9f7",
+  "theme_color": "#f9f9f7",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

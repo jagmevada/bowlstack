@@ -15,6 +15,7 @@ warning when a station is running short.
 | [docs/supabase.md](docs/supabase.md) | schema, write model, security, setup |
 | [docs/meal_mapping.md](docs/meal_mapping.md) | device assignment, meal-wise food mapping, TypeScript interfaces and queries |
 | [docs/frontend.md](docs/frontend.md) | front-end planning and open design questions |
+| [web/README.md](web/README.md) | the field-trial dashboard — bring-up, deployment, and what to collect |
 | [docs/FRONTEND_HANDOFF.md](docs/FRONTEND_HANDOFF.md) | **self-contained** contract for building the UI against Supabase |
 
 ---
@@ -83,7 +84,7 @@ monitoring.
 | **4 — task fabric** | done. FreeRTOS split so measurement never stalls on the network |
 | **5 — indicators & power** | done. Five status LEDs, measured Li-ion SoC curve, charger sense |
 | **6 — fleet stress test** | next. Simulate 32 devices against Supabase |
-| **7 — front-end** | not started. See [docs/FRONTEND_HANDOFF.md](docs/FRONTEND_HANDOFF.md) |
+| **7 — front-end** | trial prototype in [web/](web/) — all five screens against the live schema. See [web/README.md](web/README.md) |
 
 ### Verified on hardware
 

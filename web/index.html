@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Bowlstack</title>
+<meta name="description" content="Live bowl stock and device health across the serving areas.">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#f9f9f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0d0d0d" media="(prefers-color-scheme: dark)">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+<!-- ===================================================================
+     Three top-level states, exactly one visible at a time.
+     setup  -> no Supabase URL/key configured
+     login  -> configured, but no authenticated session. Anonymous
+               requests read NOTHING (see docs/FRONTEND_HANDOFF.md §2),
+               so there is no useful read-only mode to fall back to.
+     app    -> signed in
+     =================================================================== -->
+
+<main id="setup" class="gate" hidden>
+  <form class="card gate-card" id="setup-form">
+    <h1>Bowlstack</h1>
+    <p class="muted">Connect this browser to your Supabase project. Stored on this
+      device only.</p>
+    <label>Project URL
+      <input name="url" type="url" placeholder="https://xxxxxxxx.supabase.co" required
+             autocomplete="off" spellcheck="false">
+    </label>
+    <label>Anon key
+      <input name="key" type="text" placeholder="eyJhbGciOi…" required
+             autocomplete="off" spellcheck="false">
+    </label>
+    <p class="hint">Both are in Supabase → Project Settings → API. Never paste the
+      <strong>service_role</strong> key here — it bypasses every row-level policy.</p>
+    <button class="primary" type="submit">Connect</button>
+    <p class="form-error" id="setup-error" hidden></p>
+  </form>
+</main>
+
+<main id="connecting" class="gate" hidden>
+  <div class="card gate-card">
+    <h1>Bowlstack</h1>
+    <p class="muted" id="connecting-msg">Connecting…</p>
+    <p class="form-error" id="connecting-error" hidden></p>
+    <button class="primary" type="button" id="connecting-retry" hidden>Try again</button>
+    <button class="linkish" type="button" id="connecting-manual" hidden>Sign in with an account instead</button>
+  </div>
+</main>
+
+<main id="login" class="gate" hidden>
+  <form class="card gate-card" id="login-form">
+    <h1>Bowlstack</h1>
+    <p class="muted">Sign in with your kitchen staff account.</p>
+    <label>Email
+      <input name="email" type="email" required autocomplete="username">
+    </label>
+    <label>Password
+      <input name="password" type="password" required autocomplete="current-password">
+    </label>
+    <button class="primary" type="submit">Sign in</button>
+    <p class="form-error" id="login-error" hidden></p>
+    <button class="linkish" type="button" id="login-reconfigure">Change connection</button>
+  </form>
+</main>
+
+<div id="app" hidden>
+  <header class="topbar">
+    <div class="topbar-row">
+      <a class="brand" href="#/stock">Bowlstack</a>
+      <div class="meal" id="meal-indicator"></div>
+      <div class="spacer"></div>
+      <button class="icon-btn" id="theme-btn" title="Light / dark" aria-label="Toggle theme">◐</button>
+      <button class="icon-btn" id="refresh-btn" title="Refresh now" aria-label="Refresh">⟳</button>
+      <details class="menu">
+        <summary class="icon-btn" aria-label="Menu">⋯</summary>
+        <div class="menu-panel">
+          <div class="menu-user" id="menu-user"></div>
+          <button type="button" data-act="copy-diag">Copy fleet diagnostics</button>
+          <button type="button" data-act="update">Reload app</button>
+          <button type="button" data-act="reconfigure">Change connection</button>
+          <button type="button" data-act="signout">Sign out</button>
+        </div>
+      </details>
+    </div>
+
+    <div class="chips" id="fleet-chips"></div>
+
+    <nav class="tabs">
+      <a href="#/stock"  data-tab="stock">Stock</a>
+      <a href="#/health" data-tab="health">Health</a>
+      <a href="#/menu"   data-tab="menu">Menu</a>
+      <a href="#/assign" data-tab="assign">Devices</a>
+    </nav>
+  </header>
+
+  <div class="freshness" id="freshness"></div>
+  <main id="view" class="view"></main>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="vendor/supabase.js"></script>
+<script src="config.js"></script>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

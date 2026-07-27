@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <rect width="512" height="512" rx="96" fill="#0b0b0b"/>
+  <!-- Four stacked bowls, bottom-up, matching the level order in the data. -->
+  <g fill="none" stroke="#2a78d6" stroke-width="26" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M136 376 h240 l-26 44 h-188 z"/>
+    <path d="M148 306 h216 l-22 44 h-172 z"/>
+    <path d="M160 236 h192 l-20 44 h-152 z"/>
+  </g>
+  <path d="M172 166 h168 l-18 44 h-132 z" fill="none" stroke="#898781" stroke-width="26"
+        stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="14 18"/>
+</svg>

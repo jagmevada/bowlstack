@@ -4,6 +4,10 @@ Planning notes and project-side context. The **implementation contract** lives
 in [FRONTEND_HANDOFF.md](FRONTEND_HANDOFF.md), which is deliberately
 self-contained so the front-end can be built without reading the firmware repo.
 
+A working prototype of every screen below is in [../web/](../web/) — static
+files, no build step, deployed to GitHub Pages for the field trial. Bring-up and
+the trial instrumentation: [../web/README.md](../web/README.md).
+
 ---
 
 ## 1. Who uses it
@@ -42,8 +46,9 @@ surface the one station that needs attention, not to enumerate 32 healthy ones.
 
 ### Configuration page
 
-Assigns `location`, `food_slot`, `label` per device, and — the part not yet
-designed — maps each slot to a food per meal.
+Assigns `location`, `food_slot`, `label` per device. The slot → food mapping is
+its own screen, since it changes three times a day where an assignment changes
+once a year.
 
 ---
 
@@ -69,16 +74,19 @@ through last Tuesday"* answerable. Had it stored only the current menu, every
 historical count would have become unattributable the moment the menu rotated, and
 that is not recoverable retrospectively.
 
-Still to decide, and now purely front-end questions:
+Both open questions are answered by the trial prototype in [../web/](../web/):
 
-- Is the menu edited live during service, or set in advance?
-- Should an admin be able to copy a whole day's menus to another day, rather than
-  meal by meal?
+- **Edited live or set in advance?** Either. The editor is date-driven rather
+  than pinned to today, so a menu can be entered days ahead; opening it during
+  service edits the live meal. The preload flag is what makes both safe — an
+  inherited menu is visibly a draft until saved.
+- **Copy a whole day?** Yes, added as "Copy this day" — all three meals for one
+  location written to another date. Preload only reaches backwards, so setting up
+  a week still needed a forward operation.
 
-The **admin UI (Part 3) is not built** — deferred until front-end development
-starts. The backend it needs is complete, including the preload behaviour that
-inherits the previous same-meal menu so an admin edits differences instead of
-retyping.
+The **admin UI (Part 3) is built** in `web/js/views/menu.js`, including the
+preload behaviour that inherits the previous same-meal menu so an admin edits
+differences instead of retyping.
 
 ---
 

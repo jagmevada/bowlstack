@@ -267,13 +267,12 @@ draft, mark the source date, and require an explicit save.
 
 ---
 
-## 6. Deferred
+## 6. Built, and what it must keep doing
 
-**Part 3, the admin UI**, is not built — deferred until front-end development
-starts. Everything it needs is above: the table, the constraints, the preload
-function, the interfaces and the queries.
+**Part 3, the admin UI**, is built — `web/js/views/menu.js`, using exactly the
+table, constraints, preload function and queries above.
 
-Two decisions to settle when it does:
+Two properties it relies on, and that must survive any rewrite:
 
 **Historical attribution already works, and is worth not breaking.** Because
 `meal_food_mapping` is keyed by `meal_date`, a past bowl count can be joined to the
