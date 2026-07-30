@@ -223,9 +223,20 @@ supabase.channel('bowlstack')
   .subscribe()
 ```
 
-> Enable the publication only if you need it. Each device updates every 60 s, so
-> 32 devices produce ~46k broadcast messages/day. Polling `device_overview`
-> every 15–30 s is usually enough for a kitchen dashboard.
+> Enable the publication only if you need it. Each device updates **at least
+> every 20 s** and immediately on any real change, so 24 deployed units over an
+> ~8 h service day produce **~35k broadcast messages/day**.
+
+> **Realtime cannot detect `offline`.** Going offline is the *absence* of an
+> update, so no `postgres_changes` event ever fires for it — the flag is computed
+> from `now()` at query time. You must poll `device_overview` to see it. The trial
+> dashboard polls every 20 s for exactly this reason.
+
+**How fast is offline?** `offline` goes true once a device that *should* be
+reporting has been silent for `public.offline_after()` — currently **40 s**. With
+a 20 s poll that is **40–60 s** from the device actually dying. Retune it with
+`supabase/set_offline_threshold.sql`; it must stay above the firmware heartbeat
+plus one retry, or healthy devices alarm between their own posts.
 
 ---
 

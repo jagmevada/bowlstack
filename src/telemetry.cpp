@@ -29,10 +29,33 @@ namespace {
 // session.
 const uint8_t QUEUE_LEN = config::TELEMETRY_QUEUE_LEN;
 
-// Heartbeat. Changes post immediately, so this only proves liveness. At 10 s
-// across 30 devices the fleet would make ~7.8M requests/month, and TLS
-// handshakes alone would dominate the egress budget.
-const uint32_t STATUS_PERIOD_MS = 60000;
+// Heartbeat: the LONGEST a device may stay silent. Real changes post
+// immediately (subject to POST_MIN_INTERVAL_MS below), so this fires only when
+// nothing has changed, and proves liveness rather than carrying news.
+//
+// The timer is reset by ANY successful post, change-driven or periodic, so this
+// is a genuine ceiling on the gap between writes, not an independent schedule
+// stacked on top of the change traffic.
+//
+// STORAGE IS UNAFFECTED. device_status is UPDATED in place, one row per device,
+// and status_events is still appended only on real change -- so shortening this
+// buys freshness at the cost of REQUESTS, not rows. Across 24 deployed units at
+// ~8 h of service a day, 20 s is ~35k PATCHes/day.
+//
+// THIS SETS THE FLOOR ON OFFLINE DETECTION. public.offline_after() in
+// supabase/schema.sql cannot be smaller than this plus one RETRY_PERIOD_MS, or a
+// healthy device alarms in the gap between its own posts:
+//
+//     detection (worst case) = offline_after() + front-end poll interval
+//     offline_after()        > STATUS_PERIOD_MS + RETRY_PERIOD_MS
+//
+// 20 s here, 15 s retry, 40 s threshold and a 20 s dashboard poll give ~60 s
+// worst-case detection with 5 s of slack for a lost post. Raising this back to
+// 60 s would make sub-minute detection impossible however the server is tuned.
+//
+// Do not take it far below 20 s without re-checking egress: at 10 s the fleet
+// would make ~7.8M requests/month and TLS handshakes alone would dominate.
+const uint32_t STATUS_PERIOD_MS = 20000;
 
 // Backoff after a failed post, so a dead uplink cannot spin the loop.
 const uint32_t RETRY_PERIOD_MS = 15000;

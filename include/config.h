@@ -43,7 +43,14 @@ static const uint8_t I2C0_SDA = 17;
 static const uint8_t I2C0_SCL = 16;
 static const uint8_t I2C1_SDA = 21;
 static const uint8_t I2C1_SCL = 22;
-static const uint32_t I2C_HZ = 400000;
+// 100 kHz, not 400. Both buses use this constant, so this covers I2C0 and I2C1.
+// The ESP32 is at the TOP of a 6 ft pipe, so f1 (lowest bowl) has the longest
+// cable and f2 the next, and both sit on I2C0. Roughly 200 pF of harness against
+// two 10k pull-ups in parallel gives a ~1 us rise time: outside the 300 ns that
+// fast mode allows, inside the 1000 ns of standard mode. It costs nothing --
+// measured 21.0 samples/s at 400 kHz and 20.9 at 100 kHz, because
+// TIMING_BUDGET_US dominates. ~2.2k pull-ups on I2C0 would make 400 kHz safe.
+static const uint32_t I2C_HZ = 100000;
 
 // --- per-sensor wiring -----------------------------------------------------
 
@@ -159,11 +166,17 @@ static const uint16_t NO_TARGET_MM = 2000;
 // nothing but measurement noise, and every flap would be a spurious state
 // change to report upstream.
 //
-// Provisional bench values -- 4 sensors on a table, targets blocked by hand to
-// mimic stacking. Re-tune against real bowls at the real standoff during field
-// testing; the taper means each level may settle at a slightly different
-// present-distance.
-static const float PRESENT_BELOW_MM = 100.0f;
+// PRESENT_BELOW_MM was 100 mm, a bench figure taken from 4 sensors on a table
+// with targets blocked by hand. Real bowls do not sit that close to their
+// sensor, so it is now 200 mm, set against the actual stack at the real
+// standoff.
+//
+// That narrows the dead band from 300 mm to 200 mm. Still wide against a few
+// millimetres of measurement noise, but with less margin than before: a level
+// settling near 200 mm will hold whichever state it last had rather than
+// resolving. The bowl taper means each level may want a slightly different
+// present-distance, so re-check per level if any one of them proves indecisive.
+static const float PRESENT_BELOW_MM = 200.0f;
 static const float ABSENT_ABOVE_MM = 400.0f;
 
 // --- status LEDs -----------------------------------------------------------

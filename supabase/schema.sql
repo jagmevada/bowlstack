@@ -77,6 +77,7 @@ drop function if exists public.tg_status_events_stamp()   cascade;
 drop function if exists public.tg_devices_create_status() cascade;
 drop function if exists public.tg_meal_food_mapping_touch() cascade;
 drop function if exists public.in_service_window(timestamptz, text, text, interval) cascade;
+drop function if exists public.offline_after() cascade;
 drop function if exists public.current_meal_type(text, timestamptz) cascade;
 drop function if exists public.current_meal_date(text, timestamptz) cascade;
 drop function if exists public.meal_mapping_preload(text, text, date) cascade;
@@ -371,6 +372,30 @@ create or replace function public.in_service_window(
     from applicable a;
 $$;
 
+-- How long a device may be silent, while it is SUPPOSED to be reporting, before
+-- it counts as offline.
+--
+-- A function rather than a literal for two reasons. It was written out twice --
+-- device_overview.offline and slot_overview.any_offline -- so the two could
+-- drift and disagree about whether the same device was down. And retuning it is
+-- now one CREATE OR REPLACE, with no need to re-run schema.sql, which drops
+-- every table including the telemetry history.
+--
+-- SIZING. It must comfortably exceed the firmware heartbeat, or a healthy device
+-- alarms between its own posts:
+--
+--     detection (worst case) = this threshold + the front-end poll interval
+--     this threshold         > STATUS_PERIOD_MS + one RETRY_PERIOD_MS
+--
+-- At 20 s heartbeat and 15 s retry backoff, a healthy unit that loses one post
+-- is 35 s stale, so 40 s leaves real slack while giving ~60 s detection against
+-- the dashboard's 20 s poll. Going below ~40 s starts flagging ordinary WiFi
+-- reconnections as outages.
+create or replace function public.offline_after()
+returns interval language sql immutable parallel safe as $$
+  select interval '40 seconds'
+$$;
+
 -- Which meal is it now? Derived from service_windows -- the same rows that drive
 -- `offline` -- so there is one definition of when lunch is. Those labels are
 -- lowercase ('lunch') and meal_type is capitalised ('Lunch'), so initcap()
@@ -620,11 +645,13 @@ revoke all on function public.tg_devices_create_status() from public, anon, auth
 revoke all on function public.tg_meal_food_mapping_touch() from public, anon, authenticated;
 revoke all on function public.in_service_window(timestamptz, text, text, interval)
   from public, anon;
+revoke all on function public.offline_after() from public, anon;
 revoke all on function public.current_meal_type(text, timestamptz) from public, anon;
 revoke all on function public.current_meal_date(text, timestamptz) from public, anon;
 revoke all on function public.meal_mapping_preload(text, text, date) from public, anon;
 grant execute on function public.in_service_window(timestamptz, text, text, interval)
   to authenticated;
+grant execute on function public.offline_after() to authenticated;
 grant execute on function public.current_meal_type(text, timestamptz) to authenticated;
 grant execute on function public.current_meal_date(text, timestamptz) to authenticated;
 grant execute on function public.meal_mapping_preload(text, text, date) to authenticated;
@@ -662,7 +689,7 @@ select d.device_id,
        -- station as offline and bury the ones that genuinely went down.
        (coalesce(s.reported, false)
         and public.in_service_window(now(), d.timezone, d.device_id)
-        and s.updated_at < now() - interval '5 minutes') as offline,
+        and s.updated_at < now() - public.offline_after()) as offline,
 
        -- Registered but never heard from -- i.e. awaiting installation.
        (not coalesce(s.reported, false)) as awaiting_deployment,
@@ -722,7 +749,7 @@ select d.location,
        bool_or(s.battery_level in ('low','critical'))          as any_battery_warn,
        bool_or(coalesce(s.reported, false)
                and public.in_service_window(now(), d.timezone, d.device_id)
-               and s.updated_at < now() - interval '5 minutes') as any_offline,
+               and s.updated_at < now() - public.offline_after()) as any_offline,
        min(s.updated_at)                                       as oldest_update
   from public.devices d
   left join public.device_status s using (device_id)

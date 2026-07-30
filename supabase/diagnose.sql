@@ -202,6 +202,24 @@ deployment as (
          coalesce(location, '(unassigned)') || ': ' || count(*)::text, ''
     from public.devices group by location
 ),
+-- A device with a location but NO slot is the dangerous half-assignment.
+-- `authenticated` may update both columns independently, so the configuration
+-- page can write one and leave the other NULL -- and slot_overview filters on
+-- `food_slot is not null`, so the device silently vanishes from its dish
+-- position's total rather than erroring.
+--
+-- Observed in the field: BWL-002 and BWL-003 held location 'D' with a NULL slot
+-- while BWL-001 was correct. All three serve Darshanarthi slot 1, so that
+-- position summed ONE stack instead of three -- capacity 4 rather than 12, a
+-- full slot reading as a third full. Exactly the under-report the non-unique
+-- slot design exists to prevent, and invisible without this check.
+half_assigned as (
+  select 9, 'deployment', 'half-assigned: ' || device_id,
+         'location ' || location || ', food_slot NULL',
+         '<<< dropped from slot_overview - re-run assign_devices.sql'
+    from public.devices
+   where location in ('D', 'M', 'T') and food_slot is null
+),
 deployment_check as (
   select 9, 'deployment', 'totals',
          'deployed=' || d.deployed || ' reserved=' || d.reserved ||
@@ -283,6 +301,7 @@ select sec, category, item, value, problem
     union all select * from windows
     union all select * from now_state
     union all select * from deployment
+    union all select * from half_assigned
     union all select * from deployment_check
     union all select * from menu
     union all select * from menu_gaps
@@ -301,6 +320,9 @@ select sec, category, item, value, problem
 --                              believe you have RLS and not.
 --    view has OWNER RIGHTS     re-run section 9; security_invoker is mandatory
 --    unassigned devices        run assign_devices.sql
+--    half-assigned device      run assign_devices.sql; the config page can write
+--                              a location without a slot, and such a device is
+--                              silently missing from its slot's bowl total
 --    blank dish on dashboard   enter the menu, or run seed_meal_mapping.sql
 --    smoke-test leftovers      delete device_id 'BWL-SMOKETEST' by hand
 -- ---------------------------------------------------------------------

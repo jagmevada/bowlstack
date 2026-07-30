@@ -105,8 +105,37 @@ Fleet defaults plus optional per-device overrides.
 **Current state is UPDATED in place; history is appended only on change.**
 
 Appending every report would be ~30 devices × 8640/day ≈ **259k rows/day**,
-exhausting the free tier in about ten days. The heartbeat is **60 s** and only
-proves liveness, since the firmware posts on any real change.
+exhausting the free tier in about ten days.
+
+The heartbeat is **20 s** — the longest a device may stay silent. Real changes
+post immediately, so it fires only when nothing has changed, and any successful
+post resets it. It is therefore a ceiling on the gap between writes, not a
+schedule stacked on top of the change traffic.
+
+### Offline detection
+
+`public.offline_after()` sets how long a device may be silent, while it *should*
+be reporting, before `device_overview.offline` goes true. It is a function rather
+than a literal so it can be retuned with one `CREATE OR REPLACE` — see
+`supabase/set_offline_threshold.sql` — instead of re-running `schema.sql`, which
+drops every table including the history.
+
+```
+detection (worst case) = offline_after() + front-end poll interval
+offline_after()        > heartbeat + one retry backoff
+```
+
+That lower bound is not optional: a threshold shorter than the gap a **healthy**
+device leaves between posts makes every device alarm between its own heartbeats.
+
+At 20 s heartbeat, 15 s retry backoff, a 40 s threshold and the dashboard's 20 s
+poll, a dead device is flagged in **40–60 s**. Below ~40 s an ordinary WiFi
+reconnection starts reading as an outage.
+
+> **Raising the heartbeat rate costs requests, not rows.** `device_status` is
+> updated in place, one row per device, and `status_events` is still appended
+> only on real change. Across 24 deployed units at ~8 h of service a day, 20 s
+> is ~35k PATCHes/day — and identical storage.
 
 ### One telemetry round per 5 s per device
 

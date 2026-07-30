@@ -115,6 +115,28 @@ cause, which is why the margin is printed rather than assumed.
 Two independent hardware I2C buses, two sensors each. Splitting the bus halves
 the blast radius: a slave that locks one bus cannot take down all four sensors.
 
+Both run at **100 kHz** (`I2C_HZ`), not 400 kHz — and the harness is the reason.
+The ESP32 sits at the **top** of the 6 ft pipe, so `f1` (the lowest bowl) has the
+longest cable and `f2` the next, and **both are on I2C0**. That bus therefore
+carries the most capacitance in the system:
+
+| | |
+| --- | --- |
+| ~1.8 m of wire, two devices | ≈ 200 pF |
+| two breakouts, 10 kΩ pull-ups in parallel | ≈ 5 kΩ |
+| rise time `t = R × C` | **≈ 1 µs** |
+| fast mode (400 kHz) allows | 300 ns — **over by ~3×** |
+| standard mode (100 kHz) allows | 1000 ns — just inside |
+
+**It costs nothing.** Measured on the bench at both speeds, the sample rate was
+identical — 21.0/s at 400 kHz against 20.9/s at 100 kHz — because
+`TIMING_BUDGET_US` dominates and the bus is idle most of the time. There is no
+throughput argument for the faster clock here.
+
+> The real fix is hardware: **~2.2 kΩ pull-ups on I2C0** would bring the rise
+> time under 300 ns and make 400 kHz genuinely safe. Until then this setting is
+> the one that matches the wiring.
+
 | Signal | GPIO | Notes |
 | --- | --- | --- |
 | I2C0 SDA | 17 | serves `f1` + `f2` |
