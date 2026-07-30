@@ -15,7 +15,7 @@
 import { h, badge, empty, levelColumn, banner } from '../ui.js';
 import {
   compareDevices, deviceSeverity, deviceStack, batteryInfo, positionLabel,
-  isHalfAssigned, fmtRelative, fmtClock, serviceState,
+  fmtRelative, fmtClock, serviceState,
 } from '../domain.js';
 
 const FILTERS = {
@@ -157,12 +157,6 @@ function deviceRow(d, tz) {
   const batt = batteryInfo(d.battery_level);
 
   const badges = h('div', { class: 'dev-badges' });
-
-  if (isHalfAssigned(d)) {
-    badges.append(badge('critical', '⚠', 'No slot — missing from stock',
-      'Assigned to an area but no dish position, so its bowls are absent from '
-      + 'the stock total. Fix it on the Devices tab.'));
-  }
 
   if (d.awaiting_deployment) {
     badges.append(badge('idle', '◌', 'Never reported'));

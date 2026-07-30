@@ -11,13 +11,14 @@
 //  describing moments up to 5 s apart.
 // ====================================================================
 
-import { h, badge, empty, banner, levelColumn, copyText } from '../ui.js';
+import { h, badge, empty, banner, levelColumn, copyText, fillSlot } from '../ui.js';
 import { unwrap, describeError } from '../supa.js';
 import { stepChart, statusTimeline, STATUS_STYLE } from '../chart.js';
 import {
   batteryInfo, deviceStack, deviceSeverity, positionLabel, serviceState,
   fmtRelative, fmtDateTime, fmtUptime,
 } from '../domain.js';
+import { APP_VERSION } from '../version.js';
 
 const WINDOWS = [
   { key: '6',  label: '6 h',  hours: 6 },
@@ -30,6 +31,7 @@ const WINDOWS = [
 // Re-querying it every poll would be the app's heaviest traffic by far.
 const HISTORY_TTL_MS = 60_000;
 const historyCache = new Map();
+const HISTORY_SLOT_ID = 'device-history';
 
 /** The ⟳ button means "get me the current truth", so it must reach history too. */
 export function clearHistoryCache() { historyCache.clear(); }
@@ -161,7 +163,7 @@ export function renderDevice(state, params, ctx) {
   const fresh = cached && Date.now() - cached.at < HISTORY_TTL_MS;
 
   const historyState = { rows: fresh ? cached.rows : [] };
-  const historyBox = h('div', {}, fresh
+  const historyBox = h('div', { id: HISTORY_SLOT_ID }, fresh
     ? renderHistory(cached.rows, dev, tz, hours)
     : h('div', { class: 'empty' }, 'Loading history…'));
 
@@ -175,10 +177,10 @@ export function renderDevice(state, params, ctx) {
       .then(rows => {
         historyCache.set(cacheKey, { at: Date.now(), rows });
         historyState.rows = rows;
-        historyBox.replaceChildren(renderHistory(rows, dev, tz, hours));
+        fillSlot(HISTORY_SLOT_ID, historyBox, renderHistory(rows, dev, tz, hours));
       })
       .catch(err => {
-        historyBox.replaceChildren(banner('critical', '✕', describeError(err)));
+        fillSlot(HISTORY_SLOT_ID, historyBox, banner('critical', '✕', describeError(err)));
       });
   }
 
@@ -329,6 +331,7 @@ function reliability(rows, hours, tz) {
 function diagnostics(dev, rows, hours) {
   return JSON.stringify({
     captured_at: new Date().toISOString(),
+    dashboard_version: APP_VERSION,
     window_hours: hours,
     device: dev,
     history_summary: rows.length ? analyseHistory([...rows].reverse()) : null,

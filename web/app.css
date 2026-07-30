@@ -223,6 +223,13 @@ button:disabled { opacity: .45; cursor: default; }
   white-space: nowrap;
 }
 
+.version {
+  font-size: .72rem;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .menu { position: relative; }
 .menu-panel {
   position: absolute;
@@ -622,14 +629,6 @@ details.table-view > summary {
 }
 .assign-row .did { font-size: .85rem; font-weight: 600; font-variant-numeric: tabular-nums; }
 .assign-row.dirty { background: var(--warning-wash); border-radius: 8px; }
-.assign-row.invalid { background: var(--critical-wash); border-radius: 8px; }
-
-.row-error {
-  grid-column: 1 / -1;
-  font-size: .78rem;
-  color: var(--critical);
-  padding: .1rem 0 .3rem;
-}
 
 @media (max-width: 640px) {
   .assign-row { grid-template-columns: 1fr 1fr; }

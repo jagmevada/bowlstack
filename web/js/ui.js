@@ -8,7 +8,13 @@ export function h(tag, attrs = {}, ...children) {
     if (k === 'class') el.className = v;
     else if (k === 'html') el.innerHTML = v;
     else if (k === 'dataset') Object.assign(el.dataset, v);
-    else if (k.startsWith('on') && typeof v === 'function') el.addEventListener(k.slice(2), v);
+    else if (k.startsWith('on') && typeof v === 'function') {
+      // Recorded as well as attached, so morph() can swap a reused node's
+      // handlers for the new render's closures instead of leaving it wired to
+      // stale state.
+      (el.__listeners ||= []).push([k.slice(2), v]);
+      el.addEventListener(k.slice(2), v);
+    }
     else if (k === 'value') el.value = v;
     else if (v === true) el.setAttribute(k, '');
     else el.setAttribute(k, String(v));
@@ -25,6 +31,119 @@ export function clear(node) { while (node.firstChild) node.removeChild(node.firs
 export function mount(node, ...children) {
   clear(node);
   node.append(...children.flat(Infinity).filter(Boolean));
+  return node;
+}
+
+// --- morph ------------------------------------------------------------
+//
+// Replacing the whole view on every poll is what made the screen blink: the
+// browser tears down and repaints everything, and scroll position, focus,
+// hover and any open <details> go with it. Instead, walk the freshly built
+// tree against the live one and change only what actually differs.
+//
+// This is not a general virtual DOM. It matches children by position, which is
+// right for these screens: the lists are the same shape poll to poll, and when
+// severity re-sorts a row the content is rewritten in place rather than moved.
+
+/** Attributes never copied from the new tree onto a reused node. */
+const PRESERVE = new Set(['open']);   // a <details> the user opened stays open
+
+function sameKind(a, b) {
+  if (a.nodeType !== b.nodeType) return false;
+  if (a.nodeType === 1) return a.tagName === b.tagName;
+  return true;
+}
+
+function syncAttributes(from, to) {
+  for (const { name } of [...from.attributes]) {
+    if (PRESERVE.has(name)) continue;
+    if (!to.hasAttribute(name)) from.removeAttribute(name);
+  }
+  for (const { name, value } of [...to.attributes]) {
+    if (PRESERVE.has(name)) continue;
+    if (from.getAttribute(name) !== value) from.setAttribute(name, value);
+  }
+}
+
+function syncFormState(from, to) {
+  // Never fight the person typing. A poll landing mid-keystroke must not
+  // rewrite the field under the cursor, and must not undo a dropdown they
+  // just changed but have not saved.
+  if (from === document.activeElement) return;
+  if (from.tagName === 'INPUT' || from.tagName === 'TEXTAREA') {
+    if (from.type === 'checkbox' || from.type === 'radio') {
+      if (from.checked !== to.checked) from.checked = to.checked;
+    } else if (from.value !== to.value) {
+      from.value = to.value;
+    }
+  } else if (from.tagName === 'SELECT' && from.value !== to.value) {
+    from.value = to.value;
+  }
+}
+
+function swapListeners(from, to) {
+  for (const [type, fn] of from.__listeners || []) from.removeEventListener(type, fn);
+  from.__listeners = [];
+  for (const [type, fn] of to.__listeners || []) {
+    from.addEventListener(type, fn);
+    from.__listeners.push([type, fn]);
+  }
+}
+
+export function morphNode(from, to) {
+  if (!sameKind(from, to)) {
+    from.replaceWith(to);
+    return to;
+  }
+  if (from.nodeType !== 1) {
+    if (from.nodeValue !== to.nodeValue) from.nodeValue = to.nodeValue;
+    return from;
+  }
+  syncAttributes(from, to);
+  swapListeners(from, to);
+  syncFormState(from, to);
+  morphChildren(from, to);
+  return from;
+}
+
+export function morphChildren(from, to) {
+  const a = [...from.childNodes];
+  const b = [...to.childNodes];
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) morphNode(a[i], b[i]);
+  for (let i = n; i < a.length; i++) a[i].remove();
+  for (let i = n; i < b.length; i++) from.append(b[i]);
+}
+
+/**
+ * Write into a slot that a redraw may have swapped underneath you.
+ *
+ * A view that fetches asynchronously builds a placeholder, then fills it when
+ * the data lands. Under morph() the LIVE node is kept and the freshly built
+ * one is discarded — so a captured reference can be detached by the time the
+ * fetch resolves, and the fill lands on a node nobody can see. (That is
+ * exactly how the Menu tab got stuck on "Loading menu…": navigation renders
+ * twice, and the second pass morphed the placeholder back over the filled
+ * box while the promise still held the discarded one.)
+ *
+ * Looking the slot up by id at write time makes the fill land wherever the
+ * slot currently is. The captured node is the fallback for the case where the
+ * user has navigated away entirely.
+ */
+export function fillSlot(id, fallback, ...content) {
+  const target = document.getElementById(id) || fallback;
+  target.replaceChildren(...content.flat(Infinity).filter(Boolean));
+  return target;
+}
+
+/**
+ * Bring `node`'s children in line with `children` without rebuilding them.
+ * Same call signature as mount(), so a view swaps one for the other.
+ */
+export function reconcile(node, ...children) {
+  const next = document.createElement(node.tagName);
+  next.append(...children.flat(Infinity).filter(Boolean));
+  morphChildren(node, next);
   return node;
 }
 

@@ -12,7 +12,7 @@
 //  agrees with every inherited dish and walks away leaves no row behind.
 // ====================================================================
 
-import { h, banner, toast, confirmAction } from '../ui.js';
+import { h, banner, toast, confirmAction, fillSlot } from '../ui.js';
 import { unwrap, describeError } from '../supa.js';
 import {
   LOCATION_NAMES, SERVING_LOCATIONS, MEAL_TYPES, FOOD_SLOTS,
@@ -22,6 +22,12 @@ import {
 /** Slots an admin opened by hand that have neither a stack nor a saved dish.
  *  Session-scoped: they exist only until something is saved against them. */
 const manuallyAdded = new Map();
+
+/** Last preload per (location, meal, date).
+ *  A redraw renders straight from this, so navigating or refreshing does not
+ *  drop the form back to "Loading menu…" and lose what is on screen. */
+const preloadCache = new Map();
+const SLOT_ID = 'menu-body';
 
 export function renderMenu(state, params, ctx) {
   const { tz } = serviceState(state.devices);
@@ -53,16 +59,23 @@ export function renderMenu(state, params, ctx) {
     h('button', { class: 'ghost', onclick: () => go({ date: serviceDate(tz) }) }, 'Today'));
   frag.append(bar);
 
-  const box = h('div', {}, h('div', { class: 'empty' }, 'Loading menu…'));
-  frag.append(box);
-
   const deployedSlots = [...new Set(state.devices
     .filter(d => d.location === loc && d.food_slot != null)
     .map(d => Number(d.food_slot)))].sort((a, b) => a - b);
 
+  const key = `${loc}|${meal}|${date}`;
+  const cached = preloadCache.get(key);
+  const box = h('div', { id: SLOT_ID }, cached
+    ? form(ctx, { loc, meal, date, tz, rows: cached, deployedSlots, go })
+    : h('div', { class: 'empty' }, 'Loading menu…'));
+  frag.append(box);
+
   load(ctx.client, loc, meal, date)
-    .then(rows => box.replaceChildren(form(ctx, { loc, meal, date, tz, rows, deployedSlots, go })))
-    .catch(err => box.replaceChildren(banner('critical', '✕', describeError(err))));
+    .then(rows => {
+      preloadCache.set(key, rows);
+      fillSlot(SLOT_ID, box, form(ctx, { loc, meal, date, tz, rows, deployedSlots, go }));
+    })
+    .catch(err => fillSlot(SLOT_ID, box, banner('critical', '✕', describeError(err))));
 
   return frag;
 }

@@ -11,21 +11,22 @@ import {
   getClient, readConfig, saveConfig, clearConfig, readAutoLogin, dashboardUrl,
   unwrap, describeError,
 } from './supa.js';
-import { h, mount, clear, toast, copyText } from './ui.js';
+import { h, mount, clear, reconcile, toast, copyText } from './ui.js';
 import { fleetSummary, serviceState, fmtRelative, fmtClock } from './domain.js';
 import { renderStock } from './views/stock.js';
 import { renderHealth } from './views/health.js';
 import { renderDevice, clearHistoryCache } from './views/device.js';
 import { renderMenu } from './views/menu.js';
 import { renderAssign } from './views/assign.js';
+import { APP_VERSION } from './version.js';
 
 // Sized against the server's own alarm, not picked round. `offline` fires at
 // 40 s without a report, so worst-case time-to-notice is 40 s + one poll: 60 s
-// at a 20 s poll, which meets "within a minute" with no margin at all, and
-// misses it entirely if a single request is slow. At 10 s it is 40-50 s, which
-// leaves room. The cost is one extra pair of small queries every 10 s, and
-// only while the tab is actually visible.
-const POLL_MS = 10_000;
+// at a 20 s poll, which meets "within a minute" with no margin at all and
+// misses it entirely if a single request is slow. At 15 s it is 40-55 s --
+// still inside the minute, with enough slack to absorb a slow round trip,
+// without a 10 s poll's request volume. Polling stops while the tab is hidden.
+const POLL_MS = 15_000;
 
 const state = {
   devices: [],
@@ -196,6 +197,10 @@ document.getElementById('theme-btn').addEventListener('click', () => {
 });
 applyTheme();
 
+// Rendered from the constant rather than written into the markup, so there is
+// one place to bump and the header can never disagree with the diagnostics.
+document.getElementById('app-version').textContent = `v${APP_VERSION}`;
+
 document.querySelector('.menu-panel').addEventListener('click', async e => {
   const act = e.target.closest('button')?.dataset.act;
   if (!act) return;
@@ -233,7 +238,14 @@ async function refresh(manual = false) {
   if (state.loading) return;
   if (manual) clearHistoryCache();
   state.loading = true;
-  el.view.classList.toggle('is-refetching', !manual && state.loadedAt != null);
+
+  // No dimming on a normal poll. The view is patched in place, so there is
+  // nothing to cover up, and a twice-a-minute flicker on a screen someone
+  // watches through a service is worse than no feedback at all. Only a fetch
+  // slow enough to be worth mentioning gets the treatment, and it is cancelled
+  // below if the data arrives first.
+  const slowHint = setTimeout(() => el.view.classList.add('is-refetching'), 1200);
+
   try {
     const [devices, slots] = await Promise.all([
       client.from('device_overview').select('*')
@@ -254,6 +266,7 @@ async function refresh(manual = false) {
     if (!data.session) { await reauthenticate(); return; }
     if (manual) toast(state.error, true);
   } finally {
+    clearTimeout(slowHint);
     state.loading = false;
     el.view.classList.remove('is-refetching');
     renderChrome();
@@ -299,19 +312,10 @@ function renderChrome() {
   chips.push(chip('faults', s.fault, 'critical', 'fault'));
   chips.push(chip('degraded', s.degraded, 'warning', 'fault'));
   chips.push(chip('battery', s.batteryWarn, 'warning', 'battery'));
-  // A silent wrong number on the primary screen deserves a permanent seat
-  // here, not a page someone has to think to visit.
-  if (s.halfAssigned) {
-    chips.push(h('button', {
-      class: 'chip is-critical',
-      title: 'In an area with no slot, so their bowls are missing from the stock total',
-      onclick: () => { location.hash = '#/assign'; },
-    }, h('b', {}, String(s.halfAssigned)), 'no slot'));
-  }
   if (s.awaiting) chips.push(chip('not deployed', s.awaiting, 'good', null));
   chips.push(h('span', { class: 'chip', style: 'cursor:default' },
     h('b', {}, `${s.reporting}/${s.total - s.awaiting}`), 'reporting'));
-  mount(el.chips, chips);
+  reconcile(el.chips, chips);
 
   renderFreshness();
 }
@@ -325,7 +329,7 @@ function renderFreshness() {
     .map(d => d.updated_at).sort()[0];
   if (oldest) bits.push(h('span', { class: 'dim' },
     `· oldest device report ${fmtRelative(oldest)}`));
-  mount(el.freshness, bits);
+  reconcile(el.freshness, bits);
 }
 
 // --- routing ----------------------------------------------------------
@@ -367,7 +371,13 @@ function render(forced = true) {
     a.classList.toggle('active', a.dataset.tab === tab);
   }
   try {
-    mount(el.view, fn(state, params, ctx));
+    // A poll patches the live DOM; a navigation replaces it. Patching is what
+    // stops the screen blinking every refresh — and it keeps scroll position,
+    // the caret in the search box, and an open history table where they were.
+    // Across a route change there is nothing to preserve and morphing two
+    // unrelated trees would just be slower.
+    if (routeChanged) mount(el.view, fn(state, params, ctx));
+    else reconcile(el.view, fn(state, params, ctx));
   } catch (err) {
     console.error(err);
     clear(el.view);
@@ -398,6 +408,7 @@ function fleetDiagnostics() {
   const { inService, meal, tz } = serviceState(state.devices);
   return JSON.stringify({
     captured_at: new Date().toISOString(),
+    dashboard_version: APP_VERSION,
     site: { timezone: tz, in_service: inService, meal, local_time: fmtClock(new Date().toISOString(), tz) },
     summary: fleetSummary(state.devices),
     slots: state.slots,
