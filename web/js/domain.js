@@ -119,6 +119,44 @@ export function stockSeverity(trusted, okStacks) {
   return 'good';
 }
 
+// --- assignment validity ---------------------------------------------
+
+export const SERVING_AREAS = new Set(['D', 'M', 'T']);
+
+/**
+ * A device parked in a serving area with no slot number.
+ *
+ * `slot_overview` groups by (location, food_slot) and drops rows where either
+ * is null, so such a device contributes nothing to any dish position: its
+ * bowls disappear from the primary screen with no error and no gap. This is
+ * how Darshanarthi slot 1 came to report a capacity of 4 with three stacks
+ * physically standing on it.
+ *
+ * Reserved (`R`) with no slot is correct, not half-assigned -- a spare
+ * occupies no serving position.
+ */
+export function isHalfAssigned(dev) {
+  return SERVING_AREAS.has(dev.location) && dev.food_slot == null;
+}
+
+/**
+ * Is this (location, food_slot) pair sane? Returns null when fine, otherwise
+ * the reason. Used to gate the Devices form so the state above cannot be
+ * created in the first place.
+ */
+export function assignmentError(location, foodSlot) {
+  if (location == null) {
+    return foodSlot == null ? null : 'Pick an area, or clear the slot too.';
+  }
+  if (location === 'R') {
+    return foodSlot == null ? null : 'Reserved units occupy no serving position — clear the slot.';
+  }
+  if (foodSlot == null) {
+    return 'Pick a slot. Without one this device is left out of its dish position’s total.';
+  }
+  return null;
+}
+
 // --- device severity -------------------------------------------------
 
 /**
@@ -148,7 +186,14 @@ export function deviceSeverity(dev) {
   if (dev.battery_mv == null && dev.battery_level == null) {
     rank = Math.max(rank, 20); reasons.push('No battery detected');
   }
-  if (dev.location == null || dev.food_slot == null) {
+  // A half-assignment is not cosmetic. slot_overview filters `food_slot is not
+  // null`, so this device's bowls are silently absent from its dish position's
+  // total -- the number on the primary screen is simply wrong, with nothing on
+  // screen to say so. Ranked above a low battery for that reason.
+  if (isHalfAssigned(dev)) {
+    rank = Math.max(rank, 70);
+    reasons.push('Area set but no slot — its bowls are missing from stock totals');
+  } else if (dev.location == null) {
     rank = Math.max(rank, 10); reasons.push('Not assigned to a position');
   }
 
@@ -174,10 +219,13 @@ export function fleetSummary(devices) {
   const s = {
     total: devices.length,
     offline: 0, fault: 0, degraded: 0,
-    batteryWarn: 0, sensorsDown: 0,
+    batteryWarn: 0, sensorsDown: 0, halfAssigned: 0,
     awaiting: 0, inService: 0, reporting: 0,
   };
   for (const d of devices) {
+    // Counted before the awaiting_deployment skip: a misconfigured spare is
+    // still misconfigured, and it is cheaper to fix before it is installed.
+    if (isHalfAssigned(d)) s.halfAssigned++;
     if (d.awaiting_deployment) { s.awaiting++; continue; }
     if (d.offline) s.offline++;
     if (d.stack_status === 'discontiguous') s.fault++;

@@ -138,9 +138,15 @@ worse than none).
 | **Menu** | `meal_mapping_preload` + `meal_food_mapping` | What each slot serves, per meal per day. |
 | **Devices** | `devices` | Assign `location`, `food_slot`, `label`. Rare — hardware moves only. |
 
-Data refreshes every 20 s while the tab is visible, and polls rather than
-subscribing: 32 devices reporting every 60 s would be ~46k realtime messages a
-day at a screen glanced at every few minutes.
+Data refreshes every **10 s** while the tab is visible, and polls rather than
+subscribing: at the firmware's 20 s heartbeat, 32 devices would push ~140k
+realtime messages a day at a screen glanced at every few minutes.
+
+The poll interval is sized against the server's alarm, not picked round.
+`offline` fires at 40 s without a report, so worst-case time-to-notice is
+40 s + one poll. At a 20 s poll that is 60 s — meeting "within a minute" with
+no margin, and missing it outright if one request is slow. At 10 s it is
+40–50 s.
 
 ---
 
@@ -182,6 +188,13 @@ the digit to carry the message, so the card is banded by bowls-per-stack
 (≤1 critical, ≤2 warning). Comparing raw totals would paint a one-stack position
 red beside a three-stack one at the same fullness.
 
+**A filter that hides devices says so.** The Health list is sorted by severity,
+so a healthy device sits mid-list and every problem filter hides it outright —
+which reads as "the device is missing" rather than "the device is fine". A
+banner names the count being withheld and offers one click back, and the search
+box deliberately **overrides** the filters, because someone holding a board
+wants to know whether it is reporting, not whether it is broken.
+
 **Status colour never travels alone.** There are three tones, not four: the
 status palette cannot separate four levels on hue (warning against serious
 measures below the threshold at which two colours are reliably distinguished,
@@ -194,6 +207,16 @@ so the chart is a step (the value between rows is genuinely constant) and gaps
 are steady state. It is ordered by `recorded_at`, never `id` or `received_at`:
 writes batch at most every 5 s, so rows sharing an arrival can describe moments
 5 s apart.
+
+**An area without a slot is refused.** `slot_overview` groups by
+`(location, food_slot)` and drops rows where either is null, so a device parked
+in an area with no slot number contributes nothing to its dish position — the
+stock number is simply wrong, with no error and no gap to notice. The Devices
+form treats the two dropdowns as one decision: both set, or both null.
+Choosing `R` clears and locks the slot, since a spare occupies no serving
+position. Devices already in that state are shown in red, counted in a
+permanent header chip, and ranked near the top of Health — but they do not
+block edits to unrelated rows.
 
 **Clearing a dish is a DELETE.** "No dish here" and "a dish with no name" are
 different, and a CHECK rejects the second — so blanks are filtered before the
@@ -256,7 +279,7 @@ npm install      # jsdom, only for the test — the app itself has no dependenci
 node smoke.mjs
 ```
 
-64 assertions. It loads the real `index.html`, stubs PostgREST with rows shaped
+83 assertions. It loads the real `index.html`, stubs PostgREST with rows shaped
 like `device_overview` / `slot_overview` / `status_events`, and drives every
 screen. It exists to protect the rules in the section above — each is one
 plausible edit away from breaking with nothing visibly wrong on screen.
@@ -266,7 +289,7 @@ plausible edit away from breaking with nothing visibly wrong on screen.
 - **No access control.** With anonymous sign-in on, anyone with the URL can read
   the fleet and edit menus and assignments. Deliberate for a trial; not a
   production posture.
-- **No realtime.** Worst-case staleness is one poll, 20 s.
+- **No realtime.** Worst-case staleness is one poll, 10 s.
 - **History is capped at 1000 events** per device per window.
 - **Menu editing has no conflict detection.** Two admins on the same meal, last
   write wins.

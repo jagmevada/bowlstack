@@ -1,9 +1,9 @@
 // ====================================================================
 //  Shell: connection gate, auth gate, router, polling.
 //
-//  Polling, not realtime. Each device updates every 60 s, so 32 of them
-//  would push ~46k broadcast messages a day at a screen that is glanced at
-//  every few minutes. A 20 s poll of two small views is cheaper and cannot
+//  Polling, not realtime. The firmware heartbeat is 20 s, so 32 devices
+//  would push ~140k broadcast messages a day at a screen that is glanced
+//  at every few minutes. Polling two small views is cheaper and cannot
 //  fall silently out of sync.
 // ====================================================================
 
@@ -19,7 +19,13 @@ import { renderDevice, clearHistoryCache } from './views/device.js';
 import { renderMenu } from './views/menu.js';
 import { renderAssign } from './views/assign.js';
 
-const POLL_MS = 20_000;
+// Sized against the server's own alarm, not picked round. `offline` fires at
+// 40 s without a report, so worst-case time-to-notice is 40 s + one poll: 60 s
+// at a 20 s poll, which meets "within a minute" with no margin at all, and
+// misses it entirely if a single request is slow. At 10 s it is 40-50 s, which
+// leaves room. The cost is one extra pair of small queries every 10 s, and
+// only while the tab is actually visible.
+const POLL_MS = 10_000;
 
 const state = {
   devices: [],
@@ -293,6 +299,15 @@ function renderChrome() {
   chips.push(chip('faults', s.fault, 'critical', 'fault'));
   chips.push(chip('degraded', s.degraded, 'warning', 'fault'));
   chips.push(chip('battery', s.batteryWarn, 'warning', 'battery'));
+  // A silent wrong number on the primary screen deserves a permanent seat
+  // here, not a page someone has to think to visit.
+  if (s.halfAssigned) {
+    chips.push(h('button', {
+      class: 'chip is-critical',
+      title: 'In an area with no slot, so their bowls are missing from the stock total',
+      onclick: () => { location.hash = '#/assign'; },
+    }, h('b', {}, String(s.halfAssigned)), 'no slot'));
+  }
   if (s.awaiting) chips.push(chip('not deployed', s.awaiting, 'good', null));
   chips.push(h('span', { class: 'chip', style: 'cursor:default' },
     h('b', {}, `${s.reporting}/${s.total - s.awaiting}`), 'reporting'));

@@ -95,7 +95,11 @@ ASSIGN.forEach(([loc, slot, n], i) => {
 });
 for (let n = 25; n <= 32; n++) {
   devices.push({
-    device_id: `BWL-0${n}`, location: 'R', food_slot: null, label: 'Reserved',
+    // BWL-030 reproduces the state that emptied Darshanarthi slot 1: parked in
+    // a serving area with no slot, so slot_overview drops it entirely.
+    device_id: `BWL-0${n}`,
+    location: n === 30 ? 'D' : 'R', food_slot: null,
+    label: n === 30 ? 'Darshanarthi slot 1' : 'Reserved',
     timezone: 'Asia/Kolkata', current_food: null, current_meal: 'Lunch',
     reported: false, updated_at: null, stale_for: null, in_service: true,
     offline: false, awaiting_deployment: true, data_is_stale: false,
@@ -351,6 +355,28 @@ if (saveBtn) {
     view.querySelectorAll('.row-form input[type=text]').length >= 5);
 }
 
+console.log('\n[health: finding a specific device]');
+await go('#/health?f=offline');
+{
+  const shown = [...view.querySelectorAll('.dev')].map(a => a.textContent);
+  ok('a filter hides healthy devices', !shown.some(t => t.includes('BWL-001')));
+  ok('and says so loudly, with a count',
+    /\d+ of \d+ devices hidden/.test(text()), text().match(/\d+ of \d+ devices hidden/)?.[0]);
+  ok('offers one click back to everything', /Show all devices/.test(text()));
+}
+await go('#/health?f=offline&q=BWL-001');
+{
+  const shown = [...view.querySelectorAll('.dev')].map(a => a.getAttribute('href'));
+  ok('search finds a healthy device despite the filter',
+    shown.some(hh => hh.includes('BWL-001')), shown.join(' '));
+  ok('search narrows to just it', shown.length === 1);
+  ok('search says it overrode the filters', /Search ignores the filters/.test(text()));
+}
+await go('#/health?q=Tiffin');
+ok('search also matches the label', view.querySelectorAll('.dev').length >= 5);
+await go('#/health?q=zzzz');
+ok('a search with no hits says so', /No device matches/.test(text()));
+
 console.log('\n[devices]');
 await go('#/assign');
 ok('lists all 32 plus a header', view.querySelectorAll('.assign-row').length === 33);
@@ -372,6 +398,61 @@ if (saveDev) {
   ok('never writes device_id', !patch || !('device_id' in patch));
   ok('writes only grantable columns',
     !patch || Object.keys(patch).every(k => ['location', 'food_slot', 'label', 'timezone'].includes(k)));
+  ok('never writes a serving area with a null slot',
+    !!patch && !('food_slot' in patch && patch.food_slot == null && patch.location !== 'R'),
+    JSON.stringify(patch));
+}
+
+// The bug that emptied Darshanarthi slot 1: an area with no slot is dropped by
+// slot_overview, so the device stops counting toward its dish position with no
+// error anywhere.
+console.log('\n[devices: a half-assignment must be unreachable]');
+await go('#/assign');
+{
+  const row = [...view.querySelectorAll('.assign-row')]
+    .find(r => r.querySelector('.did')?.textContent.startsWith('BWL-004'));
+  const [locSel, slotSel] = row.querySelectorAll('select');
+  const saveOf = () => [...view.querySelectorAll('button')]
+    .find(b => /^(Save \d+ change|Fix \d+ row)/.test(b.textContent));
+
+  slotSel.value = '';
+  slotSel.dispatchEvent(new window.Event('change'));
+  ok('clearing the slot of a deployed device is refused',
+    /Fix 1 row first/.test(saveOf()?.textContent || ''), saveOf()?.textContent);
+  ok('and the save button is disabled', saveOf()?.disabled === true);
+  ok('the row explains what it costs',
+    /left out of its dish position/.test(row.textContent), row.textContent.slice(-90));
+
+  locSel.value = 'R';
+  locSel.dispatchEvent(new window.Event('change'));
+  ok('choosing Reserved clears and locks the slot',
+    slotSel.value === '' && slotSel.disabled === true);
+  ok('reserved with no slot is valid, so saving is allowed again',
+    /^Save \d+ change/.test(saveOf()?.textContent || '') && saveOf()?.disabled === false,
+    saveOf()?.textContent);
+
+  locSel.value = 'D';
+  locSel.dispatchEvent(new window.Event('change'));
+  ok('going back to a serving area demands a slot again',
+    /Fix 1 row first/.test(saveOf()?.textContent || ''));
+  slotSel.value = '3';
+  slotSel.dispatchEvent(new window.Event('change'));
+  ok('a complete pair clears the error',
+    !row.classList.contains('invalid')
+    && row.querySelector('.row-error')?.hidden === true);
+  ok('and the save is live again',
+    /^Save \d+ change/.test(saveOf()?.textContent || '') && saveOf()?.disabled === false,
+    saveOf()?.textContent);
+}
+
+console.log('\n[devices: existing damage is named, not silent]');
+{
+  ok('the half-assigned device is called out by ID',
+    /BWL-030/.test(text()) && /no slot/i.test(text()));
+  ok('a broken row from the database does not block unrelated edits',
+    [...view.querySelectorAll('.assign-row.invalid')].length >= 1
+    && !/Fix \d+ row/.test([...view.querySelectorAll('button')]
+        .map(b => b.textContent).join(' ')));
 }
 
 console.log(`\n${fails.length ? `FAILED (${fails.length}): ${fails.join(' | ')}` : 'ALL PASS'}`);
