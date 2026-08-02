@@ -192,8 +192,9 @@ function dailyGrid(ctx, state, { locs, allMode, meal, date, tz, go }) {
     `${meal} · ${fmtDay(date)}. Slot numbers are the painted positions on the `,
     'stations. ',
     allMode
-      ? 'One form, three areas: filled fields save everywhere; blanks are left '
-        + 'untouched (a blank may mean the areas differ — remove dishes per area).'
+      ? 'One form, three areas: filled fields save everywhere, and blanking a '
+        + 'dish removes it from every area. Slots marked ≠ differ by area and '
+        + 'are never touched by a blank — deselect All to edit those.'
       : 'Blank a field and Save to remove that dish.'));
 
   const grid = h('div', { class: 'menu-grid' });
@@ -217,24 +218,37 @@ function dailyGrid(ctx, state, { locs, allMode, meal, date, tz, go }) {
     const failures = [];
     let dishes = 0;
     if (allMode) {
-      // One upsert carrying every area's rows. Blanks are SKIPPED, never
-      // deleted: in this mode a blank can mean "the areas disagree", and
-      // deleting three areas' dishes off the back of that ambiguity would be
-      // the worst kind of helpful.
+      // One upsert carrying every area's rows. A BLANK DELETES — but only
+      // where every area had agreed on the dish, so the intent is
+      // unambiguous ("remove it everywhere"; field report: a blanked slot
+      // that silently came back read as deletion being broken). Where the
+      // areas DIFFER, a blank still writes nothing: deleting three areas'
+      // different dishes off one ambiguous blank stays off the table.
       try {
-        const inputs = inputsByLoc.get('ALL')?.inputs || new Map();
+        const entry = inputsByLoc.get('ALL') || {};
+        const inputs = entry.inputs || new Map();
+        const deletable = entry.deletable || new Set();
         const payload = [];
+        const toDelete = [];
         for (const [slot, input] of inputs) {
           const name = input.value.trim();
-          if (!name) continue;
-          for (const l of locs) {
-            payload.push({ location: l, meal_type: meal, meal_date: date,
-                           food_slot: slot, food_name: name });
+          if (name) {
+            for (const l of locs) {
+              payload.push({ location: l, meal_type: meal, meal_date: date,
+                             food_slot: slot, food_name: name });
+            }
+          } else if (deletable.has(slot)) {
+            toDelete.push(slot);
           }
         }
         if (payload.length) {
           unwrap(await ctx.client.from('meal_food_mapping')
             .upsert(payload, { onConflict: 'location,meal_date,meal_type,food_slot' }));
+        }
+        if (toDelete.length) {
+          unwrap(await ctx.client.from('meal_food_mapping').delete()
+            .in('location', locs).eq('meal_type', meal).eq('meal_date', date)
+            .in('food_slot', toDelete));
         }
         dishes = payload.length;
         for (const l of locs) preloadCache.delete(`${l}|${meal}|${date}`);
@@ -315,11 +329,17 @@ function combinedDailyColumn(state, { locs, meal, date, inputsByLoc }) {
       chip));
 
   const inputs = new Map();
-  inputsByLoc.set('ALL', { inputs });
+  // Slots where every area AGREED on a dish: blanking one of these is an
+  // unambiguous "remove it everywhere" and deletes from all areas on save.
+  // Only DIFFERING slots are immune to a blank — they are the ambiguity the
+  // skip rule exists for.
+  const deletable = new Set();
+  inputsByLoc.set('ALL', { inputs, deletable });
   for (const slot of slots) {
     const names = locs.map(l => perLoc.get(l).get(slot)?.food_name ?? '');
     const agreed = new Set(names).size === 1 ? names[0] : '';
     const differs = new Set(names).size > 1;
+    if (agreed) deletable.add(slot);
     const input = h('input', {
       type: 'text', value: agreed, placeholder: differs ? '≠ differs by area' : 'No dish',
       'aria-label': `All areas slot ${slot} dish`,
@@ -547,8 +567,9 @@ function weekGrid(state, ctx, { locs, allMode, meal, day, tz, go }) {
     `Every ${WEEKDAYS[day]} · ${meal}. This is the plan, not any particular date `,
     '— the daily editor and Apply turn it into recorded menus. ',
     allMode
-      ? 'One form, three areas: filled fields save to every area\'s plan; '
-        + 'blanks are left untouched.'
+      ? 'One form, three areas: filled fields save to every area\'s plan, and '
+        + 'blanking a dish removes it from every plan. Slots marked ≠ differ '
+        + 'by area and are never touched by a blank.'
       : 'Blank a field and Save to remove that dish from the plan.'));
 
   const grid = h('div', { class: 'menu-grid' });
@@ -568,22 +589,34 @@ function weekGrid(state, ctx, { locs, allMode, meal, day, tz, go }) {
     status.textContent = 'Saving…';
     const failures = [];
     if (allMode) {
-      // Same rule as the daily All form: filled fields write everywhere,
-      // blanks never delete — a blank can mean the areas' plans disagree.
+      // Same rule as the daily All form: filled fields write everywhere; a
+      // blank DELETES where every area's plan agreed (unambiguous intent),
+      // and writes nothing where the plans differ.
       try {
-        const inputs = inputsByLoc.get('ALL')?.inputs || new Map();
+        const entry = inputsByLoc.get('ALL') || {};
+        const inputs = entry.inputs || new Map();
+        const deletable = entry.deletable || new Set();
         const payload = [];
+        const toDelete = [];
         for (const [slot, input] of inputs) {
           const name = input.value.trim();
-          if (!name) continue;
-          for (const l of locs) {
-            payload.push({ location: l, weekday: day, meal_type: meal,
-                           food_slot: slot, food_name: name });
+          if (name) {
+            for (const l of locs) {
+              payload.push({ location: l, weekday: day, meal_type: meal,
+                             food_slot: slot, food_name: name });
+            }
+          } else if (deletable.has(slot)) {
+            toDelete.push(slot);
           }
         }
         if (payload.length) {
           unwrap(await ctx.client.from('meal_menu_template')
             .upsert(payload, { onConflict: 'location,weekday,meal_type,food_slot' }));
+        }
+        if (toDelete.length) {
+          unwrap(await ctx.client.from('meal_menu_template').delete()
+            .in('location', locs).eq('weekday', day).eq('meal_type', meal)
+            .in('food_slot', toDelete));
         }
         for (const l of locs) templateCache.delete(l);
       } catch (err) {
@@ -685,11 +718,13 @@ function combinedWeekColumn(state, { locs, meal, day, inputsByLoc }) {
       chip));
 
   const inputs = new Map();
-  inputsByLoc.set('ALL', { inputs });
+  const deletable = new Set();
+  inputsByLoc.set('ALL', { inputs, deletable });
   for (const slot of slots) {
     const names = locs.map(l => perLoc.get(l).get(slot) ?? '');
     const agreed = new Set(names).size === 1 ? names[0] : '';
     const differs = new Set(names).size > 1;
+    if (agreed) deletable.add(slot);
     const input = h('input', {
       type: 'text', value: agreed, placeholder: differs ? '≠ differs by area' : 'No dish',
       'aria-label': `All areas slot ${slot} dish`,
@@ -749,7 +784,7 @@ function coverageCard(loc, { meal, day, go }) {
     const k = `${r.weekday}|${r.meal_type}`;
     counts.set(k, (counts.get(k) || 0) + 1);
   }
-  const tbl = h('table', {},
+  const tbl = h('table', { class: 'coverage' },
     h('thead', {}, h('tr', {},
       h('th', {}, ''),
       ...WEEKDAYS.map(w => h('th', {}, w.slice(0, 3))))),

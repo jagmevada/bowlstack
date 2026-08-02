@@ -684,6 +684,24 @@ details.table-view > summary {
 
 /* --- forms: menu + device assignment -------------------------------- */
 
+/* The template coverage map. The generic table styles left-align headers and
+   right-align .num cells, which slid every count away from its weekday label
+   — Sunday's number appeared to sit under Monday. Day columns share one
+   width and CENTER both header and count, so a label and its data cannot
+   drift apart. */
+table.coverage th,
+table.coverage td {
+  text-align: center;
+  width: 11.5%;
+}
+table.coverage th:first-child,
+table.coverage td:first-child {
+  text-align: left;
+  width: auto;
+}
+table.coverage td { padding: .15rem .2rem; }
+table.coverage .ghost { width: 100%; min-width: 2.2rem; }
+
 /* The daily menu grid: one column per selected area, so the current meal is
    verifiable across the whole site in one glance. Columns stack on a narrow
    phone rather than crushing the inputs. */

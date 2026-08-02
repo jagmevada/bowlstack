@@ -230,6 +230,14 @@ window.supabase = {
           { meal_date: args.p_from, meal_type: 'Dinner', written: 0, skipped: true },
         ], error: null });
       }
+      // Tiffin disagrees in slot 2, so the All-areas view has one genuinely
+      // ambiguous slot to protect.
+      if (name === 'meal_mapping_preload' && args.p_location === 'T') {
+        const rows = (preloadSourceDate
+          ? preload.map(r => ({ ...r, source_date: preloadSourceDate }))
+          : preload).map(r => Number(r.food_slot) === 2 ? { ...r, food_name: 'T-Special' } : r);
+        return Promise.resolve({ data: rows, error: null });
+      }
       return Promise.resolve({
         data: preloadSourceDate
           ? preload.map(r => ({ ...r, source_date: preloadSourceDate }))
@@ -713,17 +721,19 @@ await go('#/menu?locs=all&meal=Lunch&date=2026-08-06');
       b.textContent === 'All areas' && b.getAttribute('aria-pressed') === 'true'));
   ok('one combined column', view.querySelectorAll('.menu-col').length === 1
     && /All areas/.test(view.querySelector('.menu-col h3')?.textContent || ''));
-  // The stub preload returns identical rows per area, so every slot agrees.
   ok('slots prefill where the areas agree',
     [...view.querySelectorAll('.menu-col input')].some(i => i.value === 'Khichdi'));
-  ok('agreement chip shown', /same everywhere|same menu/.test(text()));
+  // Tiffin's slot 2 differs, and the view must both say so and protect it.
+  ok('the disagreement is named on the chip', /differs in slot/.test(text()));
+  ok('the differing slot stays blank with the marker',
+    [...view.querySelectorAll('.menu-col input')].some(i =>
+      i.value === '' && i.placeholder.includes('differs')));
 
-  // Blank one slot, then save: filled fields fan out to every area in ONE
-  // upsert; the blank is skipped — never a delete.
+  // Field report: a blanked slot that silently came back read as "delete is
+  // broken". A blank now DELETES where every area agreed (unambiguous), and
+  // still writes nothing where they differ.
   const inputs = [...view.querySelectorAll('.menu-col input')];
-  inputs[0].value = '';
-  const delBefore = calls.filter(c => c.table === 'meal_food_mapping'
-    && c.filters.some(f => f[0] === 'delete')).length;
+  inputs[0].value = '';                 // slot 1: areas agreed -> delete it
   const saveBtn = [...view.querySelectorAll('button')].find(b => b.textContent === 'Save to all 3 areas');
   ok('save button says all 3 areas', !!saveBtn);
   saveBtn.dispatchEvent(new window.Event('click'));
@@ -733,11 +743,14 @@ await go('#/menu?locs=all&meal=Lunch&date=2026-08-06');
   const payload = up?.filters.find(f => f[0] === 'upsert')?.[1] || [];
   ok('one upsert fans out to D, M and T',
     ['D', 'M', 'T'].every(l => payload.some(r => r.location === l)));
-  ok('four slots x three areas = 12 rows (the blank skipped)',
-    payload.length === 12, String(payload.length));
-  const delAfter = calls.filter(c => c.table === 'meal_food_mapping'
-    && c.filters.some(f => f[0] === 'delete')).length;
-  ok('a blank in All mode never deletes', delAfter === delBefore);
+  ok('three filled slots x three areas = 9 rows (blank + differing skipped)',
+    payload.length === 9, String(payload.length));
+  const del = [...calls].reverse().find(c => c.table === 'meal_food_mapping'
+    && c.filters.some(f => f[0] === 'delete')
+    && c.filters.some(f => f[0] === 'in' && f[1] === 'location'));
+  const delSlots = del?.filters.find(f => f[0] === 'in' && f[1] === 'food_slot')?.[2] || [];
+  ok('the agreed blank deletes across every area', !!del && delSlots.includes(1));
+  ok('the differing slot is never deleted', !delSlots.includes(2), JSON.stringify(delSlots));
 
   // Clicking a single area while in All narrows to that area.
   const tiffin = [...view.querySelectorAll('button')].find(b => b.textContent === 'Tiffin');
@@ -790,6 +803,24 @@ await go('#/menu?mode=week&meal=Lunch');
   const after = calls.filter(c => c.table === 'meal_menu_template'
     && c.filters.some(f => f[0] === 'upsert')).length;
   ok('template save-all writes each selected area', after - before === 2, String(after - before));
+}
+
+console.log('\n[menu: weekly per-area delete works]');
+await go('#/menu?mode=week&locs=D&meal=Lunch&day=3');
+{
+  const input = [...view.querySelectorAll('.menu-col input')].find(i => i.value === 'T-Rice');
+  ok('slot prefilled from the template', !!input);
+  input.value = '';
+  const saveBtn = [...view.querySelectorAll('button')].find(b => b.textContent === 'Save template');
+  saveBtn.dispatchEvent(new window.Event('click'));
+  await new Promise(r => setTimeout(r, 200));
+  const del = [...calls].reverse().find(c => c.table === 'meal_menu_template'
+    && c.filters.some(f => f[0] === 'delete')
+    && c.filters.some(f => f[0] === 'eq' && f[1] === 'weekday'));
+  ok('blanking a planned dish deletes it from the template', !!del);
+  const delSlots = del?.filters.find(f => f[0] === 'in' && f[1] === 'food_slot')?.[2] || [];
+  ok('and exactly that slot', delSlots.length === 1 && delSlots.includes(1),
+    JSON.stringify(delSlots));
 }
 
 console.log('\n[menu: apply template to dates]');
