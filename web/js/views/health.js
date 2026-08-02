@@ -182,6 +182,21 @@ function deviceRow(d, tz) {
     if (d.data_is_stale) badges.append(badge('idle', '◷', `As of ${fmtDateTime(d.updated_at, tz)}`));
   }
 
+  // The status line under the badges. For a silent device it says OFFLINE in
+  // so many words — a badge among five other badges was too easy to read past,
+  // and every other number on the row is last-known, which deserves stating.
+  const gone = deviceOffline(d);
+  const statusLine = d.awaiting_deployment
+    ? h('div', { class: 'dev-where' }, 'Registered, awaiting installation')
+    : gone
+      ? h('div', { class: 'dev-offline-line' },
+          h('span', { class: 'g', 'aria-hidden': 'true' }, '✕'),
+          `OFFLINE — no telemetry. Last heard ${fmtRelative(d.updated_at)}`,
+          h('span', { class: 'dim', style: 'font-weight:400' },
+            ` · values shown are last known${d.firmware ? ` · fw ${d.firmware}` : ''}`))
+      : h('div', { class: 'dev-where' },
+          `Updated ${fmtRelative(d.updated_at)}${d.firmware ? ` · fw ${d.firmware}` : ''}`);
+
   const mid = h('div', { class: 'dev-mid' },
     h('div', {},
       h('span', { class: 'dev-id' }, d.device_id),
@@ -189,9 +204,7 @@ function deviceRow(d, tz) {
       h('span', { class: 'dev-where' }, positionLabel(d)),
       d.current_food ? h('span', { class: 'dev-where' }, ` · ${d.current_food}`) : null),
     badges,
-    h('div', { class: 'dev-where' },
-      d.awaiting_deployment ? 'Registered, awaiting installation'
-        : `Updated ${fmtRelative(d.updated_at)}${d.firmware ? ` · fw ${d.firmware}` : ''}`));
+    statusLine);
 
   return h('a', {
     class: `dev sev-${sev.level}`,

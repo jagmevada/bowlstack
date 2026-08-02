@@ -330,6 +330,46 @@ button:disabled { opacity: .45; cursor: default; }
 }
 .section-head .count { font-size: .8rem; color: var(--ink-3); }
 
+/* The problem strip on Stock: one thin red bar that routes to Health. Thin is
+   the point — it must register during a busy service without eating the
+   screen the way a full banner would. Colour never travels alone: glyphs and
+   words ride in it, and it is a real button. */
+.alert-strip {
+  display: flex;
+  align-items: center;
+  gap: .45rem;
+  width: 100%;
+  text-align: left;
+  background: var(--critical-wash);
+  border: 0;
+  border-left: 3px solid var(--critical);
+  border-radius: 8px;
+  padding: .3rem .6rem;
+  margin: .6rem 0;
+  min-height: 34px;
+  font-size: .8rem;
+  color: var(--ink);
+}
+.alert-strip .g { color: var(--critical); flex: none; }
+.alert-strip .go {
+  margin-left: auto;
+  color: var(--ink-2);
+  font-size: .75rem;
+  white-space: nowrap;
+}
+
+/* Health: the line that says OFFLINE in words. The word is bold ink (small
+   red text fails contrast in dark mode); the glyph carries the red. */
+.dev-offline-line {
+  font-size: .78rem;
+  font-weight: 600;
+  display: flex;
+  align-items: baseline;
+  gap: .3rem;
+  flex-wrap: wrap;
+}
+.dev-offline-line .g { color: var(--critical); }
+
 .banner {
   border-radius: var(--radius);
   padding: .6rem .8rem;

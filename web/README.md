@@ -172,7 +172,10 @@ a station the screen just went silent about) but turns red with a dashed
 underline — dashed because red on these numerals already means "critically
 low", so hue alone could not tell a full-but-stale position from an empty live
 one. The meter keeps its severity hue and gains a hatch; a banner on Stock
-names the silent devices. Two server flags drive all of it: `offline` (died
+carries a thin red problem strip — counts of offline / fault / degraded /
+battery issues — that clicks through to Health filtered to problems; the Health
+row for a silent device says OFFLINE in words, with "values shown are last
+known". Two server flags drive all of it: `offline` (died
 mid-window) and `missed_last_service` (slept through the most recently
 completed service window — the flag that survives the dark hours, added
 because a device dead for six days used to look identical to a healthy one
@@ -329,7 +332,7 @@ npm install      # jsdom, only for the test — the app itself has no dependenci
 node smoke.mjs
 ```
 
-129 assertions. It loads the real `index.html`, stubs PostgREST with rows shaped
+136 assertions. It loads the real `index.html`, stubs PostgREST with rows shaped
 like `device_overview` / `slot_overview` / `status_events`, and drives every
 screen. It exists to protect the rules in the section above — each is one
 plausible edit away from breaking with nothing visibly wrong on screen.

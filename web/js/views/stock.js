@@ -14,7 +14,7 @@
 import { h, badge, empty, banner } from '../ui.js';
 import {
   LOCATION_NAMES, SERVING_LOCATIONS, slotStock, stockSeverity, deviceStack,
-  deviceOffline, slotOffline, fmtClock, fmtRelative, serviceState,
+  deviceOffline, slotOffline, fleetSummary, fmtClock, fmtRelative, serviceState,
 } from '../domain.js';
 
 export function renderStock(state) {
@@ -30,22 +30,29 @@ export function renderStock(state) {
     byPosition.get(k).push(d);
   }
 
-  // Name the silent stations out loud. `deviceOffline` is the server's two
-  // flags and nothing else, so this cannot false-alarm on ordinary dark
-  // hours — a device between meals is neither offline nor missed. Scoped to
-  // DEPLOYED devices because this screen only draws deployed positions: a
-  // banner naming a unit with no card here would send someone hunting for a
-  // station that does not exist. Parked units still surface on Health.
-  const silent = devices
-    .filter(d => SERVING_LOCATIONS.includes(d.location) && d.food_slot != null)
-    .filter(deviceOffline)
-    .map(d => d.device_id).sort();
-  if (silent.length) {
-    const named = silent.slice(0, 6).join(', ')
-      + (silent.length > 6 ? ` and ${silent.length - 6} more` : '');
-    frag.append(banner('critical', '✕',
-      h('b', {}, `${silent.length} device${silent.length === 1 ? ' is' : 's are'} offline. `),
-      `${named} — showing last known counts, in red.`));
+  // The problem strip: one thin red bar that says "something needs a person"
+  // and takes them to Health to see what. Stock is the screen watched through
+  // service, so it carries the pointer, not the diagnosis — counts only, no
+  // wall of device IDs. Every count is a server-computed flag (deviceOffline
+  // wraps the two offline flags and nothing else), so this cannot false-alarm
+  // on ordinary dark hours.
+  const s = fleetSummary(devices);
+  const issues = [];
+  if (s.offline) issues.push(['✕', `${s.offline} offline`]);
+  if (s.fault) issues.push(['▲', `${s.fault} sensor fault${s.fault === 1 ? '' : 's'}`]);
+  if (s.degraded) issues.push(['◐', `${s.degraded} degraded`]);
+  if (s.batteryWarn) issues.push(['▮', `${s.batteryWarn} battery`]);
+  if (issues.length) {
+    frag.append(h('button', {
+      class: 'alert-strip',
+      title: 'Open the Health page to see which devices and why',
+      onclick: () => { location.hash = '#/health?f=problems'; },
+    },
+      ...issues.flatMap(([g, label]) => [
+        h('span', { class: 'g', 'aria-hidden': 'true' }, g),
+        h('span', {}, label),
+      ]),
+      h('span', { class: 'go' }, 'Diagnose in Health ›')));
   }
 
   if (!inService) {

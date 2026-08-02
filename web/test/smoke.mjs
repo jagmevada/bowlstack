@@ -350,9 +350,17 @@ console.log('\n[offline: last value kept, in red]');
   ok('no-data slot stays grey', noData?.querySelector('.slot-count') == null
     && noData?.querySelector('.slot-nodata') !== null);
 
-  ok('the banner names the silent devices',
-    /devices are offline|device is offline/.test(text())
-    && /BWL-014/.test(text()) && /BWL-021/.test(text()));
+  // The thin problem strip: counts, not a wall of IDs, and it routes to
+  // Health where the diagnosis lives.
+  const strip = view.querySelector('.alert-strip');
+  ok('the problem strip is present', strip != null);
+  ok('it counts the offline devices', /2 offline/.test(strip?.textContent || ''));
+  ok('it counts the sensor faults too', /1 sensor fault/.test(strip?.textContent || ''));
+  ok('it points at Health', /Diagnose in Health/.test(strip?.textContent || ''));
+  strip.dispatchEvent(new window.Event('click'));
+  ok('clicking it opens Health filtered to problems',
+    location.hash === '#/health?f=problems', location.hash);
+  await go('#/stock');
 }
 
 console.log('\n[health]');
@@ -370,8 +378,15 @@ ok('never-reported shows no count', text().includes('Never reported'));
   ok('its last count is red', row21?.querySelector('.dev-count.is-offline') !== null);
   ok('missed-service sorts into the top three',
     [...view.querySelectorAll('.dev')].slice(0, 3).some(r => r.textContent.includes('BWL-021')));
+  ok('the row says OFFLINE in words, with the silence stated',
+    /OFFLINE — no telemetry/.test(row21?.textContent || '')
+    && /last known/.test(row21?.textContent || ''));
   const row14 = [...view.querySelectorAll('.dev')].find(r => r.textContent.includes('BWL-014'));
   ok('offline device count is red too', row14?.querySelector('.dev-count.is-offline') !== null);
+  ok('the in-window offline row says it too',
+    /OFFLINE — no telemetry/.test(row14?.textContent || ''));
+  const healthy = [...view.querySelectorAll('.dev')].find(r => r.textContent.includes('BWL-001'));
+  ok('a healthy row never says OFFLINE', !/OFFLINE/.test(healthy?.textContent || ''));
   const faultRow = [...view.querySelectorAll('.dev')].find(r => r.textContent.includes('BWL-002'));
   ok('a fault row never gains the red count', faultRow?.querySelector('.dev-count.is-offline') == null
     && faultRow?.querySelector('.dev-count.na') !== null);
