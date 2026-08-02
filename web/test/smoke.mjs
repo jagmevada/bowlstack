@@ -490,9 +490,23 @@ console.log('\n[stock: outside service hours]');
   await go('#/stock');
   ok('banner says these are last-known values', text().includes('Outside service hours'));
   ok('cards date their figures', /As of /.test(text()));
+  // Egress guard: out of window the poll idles and the freshness line says so.
+  const { pollDelay } = await import('../js/app.js');
+  ok('poll runs at 15 s during service', pollDelay(true) === 15_000);
+  ok('poll idles at 10 min outside service', pollDelay(false) === 600_000);
+  // The note is painted by renderChrome, which runs on refresh — not on
+  // navigation. Press the app's own refresh button, as a person would.
+  window.document.getElementById('refresh-btn').click();
+  await new Promise(r => setTimeout(r, 150));
+  ok('the freshness line admits the idling',
+    window.document.getElementById('freshness').textContent.includes('idles outside service'));
   for (const d of devices) d.in_service = true;
   await go('#/stock');
   ok('banner returns to live on restore', !text().includes('Outside service hours'));
+  window.document.getElementById('refresh-btn').click();
+  await new Promise(r => setTimeout(r, 150));
+  ok('and the idle note clears',
+    !window.document.getElementById('freshness').textContent.includes('idles'));
 }
 
 console.log('\n[stock: template vs daily priority]');

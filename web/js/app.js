@@ -27,6 +27,14 @@ import { APP_VERSION } from './version.js';
 // still inside the minute, with enough slack to absorb a slow round trip,
 // without a 10 s poll's request volume. Polling stops while the tab is hidden.
 const POLL_MS = 15_000;
+// Outside every meal window the devices are powered off, so the rows cannot
+// change — refetching every 15 s would only spend Supabase egress re-reading
+// identical data for ~16 h a day. The poll idles at 10 minutes instead: still
+// often enough to notice a window opening by itself (the 90 s boot grace means
+// the first minutes are thin anyway), and returning to the tab always
+// refreshes immediately. Exported for the smoke suite.
+const IDLE_POLL_MS = 600_000;
+export function pollDelay(inService) { return inService ? POLL_MS : IDLE_POLL_MS; }
 
 const state = {
   devices: [],
@@ -319,17 +327,31 @@ async function refresh(manual = false) {
 
 function startPolling() {
   stopPolling();
-  pollTimer = setInterval(() => { if (!document.hidden) refresh(); }, POLL_MS);
+  // Self-scheduling rather than setInterval: the delay is recomputed AFTER
+  // each refresh, so the first poll that sees a window open drops straight
+  // from the idle cadence to 15 s, and the last one of the day idles back.
+  const loop = () => {
+    pollTimer = setTimeout(async () => {
+      if (!document.hidden) await refresh();
+      if (pollTimer) loop();
+    }, pollDelay(serviceState(state.devices).inService));
+  };
+  loop();
   tickTimer = setInterval(renderFreshness, 5000);
 }
 
 function stopPolling() {
-  clearInterval(pollTimer); clearInterval(tickTimer);
+  clearTimeout(pollTimer); clearInterval(tickTimer);
   pollTimer = tickTimer = null;
 }
 
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && client && pollTimer) refresh();
+  // The restart matters: if service began while the tab was hidden, a pending
+  // 10-minute idle timer would otherwise keep the page coasting through the
+  // start of a meal. Refresh first so the delay is computed on fresh state.
+  if (!document.hidden && client && pollTimer) {
+    refresh().then(() => { if (pollTimer) startPolling(); });
+  }
 });
 
 // --- chrome rendering -------------------------------------------------
@@ -387,6 +409,9 @@ function renderFreshness() {
     .map(d => d.updated_at).sort()[0];
   if (oldest) bits.push(h('span', { class: 'dim' },
     `· oldest device report ${fmtRelative(oldest)}`));
+  if (state.loadedAt && !state.error && !serviceState(state.devices).inService) {
+    bits.push(h('span', { class: 'dim' }, '· auto-refresh idles outside service'));
+  }
   reconcile(el.freshness, bits);
 }
 
