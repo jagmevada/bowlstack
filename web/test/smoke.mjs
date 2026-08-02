@@ -604,16 +604,15 @@ ok('degraded filter shows exactly the degraded devices',
   ok('degraded chip routes to its own filter', location.hash === '#/health?f=degraded');
 }
 
-// The not-deployed chip routed to the UNFILTERED page, so "17 not deployed"
-// opened a list of everything — deployed and not.
+// The not-deployed chip is GONE — static configuration, not status, and
+// removing it is what fits the capsules on one phone row. The section is
+// still reachable through Health's own filter.
 await go('#/stock');
 {
   const chips = [...window.document.getElementById('fleet-chips').children];
-  const nd = chips.find(c => /not deployed/.test(c.textContent));
-  ok('not-deployed chip exists', !!nd);
-  nd.dispatchEvent(new window.Event('click'));
-  await new Promise(r => setTimeout(r, 150));
-  ok('it routes to its own filter', location.hash === '#/health?f=awaiting', location.hash);
+  ok('no not-deployed chip in the header', !chips.some(c => /not deployed/.test(c.textContent)));
+  await go('#/health?f=awaiting');
+  await new Promise(r => setTimeout(r, 60));
   const rows = [...view.querySelectorAll('.dev')];
   ok('shows exactly the never-reported devices', rows.length === 9,
     String(rows.length));

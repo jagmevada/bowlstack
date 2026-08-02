@@ -352,6 +352,7 @@ it too, so a deploy cannot leave half an old shell behind.
 | 1.14 | the poll idles at 10 min outside service windows; hidden tabs never poll |
 | 1.15 | Health becomes a symbolic roster — one glyph line per device, whole fleet on a phone screen; device history offers 2 h–2 d; the reading-status band is repainted (blue fault, amber degraded, red battery, grey in-window offline, blank when powered off) and honest about silence; Stack-now draws the levels once |
 | 1.16 | device levels are capsules — blue present, striped bad sensor, blank empty; roster count sits beside its level strip, battery alone holds the right edge |
+| 1.17 | an empty level draws an outlined capsule (measured emptiness ≠ no data); the static "not deployed" chip leaves the header so the capsules hold one phone row |
 
 ### Tests
 

@@ -719,8 +719,17 @@ button:disabled { opacity: .45; cursor: default; }
   font-size: .82rem;
 }
 .level-row .k { color: var(--ink-3); font-variant-numeric: tabular-nums; }
-.level-row .bar { height: 20px; border-radius: 99px; background: transparent; }
-.level-row .bar.present { background: var(--series-1); }
+.level-row .bar {
+  height: 20px;
+  border-radius: 99px;
+  background: transparent;
+  border: 1px solid transparent;   /* reserve the pixel so rows align */
+}
+/* A HEALTHY sensor seeing no bowl draws the empty outline — measured
+   emptiness, not absence of data. Only a sensor that is not answering
+   leaves stripes, and only unknown-everything leaves nothing. */
+.level-row .bar.absent  { border-color: var(--axis); }
+.level-row .bar.present { background: var(--series-1); border-color: transparent; }
 .level-row .bar.unknown {
   background: repeating-linear-gradient(45deg,
     var(--axis) 0 3px, transparent 3px 6px);

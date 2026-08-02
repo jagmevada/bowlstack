@@ -136,7 +136,7 @@ export function renderDevice(state, params, ctx) {
             ? `Last known — ${fmtRelative(dev.updated_at)}${stack.note ? ` · ${stack.note}` : ''}`
             : stack.note || `of 4 bowls · ${dev.stack_status || 'no status'}`))),
     h('div', { class: 'dim', style: 'font-size:.75rem;margin-top:.5rem' },
-      'f4 on top, f1 the bottom bowl · blue: bowl present · striped: sensor not answering · blank: empty')));
+      'f4 on top, f1 the bottom bowl · blue: bowl present · outline: empty · striped: sensor not answering')));
 
   grid.append(h('div', { class: 'card' },
     h('div', { class: 'chart-title' }, 'Power'),
