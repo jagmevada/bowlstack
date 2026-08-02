@@ -532,7 +532,7 @@ ok('history is cached across redraws',
 console.log('\n[menu]');
 await go('#/menu?loc=D&meal=Lunch&date=2026-07-27');
 ok('called preload rpc', calls.some(c => c.rpc === 'meal_mapping_preload'));
-ok('draft banner shown for inherited menu', text().includes('Not saved for this date'));
+ok('carried draft chip shown, compact', /Carried from 26 Jul — not saved/.test(text()));
 ok('source date named', text().includes('26 Jul'));
 ok('five slot inputs', view.querySelectorAll('.row-form input[type=text]').length >= 5);
 ok('prefilled from preload',
@@ -705,6 +705,35 @@ await go('#/menu?loc=D&meal=Lunch&mode=week&day=3');
     !!del && del.filters.some(f => f[0] === 'in' && f[1] === 'weekday'));
 }
 
+console.log('\n[menu: weekly template is multi-area too]');
+await go('#/menu?mode=week&meal=Lunch');
+{
+  ok('three template columns by default', view.querySelectorAll('.menu-col').length === 3);
+  ok('area capsules multi-pressed',
+    [...view.querySelectorAll('button')].filter(b =>
+      ['Darshanarthi', 'Mahatma', 'Tiffin'].includes(b.textContent)
+      && b.getAttribute('aria-pressed') === 'true').length === 3);
+  ok('one coverage map per area', [...view.querySelectorAll('.table-wrap table')].length === 3);
+  ok('save covers all areas',
+    [...view.querySelectorAll('button')].some(b => b.textContent === 'Save template — 3 areas'));
+  ok('copy-area hides when the source is ambiguous',
+    ![...view.querySelectorAll('button')].some(b => b.textContent === 'Copy area'));
+
+  const tiffin = [...view.querySelectorAll('button')].find(b => b.textContent === 'Tiffin');
+  tiffin.dispatchEvent(new window.Event('click'));
+  await new Promise(r => setTimeout(r, 150));
+  ok('deselecting drops to two columns', view.querySelectorAll('.menu-col').length === 2);
+
+  const saveBtn = [...view.querySelectorAll('button')].find(b => /Save template — 2 areas/.test(b.textContent));
+  const before = calls.filter(c => c.table === 'meal_menu_template'
+    && c.filters.some(f => f[0] === 'upsert')).length;
+  saveBtn.dispatchEvent(new window.Event('click'));
+  await new Promise(r => setTimeout(r, 200));
+  const after = calls.filter(c => c.table === 'meal_menu_template'
+    && c.filters.some(f => f[0] === 'upsert')).length;
+  ok('template save-all writes each selected area', after - before === 2, String(after - before));
+}
+
 console.log('\n[menu: apply template to dates]');
 await go('#/menu?loc=D&meal=Lunch&mode=week');
 {
@@ -728,8 +757,8 @@ console.log('\n[menu: template draft in the daily editor]');
 preloadSourceDate = '2026-08-05';
 await go('#/menu?loc=D&meal=Lunch&date=2026-08-05');
 {
-  ok('template draft banner shown', /From the weekly template/.test(text()));
-  ok('and it does not claim a carry-over', !/Carried over from/.test(text()));
+  ok('template draft chip shown', /From template — save to record/.test(text()));
+  ok('and it does not claim a carry-over', !/Carried from/.test(text()));
 }
 preloadSourceDate = null;
 

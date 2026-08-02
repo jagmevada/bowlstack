@@ -694,14 +694,19 @@ details.table-view > summary {
   align-items: start;
   margin-top: .75rem;
 }
+/* Title and status chip stack vertically, and the head has a FIXED minimum
+   height: a long chip ("From template — save to record") must not push one
+   column's slot rows below its neighbours' — the whole point of the grid is
+   that slot 1 lines up with slot 1 across every area. */
 .menu-col-head {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: .5rem;
-  flex-wrap: wrap;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: .3rem;
+  min-height: 3.9rem;
   margin-bottom: .3rem;
 }
+.menu-col-head h3 { line-height: 1.2; }
 
 .row-form {
   display: grid;
