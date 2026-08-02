@@ -396,6 +396,26 @@ ok('offline filter includes the missed-service device',
   view.querySelectorAll('.dev').length === 2
   && ['BWL-014', 'BWL-021'].every(id => text().includes(id)));
 
+// Fault and degraded are DIFFERENT failures and must filter apart: fault is
+// an impossible reading from working sensors (f2 without f1 — bowls stack),
+// degraded is a sensor itself being down. They shared one filter once, so
+// the "1 faults" chip opened a 3-row list.
+await go('#/health?f=fault');
+ok('fault filter shows exactly the impossible-reading device',
+  view.querySelectorAll('.dev').length === 1 && text().includes('BWL-002'));
+await go('#/health?f=degraded');
+ok('degraded filter shows exactly the dead-sensor device',
+  view.querySelectorAll('.dev').length === 1 && text().includes('BWL-008'));
+{
+  const chips = [...window.document.getElementById('fleet-chips').children];
+  const faultChip = chips.find(c => /faults/.test(c.textContent));
+  const degrChip = chips.find(c => /degraded/.test(c.textContent));
+  faultChip.dispatchEvent(new window.Event('click'));
+  ok('faults chip routes to its own filter', location.hash === '#/health?f=fault');
+  degrChip.dispatchEvent(new window.Event('click'));
+  ok('degraded chip routes to its own filter', location.hash === '#/health?f=degraded');
+}
+
 console.log('\n[device]');
 await go('#/device/BWL-008?h=24');
 ok('queried status_events', calls.some(c => c.table === 'status_events'));

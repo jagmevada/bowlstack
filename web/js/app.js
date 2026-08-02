@@ -336,15 +336,24 @@ function renderChrome() {
     : 'Devices are powered only during meal service. Values shown are last-known.';
 
   const chips = [];
-  const chip = (label, n, tone, filter) => h('button', {
+  const chip = (label, n, tone, filter, title) => h('button', {
     class: `chip${n ? ` is-${tone}` : ''}`,
+    title,
     onclick: () => { location.hash = filter ? `#/health?f=${filter}` : '#/health'; },
   }, h('b', {}, String(n)), label);
 
-  chips.push(chip('offline', s.offline, 'critical', 'offline'));
-  chips.push(chip('faults', s.fault, 'critical', 'fault'));
-  chips.push(chip('degraded', s.degraded, 'warning', 'fault'));
-  chips.push(chip('battery', s.batteryWarn, 'warning', 'battery'));
+  chips.push(chip('offline', s.offline, 'critical', 'offline',
+    'Not reporting when they should be'));
+  // Two different failures, two different filters: a fault is an IMPOSSIBLE
+  // reading from working sensors (a bowl above an empty level — bowls stack,
+  // f2 cannot exist without f1); degraded is a sensor itself being down.
+  chips.push(chip('faults', s.fault, 'critical', 'fault',
+    'Impossible stack reading — the sensors answer, but the pattern cannot '
+    + 'physically happen. Check the mount or an obstruction.'));
+  chips.push(chip('degraded', s.degraded, 'warning', 'degraded',
+    'A sensor itself is down — the bowl count is a lower bound.'));
+  chips.push(chip('battery', s.batteryWarn, 'warning', 'battery',
+    'Battery low or critical'));
   if (s.awaiting) chips.push(chip('not deployed', s.awaiting, 'good', null));
   chips.push(h('span', {
     class: 'chip', style: 'cursor:default',

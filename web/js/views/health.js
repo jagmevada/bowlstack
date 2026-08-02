@@ -18,12 +18,19 @@ import {
   deviceOffline, fmtRelative, fmtDateTime, serviceState,
 } from '../domain.js';
 
+// `fault` and `degraded` are DIFFERENT failures and get different filters —
+// they used to share one, so the "1 faults" chip opened a 3-row list.
+//   fault     the sensors all answer, but the reading is physically
+//             impossible (a bowl above an empty level — bowls are stacked,
+//             f2 cannot exist without f1). Mount/obstruction/sensor lying.
+//   degraded  a sensor itself is down, so the count is a lower bound.
 const FILTERS = {
   all:      { label: 'All', test: () => true },
   problems: { label: 'Needs attention', test: d => !d.awaiting_deployment && deviceSeverity(d).rank >= 50 },
   offline:  { label: 'Offline', test: deviceOffline },
   battery:  { label: 'Battery', test: d => d.battery_level === 'low' || d.battery_level === 'critical' },
-  fault:    { label: 'Faults', test: d => d.stack_status === 'discontiguous' || d.stack_status === 'degraded' },
+  fault:    { label: 'Faults', test: d => d.stack_status === 'discontiguous' },
+  degraded: { label: 'Degraded', test: d => d.stack_status === 'degraded' },
 };
 
 export function renderHealth(state, params) {
