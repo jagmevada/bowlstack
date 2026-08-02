@@ -329,7 +329,7 @@ npm install      # jsdom, only for the test — the app itself has no dependenci
 node smoke.mjs
 ```
 
-121 assertions. It loads the real `index.html`, stubs PostgREST with rows shaped
+129 assertions. It loads the real `index.html`, stubs PostgREST with rows shaped
 like `device_overview` / `slot_overview` / `status_events`, and drives every
 screen. It exists to protect the rules in the section above — each is one
 plausible edit away from breaking with nothing visibly wrong on screen.
@@ -340,6 +340,10 @@ plausible edit away from breaking with nothing visibly wrong on screen.
   the fleet and edit menus and assignments. Deliberate for a trial; not a
   production posture.
 - **No realtime.** Worst-case staleness is one poll, 15 s.
+- **Session drops recover silently.** A token-refresh hiccup mid-session
+  re-signs-in underneath the page: no gate, no redraw, nothing typed is lost.
+  The full-screen connecting gate appears only on cold boot or when sign-in
+  actually fails.
 - **History is capped at 1000 events** per device per window.
 - **Menu editing has no conflict detection.** Two admins on the same meal, last
   write wins.

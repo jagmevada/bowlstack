@@ -178,6 +178,7 @@ for (let wd = 0; wd <= 6; wd++) {
 // ---- fake PostgREST ---------------------------------------------------
 const calls = [];
 let preloadSourceDate = null;   // set per-test to mark a template draft
+let authCallback = null;        // captured so tests can fire auth events
 function builder(table) {
   const rec = { table, filters: [] };
   calls.push(rec);
@@ -223,7 +224,10 @@ window.supabase = {
     auth: {
       getSession: async () => ({ data: { session }, error: null }),
       getUser: async () => ({ data: { user: session?.user ?? null }, error: null }),
-      onAuthStateChange: () => ({ data: { subscription: { unsubscribe() {} } } }),
+      onAuthStateChange: (cb) => {
+        authCallback = cb;
+        return { data: { subscription: { unsubscribe() {} } } };
+      },
       signOut: async () => { session = null; return { error: null }; },
       signInWithPassword: async () => {
         session = { user: { email: 'kitchen@example.test' } };
@@ -569,6 +573,52 @@ await go('#/menu?loc=D&meal=Lunch&date=2026-08-05');
   ok('and it does not claim a carry-over', !/Carried over from/.test(text()));
 }
 preloadSourceDate = null;
+
+console.log('\n[session drop mid-edit: recovered silently]');
+// The v1.2 field report: the page "flickers (blackout) once" and settings are
+// uneditable for 10-15 s. Cause: a session hiccup swapped in the full-screen
+// connecting gate and force-rendered on the way back. Recovery must now be
+// invisible: no gate, no wiped form, a fresh sign-in underneath.
+await go('#/menu?loc=D&meal=Lunch&date=2026-08-06');
+{
+  const input = view.querySelector('.row-form input[type=text]');
+  input.value = 'Half-typed while session dies';
+  const before = anonSignIns;
+
+  session = null;                          // the session evaporates
+  authCallback('SIGNED_OUT', null);        // supabase-js notices
+  await new Promise(r => setTimeout(r, 200));
+
+  ok('app pane never hidden', !hidden('app'));
+  ok('connecting gate never shown', hidden('connecting'));
+  ok('login form never shown', hidden('login'));
+  ok('a new session was minted underneath', anonSignIns === before + 1);
+  ok('the half-typed dish survived',
+    view.querySelector('.row-form input[type=text]')?.value === 'Half-typed while session dies');
+}
+
+console.log('\n[menu: copy template across areas]');
+await go('#/menu?loc=D&meal=Lunch&mode=week&day=3');
+{
+  const btn = [...view.querySelectorAll('button')].find(b => b.textContent === 'Copy area');
+  ok('copy-area card present', !!btn);
+  if (btn) {
+    btn.dispatchEvent(new window.Event('click'));
+    await new Promise(r => setTimeout(r, 150));
+    const del = [...calls].reverse().find(c =>
+      c.table === 'meal_menu_template'
+      && c.filters.some(f => f[0] === 'delete')
+      && c.filters.some(f => f[0] === 'in' && f[1] === 'location'));
+    ok('replaces the target areas (delete first)', !!del);
+    const up = [...calls].reverse().find(c =>
+      c.table === 'meal_menu_template' && c.filters.some(f => f[0] === 'upsert'));
+    const payload = up?.filters.find(f => f[0] === 'upsert')?.[1] || [];
+    ok('writes both other areas, never the source',
+      payload.length > 0
+      && payload.every(r => ['M', 'T'].includes(r.location))
+      && ['M', 'T'].every(l => payload.some(r => r.location === l)));
+  }
+}
 
 console.log('\n[health: finding a specific device]');
 await go('#/health?f=offline');

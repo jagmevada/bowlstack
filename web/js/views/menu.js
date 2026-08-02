@@ -532,8 +532,64 @@ function weekBody(state, ctx, { loc, meal, day, tz, go, all }) {
     status));
 
   frag.append(copyWeekdayCard(ctx, { loc, day, go }));
+  frag.append(copyAreaCard(ctx, { loc, go }));
   frag.append(applyTemplateCard(ctx, { loc, tz, go }));
   return frag;
+}
+
+/** Copy this location's ENTIRE template (all days, all meals) to the other
+ *  areas. The three areas serve an identical menu here, so without this a
+ *  shared week must be typed three times — measured at ~3x the effort the
+ *  template exists to remove. */
+function copyAreaCard(ctx, { loc, go }) {
+  const others = SERVING_LOCATIONS.filter(l => l !== loc);
+  const target = h('select', { 'aria-label': 'Copy template to' },
+    h('option', { value: 'all' },
+      `both (${others.map(l => LOCATION_NAMES[l]).join(' + ')})`),
+    ...others.map(l => h('option', { value: l }, LOCATION_NAMES[l])));
+  const btn = h('button', { class: 'ghost', type: 'button' }, 'Copy area');
+  const note = h('span', { class: 'dim', style: 'font-size:.8rem' });
+
+  btn.addEventListener('click', async () => {
+    const dests = target.value === 'all' ? others : [target.value];
+    if (!confirmAction(
+      `Replace the ENTIRE weekly template of ${dests.map(l => LOCATION_NAMES[l]).join(' and ')} `
+      + `with ${LOCATION_NAMES[loc]}'s — every day, every meal?`)) return;
+    btn.disabled = true;
+    note.textContent = 'Copying…';
+    try {
+      const src = unwrap(await ctx.client.from('meal_menu_template')
+        .select('weekday, meal_type, food_slot, food_name')
+        .eq('location', loc)) || [];
+      if (!src.length) { note.textContent = `${LOCATION_NAMES[loc]} has no template to copy yet.`; return; }
+      // Delete-then-insert: "replace" means replace, not merge — a merge
+      // would leave the target serving last week's leftovers in any slot the
+      // source does not fill.
+      unwrap(await ctx.client.from('meal_menu_template').delete()
+        .in('location', dests));
+      unwrap(await ctx.client.from('meal_menu_template').upsert(
+        dests.flatMap(l => src.map(r => ({
+          location: l, weekday: r.weekday, meal_type: r.meal_type,
+          food_slot: r.food_slot, food_name: r.food_name,
+        }))),
+        { onConflict: 'location,weekday,meal_type,food_slot' }));
+      for (const l of dests) templateCache.delete(l);
+      note.textContent = `Copied ${src.length} dishes to ${dests.map(l => LOCATION_NAMES[l]).join(' and ')}.`;
+      toast(`Template copied to ${dests.length} area${dests.length === 1 ? '' : 's'}`);
+    } catch (err) {
+      note.textContent = '';
+      toast(describeError(err), true);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  return h('div', { class: 'card section' },
+    h('div', { class: 'chart-title' }, `Copy ${LOCATION_NAMES[loc]}'s template to another area`),
+    h('div', { class: 'chart-sub' },
+      'The whole week — all days and meals. The target area\'s template is ',
+      'replaced, not merged. Their already-recorded dated menus are untouched.'),
+    h('div', { class: 'toolbar' }, target, btn, note));
 }
 
 /** Copy one weekday's whole template (all three meals) to other weekdays —

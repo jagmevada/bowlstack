@@ -80,20 +80,44 @@ function show(which) {
  * authenticated role, not of bypassing it. Nothing about the grants changes,
  * and `anon` stays write-only for the devices.
  */
-async function autoSignIn(auto) {
+async function autoSignIn(auto, { quiet = false } = {}) {
   const msg = document.getElementById('connecting-msg');
   const errBox = document.getElementById('connecting-error');
-  show('connecting');
-  msg.textContent = 'Signing in…';
-  errBox.hidden = true;
-  document.getElementById('connecting-retry').hidden = true;
-  document.getElementById('connecting-manual').hidden = true;
+
+  // `quiet` is the mid-session path: the session hiccuped while the app is on
+  // screen (token refresh raced by another tab, a network blip at renewal).
+  // Swapping to the full-screen gate here was a literal blackout — and the
+  // forced re-render on the way back wiped whatever was being typed, which is
+  // how "the page flickers and I can't edit settings for 10-15 s" happened.
+  // Recover invisibly; the gate appears only if sign-in actually FAILS.
+  if (!quiet) {
+    show('connecting');
+    msg.textContent = 'Signing in…';
+    errBox.hidden = true;
+    document.getElementById('connecting-retry').hidden = true;
+    document.getElementById('connecting-manual').hidden = true;
+  }
 
   const { error } = auto.mode === 'anonymous'
     ? await client.auth.signInAnonymously()
     : await client.auth.signInWithPassword({ email: auto.email, password: auto.password });
 
-  if (!error) { await onSignedIn(); return true; }
+  if (!error) {
+    if (quiet) {
+      const { data } = await client.auth.getUser();
+      const u = data?.user;
+      document.getElementById('menu-user').textContent =
+        u?.email || (u?.is_anonymous ? 'Signed in anonymously' : 'Signed in');
+      // Resume polling and refetch, but NEVER force a render from here: a
+      // forced render redraws the editable screens, and this path can fire
+      // while someone is halfway through a dish name.
+      startPolling();
+      refresh(false);
+      return true;
+    }
+    await onSignedIn();
+    return true;
+  }
 
   show('connecting');
   msg.textContent = 'Could not sign in.';
@@ -126,12 +150,21 @@ async function autoSignIn(auto) {
   return false;
 }
 
-/** Session gone: get another one the same way we got the first. */
+/** Session gone: get another one the same way we got the first. Deduped —
+ *  a failing poll and an auth event can both notice the loss at once. */
+let reauthing = false;
 async function reauthenticate() {
-  stopPolling();
-  const auto = readAutoLogin();
-  if (auto) { await autoSignIn(auto); return; }
-  show('login');
+  if (reauthing) return;
+  reauthing = true;
+  try {
+    stopPolling();
+    const auto = readAutoLogin();
+    if (!auto) { show('login'); return; }
+    // Quiet whenever the app is already on screen; the gate is for cold boots.
+    await autoSignIn(auto, { quiet: !el.app.hidden });
+  } finally {
+    reauthing = false;
+  }
 }
 
 document.getElementById('connecting-retry').addEventListener('click', () => {
