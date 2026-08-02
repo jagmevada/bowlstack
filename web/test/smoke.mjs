@@ -602,6 +602,37 @@ await go('#/health');
 
 }
 
+console.log('\n[menu: multi-area verification grid]');
+await go('#/menu?meal=Lunch&date=2026-08-06');
+{
+  ok('all three areas selected by default', view.querySelectorAll('.menu-col').length === 3);
+  ok('a column per area, five slots each',
+    view.querySelectorAll('.menu-col .row-form input[type=text]').length === 15);
+  ok('meal capsules, exactly one pressed',
+    [...view.querySelectorAll('button')].filter(b =>
+      ['Breakfast', 'Lunch', 'Dinner'].includes(b.textContent)
+      && b.getAttribute('aria-pressed') === 'true').length === 1);
+  ok('every column carries its own status chip',
+    [...view.querySelectorAll('.menu-col-head .badge')].length === 3);
+  ok('save button covers all areas',
+    [...view.querySelectorAll('button')].some(b => b.textContent === 'Save all 3 areas'));
+
+  const mahatma = [...view.querySelectorAll('button')].find(b => b.textContent === 'Mahatma');
+  mahatma.dispatchEvent(new window.Event('click'));
+  await new Promise(r => setTimeout(r, 150));
+  ok('deselecting an area drops its column', view.querySelectorAll('.menu-col').length === 2);
+  ok('and the url says which remain', /locs=D(%2C|,)T/.test(location.hash), location.hash);
+
+  const before = calls.filter(c => c.table === 'meal_food_mapping'
+    && c.filters.some(f => f[0] === 'upsert')).length;
+  const saveBtn = [...view.querySelectorAll('button')].find(b => /^Save all 2 areas$/.test(b.textContent));
+  saveBtn.dispatchEvent(new window.Event('click'));
+  await new Promise(r => setTimeout(r, 200));
+  const after = calls.filter(c => c.table === 'meal_food_mapping'
+    && c.filters.some(f => f[0] === 'upsert')).length;
+  ok('save-all writes each selected area', after - before === 2, String(after - before));
+}
+
 console.log('\n[menu: weekly template]');
 await go('#/menu?loc=D&meal=Lunch&mode=week');
 {
@@ -652,12 +683,14 @@ await go('#/menu?loc=D&meal=Lunch&mode=week&day=3');
     [...view.querySelectorAll('button')].some(b =>
       b.textContent === 'Wed' && b.getAttribute('aria-pressed') === 'true'));
 
-  const mealSel = [...view.querySelectorAll('select')].find(sel =>
-    [...sel.options].some(o => o.value === 'Dinner'));
-  mealSel.value = 'Dinner';
-  mealSel.dispatchEvent(new window.Event('change'));
+  // Meals are capsules now, not a dropdown.
+  const dinnerBtn = [...view.querySelectorAll('button')].find(b => b.textContent === 'Dinner');
+  dinnerBtn.dispatchEvent(new window.Event('click'));
   await new Promise(r => setTimeout(r, 120));
   ok('day survives a meal switch', /day=3/.test(location.hash), location.hash);
+  ok('no dropdowns anywhere in week mode',
+    [...view.querySelectorAll('select')].every(sel =>
+      ![...sel.options].some(o => ['Dinner', 'Darshanarthi'].includes(o.textContent))));
 }
 
 console.log('\n[menu: copy-weekday really overwrites]');

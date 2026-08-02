@@ -145,7 +145,7 @@ worse than none).
 | **Stock** | `slot_overview` | Bowls left per dish position, per area. The screen watched during service. |
 | **Health** | `device_overview` | Every device, **sorted by severity**. Answers "which station needs someone". |
 | Device detail | `device_overview` + `status_events` | One device: levels, battery, history, and the reliability numbers a trial exists to collect. |
-| **Menu** | `meal_mapping_preload` + `meal_food_mapping` | What each slot serves, per meal per day. |
+| **Menu** | `meal_mapping_preload` + `meal_food_mapping` + `meal_menu_template` | Daily mode: one column per selected area (capsule multi-select), one meal at a time — the morning verification surface. Weekly mode: the template. |
 | **Devices** | `devices` | Assign `location`, `food_slot`, `label`. Rare — hardware moves only. |
 
 Data refreshes every **15 s** while the tab is visible, and polls rather than

@@ -684,6 +684,25 @@ details.table-view > summary {
 
 /* --- forms: menu + device assignment -------------------------------- */
 
+/* The daily menu grid: one column per selected area, so the current meal is
+   verifiable across the whole site in one glance. Columns stack on a narrow
+   phone rather than crushing the inputs. */
+.menu-grid {
+  display: grid;
+  gap: .7rem;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  align-items: start;
+  margin-top: .75rem;
+}
+.menu-col-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .5rem;
+  flex-wrap: wrap;
+  margin-bottom: .3rem;
+}
+
 .row-form {
   display: grid;
   grid-template-columns: 3rem 1fr auto;

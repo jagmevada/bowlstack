@@ -19,39 +19,40 @@ import {
   weekdayOf, serviceDate, addDays, mealAtLocalClock, fmtDay, serviceState,
 } from '../domain.js';
 
-/** Slots an admin opened by hand that have neither a stack nor a saved dish.
- *  Session-scoped: they exist only until something is saved against them. */
-const manuallyAdded = new Map();
-
 /** Last preload per (location, meal, date).
  *  A redraw renders straight from this, so navigating or refreshing does not
  *  drop the form back to "Loading menu…" and lose what is on screen. */
 const preloadCache = new Map();
 const SLOT_ID = 'menu-body';
 
+/** Areas selected in the daily editor. Multi-select; at least one. The old
+ *  single `loc` param is honoured so old links and habits keep working. */
+function parseLocs(params) {
+  const raw = params.get('locs') ?? params.get('loc') ?? '';
+  const picked = raw.split(',').map(x => x.trim()).filter(l => SERVING_LOCATIONS.includes(l));
+  return picked.length ? [...new Set(picked)] : [...SERVING_LOCATIONS];
+}
+
 export function renderMenu(state, params, ctx) {
   const { tz } = serviceState(state.devices);
-  const loc = SERVING_LOCATIONS.includes(params.get('loc')) ? params.get('loc') : 'D';
+  const mode = params.get('mode') === 'week' ? 'week' : 'date';
   const meal = MEAL_TYPES.includes(params.get('meal')) ? params.get('meal') : mealAtLocalClock(tz);
   const date = /^\d{4}-\d{2}-\d{2}$/.test(params.get('date') || '') ? params.get('date') : serviceDate(tz);
-  const mode = params.get('mode') === 'week' ? 'week' : 'date';
-  // Resolved HERE, not inside week mode, because go() must carry it: a base
-  // query without `day` meant Save/Reload/Copy and the Area/Meal selects all
-  // snapped the editor back to today's weekday — an admin editing Wednesday
-  // was silently looking at Saturday afterwards, and retyping "lost" dishes
-  // overwrote the wrong day's template.
   const day = /^[0-6]$/.test(params.get('day') || '')
     ? Number(params.get('day'))
     : weekdayOf(serviceDate(tz));
+  const loc = SERVING_LOCATIONS.includes(params.get('loc')) ? params.get('loc') : 'D';  // weekly mode
+  const locs = parseLocs(params);                                                       // daily mode
 
   // Navigating to the hash you are already on fires no event, so a save that
-  // "reloads by navigating to itself" would silently do nothing. Fall back to
-  // an explicit re-render in that case.
-  //
-  // Null patch values DELETE their key: URLSearchParams({mode: null}) would
-  // otherwise serialise the literal string "null" into every shared URL.
+  // "reloads by navigating to itself" would silently do nothing — fall back
+  // to an explicit re-render. Null patch values DELETE their key, or the URL
+  // would collect literal "null"s.
   const go = (patch) => {
-    const q = { loc, meal, date, ...(mode === 'week' ? { mode, day } : {}), ...patch };
+    const q = mode === 'week'
+      ? { loc, meal, day, mode }
+      : { locs: locs.join(','), meal, date };
+    Object.assign(q, patch);
     for (const k of Object.keys(q)) if (q[k] == null) delete q[k];
     const next = `#/menu?${new URLSearchParams(q)}`;
     if (location.hash === next) ctx.rerender();
@@ -61,9 +62,8 @@ export function renderMenu(state, params, ctx) {
   const frag = document.createDocumentFragment();
 
   // Two modes of one tab, not a fifth tab: the tab bar is the triage strip
-  // someone watches through a service, and it already begins to scroll on a
-  // 360 px phone. Staying on the `menu` route also keeps the poll-suppression
-  // (EDITABLE) that stops a background refresh wiping half-typed dish names.
+  // someone watches through a service, and staying on the `menu` route keeps
+  // the poll-suppression that stops a background refresh wiping typing.
   frag.append(h('div', { class: 'toolbar' },
     h('button', {
       class: 'ghost', 'aria-pressed': String(mode === 'date'),
@@ -79,45 +79,61 @@ export function renderMenu(state, params, ctx) {
     return frag;
   }
 
-  const bar = h('div', { class: 'toolbar' },
-    h('select', { 'aria-label': 'Area', onchange: e => go({ loc: e.target.value }) },
-      ...SERVING_LOCATIONS.map(l =>
-        h('option', { value: l, selected: l === loc }, LOCATION_NAMES[l]))),
-    h('select', { 'aria-label': 'Meal', onchange: e => go({ meal: e.target.value }) },
-      ...MEAL_TYPES.map(m => h('option', { value: m, selected: m === meal }, m))),
+  // The daily page is a VERIFICATION surface: with the morning cron (or a
+  // weekly Apply) filling menus, staff come here to eyeball the current meal
+  // across every area at once. So: meals as one-tap capsules (one at a time),
+  // areas as multi-select capsules, and one column in the grid per area.
+  frag.append(h('div', { class: 'toolbar' },
+    ...MEAL_TYPES.map(m => h('button', {
+      class: 'ghost', 'aria-pressed': String(m === meal),
+      onclick: () => go({ meal: m }),
+    }, m))));
+
+  frag.append(h('div', { class: 'toolbar' },
+    ...SERVING_LOCATIONS.map(l => {
+      const on = locs.includes(l);
+      return h('button', {
+        class: 'ghost', 'aria-pressed': String(on),
+        onclick: () => {
+          const next = on ? locs.filter(x => x !== l) : [...locs, l];
+          if (!next.length) { toast('Keep at least one area selected'); return; }
+          go({ locs: SERVING_LOCATIONS.filter(x => next.includes(x)).join(',') });
+        },
+      }, LOCATION_NAMES[l]);
+    }),
+    h('span', { class: 'grow' }),
     h('button', { class: 'ghost', onclick: () => go({ date: addDays(date, -1) }), title: 'Previous day' }, '‹'),
-    h('input', { type: 'date', value: date, 'aria-label': 'Service date',
+    h('input', { type: 'date', value: date, 'aria-label': 'Service date', style: 'max-width:11rem',
                  onchange: e => e.target.value && go({ date: e.target.value }) }),
     h('button', { class: 'ghost', onclick: () => go({ date: addDays(date, 1) }), title: 'Next day' }, '›'),
-    h('button', { class: 'ghost', onclick: () => go({ date: serviceDate(tz) }) }, 'Today'));
-  frag.append(bar);
+    h('button', { class: 'ghost', onclick: () => go({ date: serviceDate(tz) }) }, 'Today')));
 
-  const deployedSlots = [...new Set(state.devices
-    .filter(d => d.location === loc && d.food_slot != null)
-    .map(d => Number(d.food_slot)))].sort((a, b) => a - b);
-
-  const key = `${loc}|${meal}|${date}`;
-  const cached = preloadCache.get(key);
-  const box = h('div', { id: SLOT_ID }, cached
-    ? form(ctx, { loc, meal, date, tz, rows: cached.rows, tpl: cached.tpl, deployedSlots, go })
-    : h('div', { class: 'empty' }, 'Loading menu…'));
+  const allCached = locs.every(l => preloadCache.get(`${l}|${meal}|${date}`));
+  const build = () => dailyGrid(ctx, state, { locs, meal, date, tz, go });
+  const box = h('div', { id: SLOT_ID },
+    allCached ? build() : h('div', { class: 'empty' }, 'Loading menu…'));
   frag.append(box);
 
-  // Guard the async fill two ways. If the hash moved on while the fetch was in
-  // flight, this response belongs to a form nobody is looking at — landing it
-  // by id would paint the WRONG (loc, meal, date) under the current controls,
-  // and Save would then write to what the chips say, not what the fields show.
-  // And if the response equals what the cache already rendered, skip the fill
-  // entirely: replaceChildren would wipe whatever is being typed for nothing.
+  // Guard the async fill both ways: a response for a hash that has moved on
+  // would paint the wrong areas under the current capsules, and a response
+  // identical to the cached render would wipe in-progress typing for nothing.
   const issuedFor = location.hash;
-  load(ctx.client, loc, meal, date)
-    .then(({ rows, tpl }) => {
-      const unchanged = cached
-        && JSON.stringify(cached.rows) === JSON.stringify(rows)
-        && JSON.stringify([...(cached.tpl || [])]) === JSON.stringify([...(tpl || [])]);
-      preloadCache.set(key, { rows, tpl });
-      if (location.hash !== issuedFor || unchanged) return;
-      fillSlot(SLOT_ID, box, form(ctx, { loc, meal, date, tz, rows, tpl, deployedSlots, go }));
+  Promise.all(locs.map(l =>
+    load(ctx.client, l, meal, date).then(r => ({ l, r }))))
+    .then(results => {
+      let changed = !allCached;
+      for (const { l, r } of results) {
+        const k = `${l}|${meal}|${date}`;
+        const prev = preloadCache.get(k);
+        if (!prev
+            || JSON.stringify(prev.rows) !== JSON.stringify(r.rows)
+            || JSON.stringify([...(prev.tpl || [])]) !== JSON.stringify([...(r.tpl || [])])) {
+          changed = true;
+        }
+        preloadCache.set(k, r);
+      }
+      if (location.hash !== issuedFor || !changed) return;
+      fillSlot(SLOT_ID, box, build());
     })
     .catch(err => {
       if (location.hash !== issuedFor) return;
@@ -132,11 +148,9 @@ async function load(client, loc, meal, date) {
     p_location: loc, p_meal_type: meal, p_meal_date: date,
   })) || [];
 
-  // The weekly template for this date's weekday, used only to annotate rows
-  // that differ from it. Computed as a live comparison rather than stamped
-  // provenance, because a stored "came from the template" flag lies the
-  // moment the template is edited. Tolerates the table not existing yet —
-  // the migration may not have been run.
+  // The weekly template for this date's weekday — used to annotate overrides,
+  // computed live rather than stamped, because a stored provenance flag lies
+  // the moment the template is edited. Tolerates the table not existing.
   let tpl = null;
   try {
     const t = await client.from('meal_menu_template')
@@ -148,119 +162,48 @@ async function load(client, loc, meal, date) {
   return { rows, tpl };
 }
 
-function form(ctx, { loc, meal, date, tz, rows, tpl, deployedSlots, go }) {
+function dailyGrid(ctx, state, { locs, meal, date, tz, go }) {
   const frag = document.createDocumentFragment();
-  const isDraft = rows.length > 0 && rows.every(r => !r.is_saved);
-  const sourceDate = rows.length ? rows[0].source_date : null;
-  // The preload marks a template draft by source_date === the requested date;
-  // carry-forward always carries an earlier one.
-  const fromTemplate = isDraft && sourceDate === date;
+  const inputsByLoc = new Map();
 
-  if (!rows.length) {
-    frag.append(banner('info', '○',
-      h('b', {}, 'No menu yet. '),
-      `Nothing has been entered for ${LOCATION_NAMES[loc]} ${meal} on any earlier date, `,
-      'so this form starts blank.'));
-  } else if (fromTemplate) {
-    frag.append(banner('warning', '◐',
-      h('b', {}, 'From the weekly template — not yet recorded. '),
-      `These dishes are the ${WEEKDAYS[weekdayOf(date)]} template. Review and press `,
-      'Save — until you do, no menu exists for ', fmtDay(date),
-      ' and the dashboard will show no dish name.'));
-  } else if (isDraft) {
-    frag.append(banner('warning', '◐',
-      h('b', {}, 'Not saved for this date. '),
-      `Carried over from ${fmtDay(sourceDate)}. Review the dishes and press Save — `,
-      'until you do, no menu exists for ', fmtDay(date), ' and the dashboard will show ',
-      'no dish name.'));
-  } else {
-    frag.append(banner('info', '✓',
-      h('b', {}, 'Saved. '), `This is the recorded ${meal} menu for ${fmtDay(date)}.`));
+  frag.append(h('div', { class: 'chart-sub', style: 'margin:.5rem 0 0' },
+    `${meal} · ${fmtDay(date)}. Slot numbers are the painted positions on the `,
+    'stations. Blank a field and Save to remove that dish.'));
+
+  const grid = h('div', { class: 'menu-grid' });
+  for (const l of locs) {
+    const { rows = [], tpl = null } = preloadCache.get(`${l}|${meal}|${date}`) || {};
+    grid.append(menuColumn(state, { loc: l, meal, date, rows, tpl, inputsByLoc }));
   }
-
-  const byNumber = new Map(rows.map(r => [Number(r.food_slot), r]));
-  const extraKey = `${loc}|${meal}|${date}`;
-  const extra = manuallyAdded.get(extraKey) || new Set();
-  const slots = [...new Set([...deployedSlots, ...byNumber.keys(), ...extra])].sort((a, b) => a - b);
-  if (!slots.length) slots.push(1, 2, 3, 4, 5);
-
-  const list = h('div', { class: 'card section' });
-  list.append(h('div', { class: 'chart-sub' },
-    `${LOCATION_NAMES[loc]} · ${meal} · ${fmtDay(date)}. `,
-    'Slot numbers are the painted positions on the station, not dishes.'));
-
-  const inputs = new Map();
-  for (const slot of slots) {
-    const row = byNumber.get(slot);
-    const deployed = deployedSlots.includes(slot);
-    const input = h('input', {
-      type: 'text', value: row?.food_name || '', placeholder: 'No dish',
-      'aria-label': `Slot ${slot} dish`, autocomplete: 'off',
-      maxlength: 60,
-    });
-    inputs.set(slot, input);
-
-    // A saved dish that disagrees with the current template is an OVERRIDE —
-    // deliberate, recorded, and worth a quiet marker so "does today match the
-    // plan" is answerable at a glance. Never amber (.is-draft means "not
-    // recorded yet", the opposite state) and never a fourth status colour.
-    const tplName = tpl?.get(slot);
-    const overridden = row?.is_saved && tplName != null && tplName !== row.food_name;
-
-    list.append(h('div', { class: `row-form${row && !row.is_saved ? ' is-draft' : ''}` },
-      h('span', { class: 'slotno' }, `${slot}${deployed ? '' : ' ·'}`),
-      input,
-      h('span', { style: 'display:inline-flex;gap:.3rem;align-items:center' },
-        overridden ? badge('warning', '◆', 'override', `Template says: ${tplName}`) : null,
-        row?.is_saved
-          ? h('button', {
-              class: 'danger-text', type: 'button',
-              title: 'Remove this dish from the menu',
-              onclick: () => clearSlot(ctx, { loc, meal, date, slot, go }),
-            }, 'Clear')
-          : h('span', { class: 'dim', style: 'font-size:.75rem' }, deployed ? '' : 'no stack'))));
-  }
-
-  const remaining = FOOD_SLOTS.filter(n => !slots.includes(n));
-  if (remaining.length) {
-    list.append(h('div', { class: 'row-form', style: 'border-bottom:0' },
-      h('span', {}),
-      h('select', {
-        'aria-label': 'Add a slot',
-        onchange: e => {
-          const n = Number(e.target.value);
-          if (!n) return;
-          e.target.value = '';
-          // Held outside the DOM so it survives the re-render below. A slot with
-          // no stack behind it is legal — the position may exist before a
-          // counter is installed on it.
-          if (!manuallyAdded.has(extraKey)) manuallyAdded.set(extraKey, new Set());
-          manuallyAdded.get(extraKey).add(n);
-          go({});
-          toast(`Slot ${n} added — enter a dish and save`);
-        },
-      }, h('option', { value: '' }, 'Add slot…'),
-         ...remaining.map(n => h('option', { value: n }, `Slot ${n}`))),
-      h('span', {})));
-  }
-
-  frag.append(list);
+  frag.append(grid);
 
   const status = h('span', { class: 'dim', style: 'font-size:.8rem' });
-  const saveBtn = h('button', { class: 'primary', type: 'button' }, 'Save menu');
+  const saveBtn = h('button', { class: 'primary', type: 'button' },
+    locs.length === 1 ? 'Save menu' : `Save all ${locs.length} areas`);
   saveBtn.addEventListener('click', async () => {
     saveBtn.disabled = true;
     status.textContent = 'Saving…';
-    try {
-      await save(ctx, { loc, meal, date, inputs });
-      toast('Menu saved');
-      go({});
-    } catch (err) {
-      status.textContent = '';
-      toast(describeError(err), true);
-    } finally {
-      saveBtn.disabled = false;
+    const failures = [];
+    let dishes = 0;
+    for (const l of locs) {
+      try {
+        dishes += await saveArea(ctx, {
+          loc: l, meal, date, inputs: inputsByLoc.get(l)?.inputs || new Map(),
+        });
+        preloadCache.delete(`${l}|${meal}|${date}`);
+      } catch (err) {
+        failures.push(`${LOCATION_NAMES[l]}: ${describeError(err)}`);
+      }
     }
+    if (failures.length) {
+      status.textContent = failures.join(' · ');
+      toast(`Saved with errors — ${failures.length} area(s) failed`, true);
+    } else {
+      status.textContent = '';
+      toast(`Saved ${dishes} dish${dishes === 1 ? '' : 'es'} across ${locs.length} area${locs.length === 1 ? '' : 's'}`);
+    }
+    saveBtn.disabled = false;
+    go({});
   });
 
   frag.append(h('div', { class: 'sticky-actions' },
@@ -268,11 +211,63 @@ function form(ctx, { loc, meal, date, tz, rows, tpl, deployedSlots, go }) {
     h('button', { class: 'ghost', type: 'button', onclick: () => go({}) }, 'Reload'),
     status));
 
-  frag.append(copyDayCard(ctx, { loc, date, tz }));
+  frag.append(copyDayCard(ctx, { locs, date, tz }));
   return frag;
 }
 
-async function save(ctx, { loc, meal, date, inputs }) {
+function menuColumn(state, { loc, meal, date, rows, tpl, inputsByLoc }) {
+  const byNumber = new Map(rows.map(r => [Number(r.food_slot), r]));
+  const deployedSlots = [...new Set(state.devices
+    .filter(d => d.location === loc && d.food_slot != null)
+    .map(d => Number(d.food_slot)))].sort((a, b) => a - b);
+  const slots = [...new Set([...deployedSlots, ...byNumber.keys()])].sort((a, b) => a - b);
+  if (!slots.length) slots.push(1, 2, 3, 4, 5);
+
+  const isDraft = rows.length > 0 && rows.every(r => !r.is_saved);
+  const sourceDate = rows.length ? rows[0].source_date : null;
+  const fromTemplate = isDraft && sourceDate === date;
+
+  // The column's one-line truth: recorded, or a draft (and from where), or
+  // nothing. A draft is pixel-identical to a saved menu, so this line is what
+  // stops an admin believing an unrecorded menu was recorded.
+  const statusChip = !rows.length
+    ? badge('idle', '○', 'nothing entered yet')
+    : fromTemplate
+      ? badge('warning', '◐', 'From the weekly template — not recorded yet',
+          'These dishes are the template. Press Save to record them for this date.')
+      : isDraft
+        ? badge('warning', '◐', `Not saved for this date — carried over from ${fmtDay(sourceDate)}`)
+        : badge('good', '✓', 'Saved');
+
+  const col = h('div', { class: 'card menu-col' },
+    h('div', { class: 'menu-col-head' },
+      h('h3', {}, LOCATION_NAMES[loc]),
+      statusChip));
+
+  const inputs = new Map();
+  inputsByLoc.set(loc, { inputs });
+  for (const slot of slots) {
+    const row = byNumber.get(slot);
+    const tplName = tpl?.get(slot);
+    const overridden = row?.is_saved && tplName != null && tplName !== row.food_name;
+    const input = h('input', {
+      type: 'text', value: row?.food_name || '', placeholder: 'No dish',
+      'aria-label': `${LOCATION_NAMES[loc]} slot ${slot} dish`,
+      autocomplete: 'off', maxlength: 60,
+    });
+    inputs.set(slot, input);
+    col.append(h('div', { class: `row-form${row && !row.is_saved ? ' is-draft' : ''}` },
+      h('span', { class: 'slotno' }, `${slot}${deployedSlots.includes(slot) ? '' : ' ·'}`),
+      input,
+      overridden ? badge('warning', '◆', 'override', `Template: ${tplName}`) : h('span', {})));
+  }
+  return col;
+}
+
+/** One area's save: upsert the filled slots, delete the blanked ones.
+ *  Blanks are filtered because a CHECK rejects an empty food_name; an emptied
+ *  field means "no dish here", which is a DELETE, not a blank row. */
+async function saveArea(ctx, { loc, meal, date, inputs }) {
   const payload = [];
   const toDelete = [];
   for (const [slot, input] of inputs) {
@@ -280,39 +275,20 @@ async function save(ctx, { loc, meal, date, inputs }) {
     if (name) payload.push({ location: loc, meal_type: meal, meal_date: date, food_slot: slot, food_name: name });
     else toDelete.push(slot);
   }
-
   if (payload.length) {
-    // Blanks are filtered above: a CHECK rejects an empty food_name, so
-    // submitting untouched slots would fail the whole batch.
     unwrap(await ctx.client.from('meal_food_mapping')
       .upsert(payload, { onConflict: 'location,meal_date,meal_type,food_slot' }));
   }
   if (toDelete.length) {
-    // Emptying a field means "no dish here", which is a DELETE — not a row
-    // holding an empty name.
     unwrap(await ctx.client.from('meal_food_mapping').delete()
       .eq('location', loc).eq('meal_type', meal).eq('meal_date', date)
       .in('food_slot', toDelete));
   }
-  if (!payload.length && !toDelete.length) throw new Error('Nothing to save');
+  return payload.length;
 }
 
-async function clearSlot(ctx, { loc, meal, date, slot, go }) {
-  if (!confirmAction(`Remove the dish in slot ${slot} from this menu?`)) return;
-  try {
-    unwrap(await ctx.client.from('meal_food_mapping').delete()
-      .eq('location', loc).eq('meal_type', meal)
-      .eq('meal_date', date).eq('food_slot', slot));
-    toast(`Slot ${slot} cleared`);
-    go({});
-  } catch (err) {
-    toast(describeError(err), true);
-  }
-}
-
-/** Copy a whole day's three menus to another date — the tedium the preload
- *  does not cover, since preload only reaches back, never forward. */
-function copyDayCard(ctx, { loc, date, tz }) {
+/** Copy the selected areas' whole day (all three meals) to another date. */
+function copyDayCard(ctx, { locs, date, tz }) {
   const target = h('input', { type: 'date', value: addDays(date, 1), 'aria-label': 'Copy to date' });
   const btn = h('button', { class: 'ghost', type: 'button' }, 'Copy day');
   const note = h('span', { class: 'dim', style: 'font-size:.8rem' });
@@ -324,13 +300,16 @@ function copyDayCard(ctx, { loc, date, tz }) {
     note.textContent = 'Copying…';
     try {
       const rows = unwrap(await ctx.client.from('meal_food_mapping')
-        .select('meal_type, food_slot, food_name')
-        .eq('location', loc).eq('meal_date', date)) || [];
+        .select('location, meal_type, food_slot, food_name')
+        .in('location', locs).eq('meal_date', date)) || [];
       if (!rows.length) { note.textContent = 'Nothing saved on this day to copy.'; return; }
       unwrap(await ctx.client.from('meal_food_mapping').upsert(
-        rows.map(r => ({ location: loc, meal_date: to, meal_type: r.meal_type,
+        rows.map(r => ({ location: r.location, meal_date: to, meal_type: r.meal_type,
                          food_slot: r.food_slot, food_name: r.food_name })),
         { onConflict: 'location,meal_date,meal_type,food_slot' }));
+      for (const l of locs) {
+        for (const m of MEAL_TYPES) preloadCache.delete(`${l}|${m}|${to}`);
+      }
       note.textContent = `Copied ${rows.length} dishes to ${fmtDay(to)}.`;
       toast(`Copied ${rows.length} dishes to ${fmtDay(to)}`);
     } catch (err) {
@@ -344,8 +323,9 @@ function copyDayCard(ctx, { loc, date, tz }) {
   return h('div', { class: 'card section' },
     h('div', { class: 'chart-title' }, 'Copy this day'),
     h('div', { class: 'chart-sub' },
-      `All three meals for ${LOCATION_NAMES[loc]} on ${fmtDay(date)}, written to another date. `,
-      'Existing entries on the target date are overwritten.'),
+      `All three meals for ${locs.map(l => LOCATION_NAMES[l]).join(', ')} on `,
+      `${fmtDay(date)}, written to another date. Existing entries on the target `,
+      'date are overwritten.'),
     h('div', { class: 'toolbar' }, target, btn, note));
 }
 
@@ -378,12 +358,19 @@ async function loadTemplate(client, loc) {
 function renderWeekMode(state, ctx, { loc, meal, day, tz, go }) {
   const frag = document.createDocumentFragment();
 
+  // Capsules, no dropdowns — same grammar as the daily page. The template is
+  // edited one area at a time (it writes per-area rows), so area is
+  // single-select here; Copy-area spreads it.
   frag.append(h('div', { class: 'toolbar' },
-    h('select', { 'aria-label': 'Area', onchange: e => go({ loc: e.target.value }) },
-      ...SERVING_LOCATIONS.map(l =>
-        h('option', { value: l, selected: l === loc }, LOCATION_NAMES[l]))),
-    h('select', { 'aria-label': 'Meal', onchange: e => go({ meal: e.target.value }) },
-      ...MEAL_TYPES.map(m => h('option', { value: m, selected: m === meal }, m)))));
+    ...SERVING_LOCATIONS.map(l => h('button', {
+      class: 'ghost', 'aria-pressed': String(l === loc),
+      onclick: () => go({ loc: l }),
+    }, LOCATION_NAMES[l]))));
+  frag.append(h('div', { class: 'toolbar' },
+    ...MEAL_TYPES.map(m => h('button', {
+      class: 'ghost', 'aria-pressed': String(m === meal),
+      onclick: () => go({ meal: m }),
+    }, m))));
 
   // Day chips. Sunday-first to match weekday 0 = Sunday end to end.
   const chips = h('div', { class: 'toolbar' });
