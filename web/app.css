@@ -637,7 +637,9 @@ button:disabled { opacity: .45; cursor: default; }
   color: var(--ink-3);
   font-variant-numeric: tabular-nums;
 }
-.dev.devc .dev-count { font-size: 1.05rem; text-align: right; }
+/* The count sits NEXT TO its level strip (they are one fact); only the
+   battery holds the right edge. */
+.dev.devc .dev-count { font-size: 1.05rem; text-align: left; }
 .dev.devc .batt-slot { width: 26px; }
 
 .dev {
@@ -706,15 +708,18 @@ button:disabled { opacity: .45; cursor: default; }
 .levels.mini i { height: 13px; }
 
 .level-rows { display: grid; gap: 3px; }
+/* Capsule per level, no words: blue capsule = bowl present, striped = the
+   sensor is not answering, blank = confirmed empty. The words appear once
+   in the caption under the card; each row's title repeats its own. */
 .level-row {
   display: grid;
-  grid-template-columns: 2.1rem 1fr auto;
+  grid-template-columns: 2.1rem 64px;
   align-items: center;
   gap: .5rem;
   font-size: .82rem;
 }
 .level-row .k { color: var(--ink-3); font-variant-numeric: tabular-nums; }
-.level-row .bar { height: 26px; border-radius: 4px; background: var(--sunken); }
+.level-row .bar { height: 20px; border-radius: 99px; background: transparent; }
 .level-row .bar.present { background: var(--series-1); }
 .level-row .bar.unknown {
   background: repeating-linear-gradient(45deg,

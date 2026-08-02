@@ -115,10 +115,9 @@ export function renderDevice(state, params, ctx) {
       // levels below the count: the same fact drawn twice.
       h('div', { class: 'level-rows' },
         ...(dev.levels || ['unknown', 'unknown', 'unknown', 'unknown']).map((v, i) =>
-          h('div', { class: 'level-row' },
+          h('div', { class: 'level-row', title: `f${i + 1}: ${v}` },
             h('span', { class: 'k' }, `f${i + 1}`),
-            h('span', { class: `bar ${v}` }),
-            h('span', { class: 'dim' }, v))).reverse()),
+            h('span', { class: `bar ${v}` }))).reverse()),
       h('div', {},
         // The critical banner above already carries the glyph and the word,
         // so the red here is an accelerator, not a lone colour signal. Only
@@ -137,7 +136,7 @@ export function renderDevice(state, params, ctx) {
             ? `Last known — ${fmtRelative(dev.updated_at)}${stack.note ? ` · ${stack.note}` : ''}`
             : stack.note || `of 4 bowls · ${dev.stack_status || 'no status'}`))),
     h('div', { class: 'dim', style: 'font-size:.75rem;margin-top:.5rem' },
-      'f4 on top, f1 the bottom bowl — as on the station.')));
+      'f4 on top, f1 the bottom bowl · blue: bowl present · striped: sensor not answering · blank: empty')));
 
   grid.append(h('div', { class: 'card' },
     h('div', { class: 'chart-title' }, 'Power'),
