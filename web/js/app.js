@@ -346,8 +346,11 @@ function renderChrome() {
   chips.push(chip('degraded', s.degraded, 'warning', 'fault'));
   chips.push(chip('battery', s.batteryWarn, 'warning', 'battery'));
   if (s.awaiting) chips.push(chip('not deployed', s.awaiting, 'good', null));
-  chips.push(h('span', { class: 'chip', style: 'cursor:default' },
-    h('b', {}, `${s.reporting}/${s.total - s.awaiting}`), 'reporting'));
+  chips.push(h('span', {
+    class: 'chip', style: 'cursor:default',
+    title: 'Deployed devices not currently flagged offline or missed-service. '
+      + 'Outside meals a healthy dark device still counts — dark is normal.',
+  }, h('b', {}, `${s.reporting}/${s.total - s.awaiting}`), 'reporting'));
   reconcile(el.chips, chips);
 
   renderFreshness();

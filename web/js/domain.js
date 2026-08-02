@@ -232,7 +232,11 @@ export function fleetSummary(devices) {
     if (d.battery_level === 'low' || d.battery_level === 'critical') s.batteryWarn++;
     if (d.sensors_online != null && d.sensors_online < 4) s.sensorsDown++;
     if (d.in_service) s.inService++;
-    if (d.reported) s.reporting++;
+    // "Reporting" means TALKING: not flagged by either server offline flag.
+    // The old count was `d.reported` — has EVER reported — which among
+    // non-awaiting devices (awaiting IS never-reported) was a tautology: the
+    // chip read "15/15" while 13 of the 15 were offline.
+    if (!deviceOffline(d)) s.reporting++;
   }
   return s;
 }
