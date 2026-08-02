@@ -472,23 +472,20 @@ button:disabled { opacity: .45; cursor: default; }
   line-height: 1;
   letter-spacing: -.02em;
 }
-.slot-count.is-critical { color: var(--critical); }
 .slot-of { font-size: .85rem; color: var(--ink-3); }
 .slot-nodata { font-size: 1.15rem; font-weight: 600; color: var(--ink-3); }
 .slot-fault  { font-size: 1.15rem; font-weight: 600; color: var(--critical); }
 
-/* Offline: the last value is KEPT — it is still the best information there
-   is — but it must not read as live. Red carries the alarm; the DASHED
-   underline is the second, non-colour channel, because red on these
-   numerals already means "critically low" and hue alone could not tell a
-   full-but-stale position from an empty live one. */
-.slot-count.is-offline,
+/* Red on a numeral means exactly ONE thing everywhere: this figure is
+   compromised — the device is offline, degraded or faulted. Quantity never
+   colours a number: a colour per meaning is all a human can register. The
+   old dashed underline is gone — it existed to separate "red = empty" from
+   "red = stale", and with one meaning per colour there is nothing left to
+   separate; the ✕ caption and the badges carry the words. */
+.slot-count.is-alert,
 .dev-count.is-offline,
 .hero.is-offline {
   color: var(--critical);
-  text-decoration: underline dashed;
-  text-decoration-thickness: 2px;
-  text-underline-offset: .18em;
 }
 
 /* The "last known" caption. The word stays in ink (--critical is 3.62:1 on
@@ -504,26 +501,26 @@ button:disabled { opacity: .45; cursor: default; }
 }
 .slot-stale .g { color: var(--critical); }
 
-/* Meter: fill carries severity, track is a wash of the same colour. */
-.meter { height: 8px; border-radius: 99px; background: var(--sunken); overflow: hidden; }
-.meter > i { display: block; height: 100%; border-radius: 99px; background: var(--ink-3); }
-.meter.is-good     { background: var(--good-wash); }
-.meter.is-warning  { background: var(--warning-wash); }
-.meter.is-critical { background: var(--critical-wash); }
-.meter.is-good     > i { background: var(--good); }
-.meter.is-warning  > i { background: var(--warning); }
-.meter.is-critical > i { background: var(--critical); }
-
-/* A stale meter keeps its severity hue — recolouring the fill would lie
-   about quantity, painting a full-but-offline position as empty — and gains
-   a hatch that says "last-known reading". The stripes are a dark/light
-   pair, not var(--surface), so they stay visible over every fill colour in
-   both themes. Placed AFTER the colour rules: those use the `background`
-   shorthand, which resets background-image, and source order is what lets
-   this override stick. */
-.meter.is-stale > i {
-  background-image: repeating-linear-gradient(45deg,
-    rgba(0, 0, 0, .25) 0 3px, rgba(255, 255, 255, .35) 3px 6px);
+/* The capsule bar carries DATA CONFIDENCE, deliberately not a quantity
+   colour band:
+     solid green   bowls confirmed by live, healthy stacks
+     red stripes   the share of the position whose data is NOT valid — each
+                   offline/degraded/faulted stack's whole capacity
+     grey track    confirmed empty space
+   Three stacks with one silent: a third of the bar is striped, and the
+   reader sees exactly how much of the figure to trust. */
+.meter {
+  height: 8px;
+  border-radius: 99px;
+  background: var(--sunken);
+  overflow: hidden;
+  display: flex;
+}
+.meter > i { display: block; height: 100%; flex: none; }
+.meter .fill { background: var(--good); }
+.meter .invalid {
+  background: repeating-linear-gradient(45deg,
+    var(--critical) 0 3px, transparent 3px 6px);
 }
 
 .slot-notes { display: flex; flex-wrap: wrap; gap: .3rem; }

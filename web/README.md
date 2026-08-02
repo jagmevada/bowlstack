@@ -168,10 +168,9 @@ Each of these is a way a reasonable implementation gets it wrong. They live in
 
 **Offline keeps the last value — in red.** When a device is not reporting while
 it should be, its last count stays on screen (blanking it would send someone to
-a station the screen just went silent about) but turns red with a dashed
-underline — dashed because red on these numerals already means "critically
-low", so hue alone could not tell a full-but-stale position from an empty live
-one. The meter keeps its severity hue and gains a hatch; a banner on Stock
+a station the screen just went silent about) but turns red — and red on a
+numeral means only this, so no second channel is needed. The confidence bar
+stripes the silent stack's share; the problem strip on Stock
 carries a thin red problem strip — counts of offline / fault / degraded /
 battery issues — that clicks through to Health filtered to problems; the Health
 row for a silent device says OFFLINE in words, with "values shown are last
@@ -209,10 +208,15 @@ a fourth stack to Darshanarthi slot 1 and the ceiling rises on its own.
 is inferred from them in either direction, and `null` renders as "no battery" —
 never a flat-battery icon.
 
-**Colour is normalised per stack.** A 0–4 count has too little resolution for
-the digit to carry the message, so the card is banded by bowls-per-stack
-(≤1 critical, ≤2 warning). Comparing raw totals would paint a one-stack position
-red beside a three-stack one at the same fullness.
+**One meaning per colour.** A stock number is ink; it turns red for exactly one
+reason — the figure is compromised (a stack offline, degraded or faulted).
+Quantity never colours it: an earlier cut tinted counts by fullness and field
+feedback killed it, because a colour per meaning is all a human can register.
+The capsule bar under the number carries **data confidence**, not a quantity
+band: solid green = bowls confirmed by live healthy stacks, red stripes = the
+share of the position whose data is invalid (each bad stack's whole capacity),
+grey = confirmed empty. Three stacks with one silent → a third of the bar is
+striped, which is precisely how much of the figure not to trust.
 
 **A filter that hides devices says so.** The Health list is sorted by severity,
 so a healthy device sits mid-list and every problem filter hides it outright —

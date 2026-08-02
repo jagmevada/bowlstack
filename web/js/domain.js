@@ -129,27 +129,18 @@ export function slotStock(slot) {
   return {
     kind: 'count',
     capacity, trusted,
-    severity: null,     // filled in by stockSeverity(), which needs the ok-count
+    severity: null,
     headline: String(trusted),
     note: '',
   };
 }
 
-/**
- * Colour band for a dish position.
- *
- * A 0–4 count has very low resolution, so the colour carries more than the
- * digit does. Normalised per stack, because a position with three stacks holds
- * three times as much at the same "fullness" — comparing raw totals across
- * positions would paint Mahatma red while it is as full as Darshanarthi.
- */
-export function stockSeverity(trusted, okStacks) {
-  if (trusted == null || !okStacks) return 'idle';
-  const perStack = trusted / okStacks;
-  if (perStack <= 1) return 'critical';
-  if (perStack <= 2) return 'warning';
-  return 'good';
-}
+// There is deliberately NO quantity colour band any more. An earlier cut
+// tinted the count by bowls-per-stack (red when nearly empty); field feedback
+// killed it — a colour per meaning is all a human can register, and red now
+// means exactly one thing everywhere: the figure is compromised (offline /
+// degraded / fault). Quantity is the number's own job, and data confidence
+// is the capsule bar's.
 
 // --- liveness ---------------------------------------------------------
 //

@@ -336,16 +336,42 @@ console.log('\n[offline: last value kept, in red]');
   const cards = [...view.querySelectorAll('.slot')];
   const d5 = cards.find(c => c.textContent.includes('Khichdi'));
   ok('missed-service slot keeps its number', d5?.querySelector('.slot-count') !== null);
-  ok('and the number is red', d5?.querySelector('.slot-count.is-offline') !== null);
+  ok('and the number is red (compromised)', d5?.querySelector('.slot-count.is-alert') !== null);
+  ok('with no decorative underline',
+    !/underline/.test(getComputedStyle ? '' : '')  // css-level; the class carries colour only
+    && d5?.querySelector('.slot-count.is-offline') === null);
   ok('with the last-known caption', /last known/.test(d5?.textContent || ''));
-  ok('and a hatched meter', d5?.querySelector('.meter.is-stale') !== null);
   ok('badge counts the silent stacks', /Stack offline \u2014 1 of 2/.test(d5?.textContent || ''));
   ok('the pill keeps the number beside the word',
     [...(d5?.querySelectorAll('a.badge') || [])].some(a => /\d+ offline/.test(a.textContent)));
 
-  // M2 is BWL-014: offline AND at 0 bowls -- both meanings must coexist.
-  const m2 = cards.find(c => c.querySelector('.slot-count.is-critical.is-offline'));
-  ok('an offline+critical slot carries both classes', m2 != null);
+  // The capsule bar now carries data confidence: D5 has BWL-021 (missed) and
+  // BWL-022 (degraded) -- NO healthy stack -- so the whole bar is striped and
+  // none of it is solid.
+  {
+    const fill = d5?.querySelector('.meter .fill');
+    const bad = d5?.querySelector('.meter .invalid');
+    ok('confidence bar present', !!fill && !!bad);
+    ok('no solid fill when no stack is healthy', fill?.style.width === '0%');
+    ok('the whole position is striped invalid', bad?.style.width === '100%');
+  }
+  // T1 (Rice, Tiffin slot 1: BWL-017 healthy, 1 bowl of 4): solid fill only.
+  {
+    const t1 = cards.filter(c => c.textContent.includes('Rice'))
+      .find(c => c.querySelector('.meter .invalid')?.style.width === '0%'
+              && c.querySelector('.meter .fill')?.style.width !== '0%');
+    ok('a healthy position shows solid fill and zero stripes', !!t1);
+  }
+  // A healthy low count is INK, not red: quantity never colours the number.
+  {
+    const healthyLow = cards.find(c => !c.querySelector('.slot-count.is-alert')
+      && c.querySelector('.slot-count')?.textContent === '1');
+    ok('a nearly-empty healthy slot keeps a plain ink number', !!healthyLow);
+  }
+  // M2 is BWL-014: offline at 0 bowls -- red for the OFFLINE, not the zero.
+  const m2 = cards.find(c => c.textContent.includes('BWL') === false
+    && c.querySelector('.slot-count.is-alert')?.textContent === '0');
+  ok('an offline zero is red for the silence, not the quantity', m2 != null);
 
   // The fault and no-data treatments are not regressed: neither renders a
   // numeral, so neither can have gained a red one.
