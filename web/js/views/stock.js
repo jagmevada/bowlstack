@@ -99,7 +99,7 @@ export function renderStock(state) {
     frag.append(h('section', { class: `area area-${loc}` },
       h('div', { class: 'area-head' },
         h('h2', {}, LOCATION_NAMES[loc] || loc),
-        h('span', { class: 'dim' }, `${totalTrusted} of ${totalCap} bowls across ${rows.length} positions`)),
+        h('span', { class: 'dim area-sub' }, `${totalTrusted} of ${totalCap} bowls across ${rows.length} positions`)),
       grid));
   }
 

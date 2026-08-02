@@ -548,7 +548,16 @@ button:disabled { opacity: .45; cursor: default; }
   gap: .5rem;
   margin: 1.25rem 0 .5rem;
 }
-.area-head h2 { font-size: 1.15rem; }
+.area-head h2 { font-size: 1.15rem; white-space: nowrap; }
+/* Small and single-line, ellipsis before wrapping: a subtitle that sometimes
+   took two rows made the latched area headings different heights. */
+.area-head .area-sub {
+  font-size: .7rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
 
 .slot-grid {
   display: grid;

@@ -354,6 +354,7 @@ it too, so a deploy cannot leave half an old shell behind.
 | 1.16 | device levels are capsules — blue present, striped bad sensor, blank empty; roster count sits beside its level strip, battery alone holds the right edge |
 | 1.17 | an empty level draws an outlined capsule (measured emptiness ≠ no data); the static "not deployed" chip leaves the header so the capsules hold one phone row |
 | 1.18 | each Stock area sits on its own colour wash (D blue, M violet, T teal) with a matching heading dot, and the area heading stays latched below the top bar while its slots scroll — found without reading |
+| 1.19 | the area subtitle shrinks to one guaranteed line, so every latched heading is the same height |
 
 ### Tests
 
