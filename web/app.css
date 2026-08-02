@@ -23,6 +23,9 @@
 
   --good:        #0ca30c;
   --warning:     #fab219;
+  --warning-ink: #8a6400;   /* amber a GLYPH can wear on the light surface
+                               (~5:1); --warning itself is 1.8:1 there and
+                               only ever safe as a wash or on dark */
   --critical:    #d03b3b;
   --series-1:    #2a78d6;   /* the one plotted series */
 
@@ -48,6 +51,7 @@
     --border:  rgba(255, 255, 255, .10);
     --shadow:  none;
     --series-1: #3987e5;
+    --warning-ink: #fab219;
     --good-wash:     rgba(12, 163, 12, .16);
     --warning-wash:  rgba(250, 178, 25, .16);
     --critical-wash: rgba(208, 59, 59, .18);
@@ -67,6 +71,7 @@
   --border:  rgba(255, 255, 255, .10);
   --shadow:  none;
   --series-1: #3987e5;
+  --warning-ink: #fab219;
   --good-wash:     rgba(12, 163, 12, .16);
   --warning-wash:  rgba(250, 178, 25, .16);
   --critical-wash: rgba(208, 59, 59, .18);
@@ -433,6 +438,49 @@ button:disabled { opacity: .45; cursor: default; }
 .badge.is-warning  .g { color: var(--warning); }
 .badge.is-critical .g { color: var(--critical); }
 
+/* The battery glyph: 4 segments in a case with a nub. Level = how many
+   segments are filled (the non-colour channel) + which colour; a dashed
+   case means no cell detected. The bolt overlays when the charger is on. */
+.batt {
+  position: relative;
+  display: inline-flex;
+  gap: 1px;
+  padding: 1px;
+  width: 20px;
+  height: 9px;
+  border: 1px solid var(--ink-3);
+  border-radius: 2px;
+  flex: none;
+  box-sizing: content-box;
+  vertical-align: -1px;
+}
+.batt::after {
+  content: '';
+  position: absolute;
+  right: -3px;
+  top: 2px;
+  width: 2px;
+  height: 5px;
+  background: var(--ink-3);
+  border-radius: 0 1px 1px 0;
+}
+.batt i { flex: 1; border-radius: 1px; background: transparent; }
+.batt.lvl-good     i:nth-child(-n+4) { background: var(--good); }
+.batt.lvl-medium   i:nth-child(-n+3) { background: var(--good); }
+.batt.lvl-low      i:nth-child(-n+2) { background: var(--warning-ink); }
+.batt.lvl-critical i:nth-child(-n+1) { background: var(--critical); }
+.batt.lvl-none     { border-style: dashed; }
+.batt .bolt {
+  position: absolute;
+  inset: -2px 0;
+  display: grid;
+  place-items: center;
+  font-size: 9px;
+  line-height: 1;
+  color: var(--ink);
+  text-shadow: 0 0 2px var(--surface), 0 0 2px var(--surface), 0 0 3px var(--surface);
+}
+
 /* --- stock view ---------------------------------------------------- */
 
 .area-head {
@@ -488,18 +536,45 @@ button:disabled { opacity: .45; cursor: default; }
   color: var(--critical);
 }
 
-/* The "last known" caption. The word stays in ink (--critical is 3.62:1 on
-   the dark surface — fails AA for small text); only the ✕ glyph is red,
-   which is the same mechanism every badge already uses. */
-.slot-stale {
+/* State glyph colours, shared by the page legend and the device strip.
+   Each state owns a distinct SHAPE as well as a colour, so the pairing
+   survives colour-blindness; the words appear once, in the legend. */
+.st-ok    { color: var(--good); }
+.st-off   { color: var(--critical); }
+.st-fault { color: var(--critical); }
+.st-deg   { color: var(--warning-ink); }
+.st-none  { color: var(--ink-3); }
+
+/* The legend: the one place on Stock where symbols meet words. */
+.legend-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .4rem 1rem;
   font-size: .72rem;
+  /* ink-2, not ink-3: at .72rem these words need 4.5:1 and ink-3 is 3.5:1
+     on the light surface — the same bar the old .slot-stale comment held. */
   color: var(--ink-2);
-  display: inline-flex;
-  align-items: center;
-  gap: .25rem;
-  white-space: nowrap;
+  margin-top: .25rem;
 }
-.slot-stale .g { color: var(--critical); }
+.legend-line b { font-weight: 400; }
+
+/* The device strip: one symbolic line per stack — glyph, id, count,
+   battery. Deliberately not chips: no borders, no backgrounds, no words. */
+.dev-strip { display: grid; gap: 2px; margin-top: .1rem; }
+.dev-line {
+  display: grid;
+  grid-template-columns: 1rem 2.6rem 1fr auto;
+  align-items: center;
+  gap: .35rem;
+  min-height: 20px;
+  font-size: .75rem;
+  color: var(--ink-2);
+  text-decoration: none;
+  font-variant-numeric: tabular-nums;
+}
+.dev-line .st { text-align: center; }
+.dev-line .ct { text-align: right; padding-right: .1rem; }
+.dev-line:hover .id { text-decoration: underline; }
 
 /* The capsule bar carries DATA CONFIDENCE, deliberately not a quantity
    colour band:

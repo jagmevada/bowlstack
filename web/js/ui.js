@@ -178,6 +178,25 @@ export function levelColumn(levels, big = false) {
   return col;
 }
 
+/** A 4-segment battery glyph.
+ *  Fill count carries the level alongside colour (colour never travels
+ *  alone): good=4 green, medium=3 green, low=2 amber, critical=1 red,
+ *  no cell=0 with a dashed outline. A charger on the rail overlays a bolt.
+ *  The band is the server's hysteretic battery_level — never a percentage. */
+export function batteryBar(level, charging, title) {
+  const lvl = level == null ? 'none' : level;
+  return h('span', {
+    class: `batt lvl-${lvl}`,
+    role: 'img',
+    title,
+    'aria-label': title,
+  },
+    h('i'), h('i'), h('i'), h('i'),
+    // U+FE0E forces text presentation: bare ⚡ is Emoji_Presentation=Yes and
+    // Segoe UI Emoji paints it yellow, ignoring color and the halo shadow.
+    charging ? h('span', { class: 'bolt', 'aria-hidden': 'true' }, '⚡\uFE0E') : null);
+}
+
 let toastTimer = null;
 export function toast(message, isError = false) {
   const el = document.getElementById('toast');

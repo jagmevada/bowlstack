@@ -69,6 +69,8 @@ ASSIGN.forEach(([loc, slot, n], i) => {
   const missed = id === 'BWL-021';   // slept through the last completed window
   const noBatt = id === 'BWL-019';
   const critB = id === 'BWL-005';
+  const lowB = id === 'BWL-011';
+  const medB = id === 'BWL-012';
   const never = id === 'BWL-024';
   const levels = fault ? ['absent', 'present', 'absent', 'absent']
     : degr ? ['present', 'present', 'unknown', 'absent']
@@ -93,8 +95,8 @@ ASSIGN.forEach(([loc, slot, n], i) => {
       : (degr || degrFull || noSense) ? 'degraded' : 'ok',
     levels: never ? null : levels,
     sensors_online: never ? null : noSense ? 0 : (degr || degrFull) ? 3 : 4,
-    battery_mv: never ? null : noBatt ? null : critB ? 3320 : 4020,
-    battery_level: never ? null : noBatt ? null : critB ? 'critical' : 'good',
+    battery_mv: never ? null : noBatt ? null : critB ? 3320 : lowB ? 3560 : medB ? 3720 : 4020,
+    battery_level: never ? null : noBatt ? null : critB ? 'critical' : lowB ? 'low' : medB ? 'medium' : 'good',
     charging: never ? null : id === 'BWL-001',
     uptime_s: never ? null : 7412, firmware: never ? null : '0.2.0',
     mac: never ? null : 'A0:B1:C2:D3:E4:F5',
@@ -362,8 +364,8 @@ ok('renders three areas', ['Darshanarthi', 'Mahatma', 'Tiffin'].every(a => text(
 ok('dish names resolved', text().includes('Khichdi') && text().includes('Chaas'));
 ok('fault slot shows no count', text().includes('Check station'));
 ok('no-data slot says No data', text().includes('No data'));
-ok('degraded slot marked lower bound', text().includes('Lower bound'));
-ok('offline stack surfaced', text().includes('Stack offline'));
+ok('degraded slot headline is a lower bound', text().includes('\u2265'));
+ok('offline stack surfaced as a \u2715 line', view.querySelector('.dev-line .st-off') !== null);
 ok('stack pills link to devices', view.querySelector('a[href^="#/device/"]') !== null);
 ok('capacity comes from the view', text().includes('of 4 bowls') && text().includes('of 12 bowls'));
 
@@ -377,10 +379,22 @@ console.log('\n[offline: last value kept, in red]');
   ok('with no decorative underline',
     !/underline/.test(getComputedStyle ? '' : '')  // css-level; the class carries colour only
     && d5?.querySelector('.slot-count.is-offline') === null);
-  ok('with the last-known caption', /last known/.test(d5?.textContent || ''));
-  ok('badge counts the silent stacks', /Stack offline \u2014 1 of 2/.test(d5?.textContent || ''));
-  ok('the pill keeps the number beside the word',
-    [...(d5?.querySelectorAll('a.badge') || [])].some(a => /\d+ offline/.test(a.textContent)));
+  // Minimal by request: the card never prints a state word. The silent
+  // stack is a \u2715 line, the degraded one a \u25d0 line, and the words live in
+  // tooltips, the page legend and the Health page.
+  ok('no state words printed on the card',
+    !/last known|offline|Stack/i.test(d5?.textContent || ''));
+  ok('one symbolic line per stack (\u2715 + \u25d0)',
+    (d5?.querySelectorAll('.dev-line') || []).length === 2
+    && d5?.querySelector('.dev-line .st-off') !== null
+    && d5?.querySelector('.dev-line .st-deg') !== null);
+  // Pinned to an actual numeral: "non-empty" would pass on any junk.
+  const offLine = [...(d5?.querySelectorAll('.dev-line') || [])]
+    .find(l => l.querySelector('.st-off'));
+  ok('the \u2715 line pins its last-known numeral',
+    /\d/.test(offLine?.querySelector('.ct')?.textContent || ''));
+  ok('the red number explains itself on hover',
+    /last known/.test(d5?.querySelector('.slot-count')?.title || ''));
 
   // The capsule bar now carries data confidence: D5 has BWL-021 (missed) and
   // BWL-022 (degraded) -- NO healthy stack -- so the whole bar is striped and
@@ -429,6 +443,51 @@ console.log('\n[offline: last value kept, in red]');
   ok('clicking it opens Health filtered to problems',
     location.hash === '#/health?f=problems', location.hash);
   await go('#/stock');
+}
+
+console.log('\n[stock: symbolic cards & battery bars]');
+{
+  const line = id => [...view.querySelectorAll('.dev-line')]
+    .find(l => l.getAttribute('href')?.includes(id));
+  ok('cards carry no badge chips at all',
+    view.querySelectorAll('.slot .badge').length === 0);
+  ok('the legend pairs every glyph with its word once',
+    ['reporting', 'offline', 'fault', 'degraded', 'no reading']
+      .every(w => view.querySelector('.legend-line')?.textContent.includes(w)));
+  ok('every device line wears a battery glyph',
+    [...view.querySelectorAll('.dev-line')].length > 0
+    && [...view.querySelectorAll('.dev-line')].every(l => l.querySelector('.batt')));
+  ok('a healthy cell shows 4 bars', line('BWL-001')?.querySelector('.batt.lvl-good') !== null);
+  ok('the charger overlays a bolt', line('BWL-001')?.querySelector('.batt .bolt') !== null);
+  ok('a critical cell shows red', line('BWL-005')?.querySelector('.batt.lvl-critical') !== null);
+  ok('no cell detected = dashed empty case',
+    line('BWL-019')?.querySelector('.batt.lvl-none') !== null);
+  ok('an unplugged good cell has no bolt',
+    line('BWL-019')?.querySelector('.batt .bolt') === null);
+  ok('the fault stack is a \u25b2 line', view.querySelector('.dev-line .st-fault') !== null);
+  ok('a healthy stack is a \u25cf line', view.querySelector('.dev-line .st-ok') !== null);
+  ok('a low cell shows amber', line('BWL-011')?.querySelector('.batt.lvl-low') !== null);
+  ok('a medium cell shows 3 bars', line('BWL-012')?.querySelector('.batt.lvl-medium') !== null);
+  ok('the legend carries the glyphs themselves, in order',
+    [...view.querySelectorAll('.legend-line b')].map(b => b.textContent).join('')
+      === '\u25cf\u2715\u25b2\u25d0\u25cc');
+  const faultCard = [...view.querySelectorAll('.slot')]
+    .find(c => c.querySelector('.st-fault'));
+  ok('the fault card keeps its one sentence',
+    /still reading correctly\./.test(faultCard?.textContent || ''));
+}
+
+console.log('\n[stock: outside service hours]');
+{
+  // The As-of line and the outside-service banner only exist when the WHOLE
+  // fleet is out of window — flip the fixtures, render, flip back.
+  for (const d of devices) d.in_service = false;
+  await go('#/stock');
+  ok('banner says these are last-known values', text().includes('Outside service hours'));
+  ok('cards date their figures', /As of /.test(text()));
+  for (const d of devices) d.in_service = true;
+  await go('#/stock');
+  ok('banner returns to live on restore', !text().includes('Outside service hours'));
 }
 
 console.log('\n[stock: template vs daily priority]');

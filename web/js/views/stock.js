@@ -11,7 +11,7 @@
 //  into an instruction someone can act on.
 // ====================================================================
 
-import { h, badge, empty, banner } from '../ui.js';
+import { h, empty, banner, batteryBar } from '../ui.js';
 import {
   LOCATION_NAMES, SERVING_LOCATIONS, MAX_BOWLS, slotStock, deviceStack,
   deviceOffline, slotOffline, fleetSummary, weekdayOf, serviceDate,
@@ -55,6 +55,16 @@ export function renderStock(state) {
       ]),
       h('span', { class: 'go' }, 'Diagnose in Health ›')));
   }
+
+  // The one place symbols meet words. The cards below are glyph-only —
+  // minimal by request — so the legend carries the pairing the
+  // colour-never-alone rule demands, once per page instead of per chip.
+  frag.append(h('div', { class: 'legend-line' },
+    h('span', {}, h('b', { class: 'st-ok' }, '●'), ' reporting'),
+    h('span', {}, h('b', { class: 'st-off' }, '✕'), ' offline'),
+    h('span', {}, h('b', { class: 'st-fault' }, '▲'), ' fault'),
+    h('span', {}, h('b', { class: 'st-deg' }, '◐'), ' degraded'),
+    h('span', {}, h('b', { class: 'st-none' }, '◌'), ' no reading')));
 
   if (!inService) {
     frag.append(banner('info', '◷',
@@ -153,14 +163,11 @@ function slotCard(sl, stacks, inService, tz, template) {
     card.append(h('div', { class: 'slot-figure' },
       h('span', {
         class: `slot-count${compromised ? ' is-alert' : ''}`,
+        title: anyOffline
+          ? 'A stack here stopped reporting during service — this is its last known count.'
+          : undefined,
       }, sl.any_degraded ? `≥${stock.trusted}` : String(stock.trusted)),
-      h('span', { class: 'slot-of' }, `of ${stock.capacity} bowls`),
-      anyOffline
-        ? h('span', {
-            class: 'slot-stale',
-            title: 'A stack here stopped reporting during service. This is the last count it sent.',
-          }, h('span', { class: 'g', 'aria-hidden': 'true' }, '✕'), 'last known')
-        : null));
+      h('span', { class: 'slot-of' }, `of ${stock.capacity} bowls`)));
   }
 
   // The capsule bar carries DATA CONFIDENCE, not a quantity colour band:
@@ -196,62 +203,51 @@ function slotCard(sl, stacks, inService, tz, template) {
       h('i', { class: 'invalid', style: `width:${pctBad}%` })));
   }
 
-  const notes = h('div', { class: 'slot-notes' });
   const okStacks = stacks.filter(d => d.stack_status === 'ok' && d.reported).length;
-  if (sl.any_fault) {
-    notes.append(badge('critical', '▲', 'Impossible reading'));
-    if (stock.trusted != null) {
-      card.append(h('div', { class: 'slot-sub' },
-        `${stock.trusted} bowls on the ${okStacks} stack${okStacks === 1 ? '' : 's'} still reading correctly.`));
-    }
+  // Fault is rare and actionable, so its one sentence stays.
+  if (sl.any_fault && stock.trusted != null) {
+    card.append(h('div', { class: 'slot-sub' },
+      `${stock.trusted} bowls on the ${okStacks} stack${okStacks === 1 ? '' : 's'} still reading correctly.`));
   }
-  if (sl.any_degraded) notes.append(badge('warning', '◐', 'Lower bound'));
-  if (anyOffline) {
-    notes.append(badge('critical', '✕',
-      offlineStacks && stacks.length && offlineStacks < stacks.length
-        ? `Stack offline — ${offlineStacks} of ${stacks.length}`
-        : 'Stack offline'));
-  }
-  if (sl.any_battery_warn) notes.append(badge('warning', '▮', 'Battery'));
-  if (Number(sl.devices_reported) < Number(sl.devices)) {
-    notes.append(badge('warning', '◔',
-      `${Number(sl.devices) - Number(sl.devices_reported)} of ${sl.devices} not reporting`));
-  }
-  if (notes.childElementCount) card.append(notes);
-
   if (!inService && sl.oldest_update) {
     card.append(h('div', { class: 'slot-sub dim' }, `As of ${fmtClock(sl.oldest_update, tz)}`));
   }
 
-  // Which stack is which. With at most three per position this fits, and it is
-  // the difference between "slot 3 is wrong" and "tell someone to look at
-  // BWL-008".
+  // One symbolic line per stack: state glyph · id · count · battery. No
+  // chips, no words — the words live in the tooltip, on the Health page, and
+  // in the page legend. Glyph priority mirrors severity: an impossible
+  // reading outranks silence outranks a dead sensor.
   if (stacks.length) {
-    const pills = h('div', { class: 'slot-notes' });
+    const strip = h('div', { class: 'dev-strip' });
     for (const d of stacks.sort((a, b) => a.device_id.localeCompare(b.device_id))) {
       const st = deviceStack(d);
       const gone = deviceOffline(d);
-      // A fault beats offline on the glyph: "check the sensors" is the more
-      // actionable instruction, and the pill keeps the word `offline` anyway.
-      const cls = st.kind === 'fault' || gone ? 'critical'
-                : st.kind === 'bound' ? 'warning'
-                : st.kind === 'none' ? 'idle' : 'good';
-      const glyph = st.kind === 'fault' ? '▲'
-                  : gone ? '✕'
-                  : st.kind === 'bound' ? '◐'
-                  : st.kind === 'none' ? '◌' : '●';
-      pills.append(h('a', {
-        class: `badge is-${cls}`,
+      const [cls, glyph, word] =
+        st.kind === 'fault' || d.stack_status === 'discontiguous'
+          ? ['fault', '▲', 'impossible reading — check the sensors']
+          : gone
+            ? ['off', '✕', 'offline — showing its last value']
+            : d.stack_status === 'degraded'
+              ? ['deg', '◐', 'a sensor is down']
+              : st.kind === 'none'
+                ? ['none', '◌', 'no reading']
+                : ['ok', '●', 'reporting'];
+      const battWord = d.battery_level == null
+        ? 'no battery detected'
+        : `battery ${d.battery_level}`
+          + `${d.battery_mv ? ` (${d.battery_mv} mV)` : ''}`
+          + `${d.charging ? ' — charging' : ''}`;
+      strip.append(h('a', {
+        class: 'dev-line',
         href: `#/device/${encodeURIComponent(d.device_id)}`,
-        style: 'text-decoration:none',
-        title: `${d.device_id} — ${gone ? 'offline; showing its last value' : st.note || 'reading OK'} · updated ${fmtRelative(d.updated_at)}`,
+        title: `${d.device_id} — ${word} · updated ${fmtRelative(d.updated_at)} · ${battWord}`,
       },
-        h('span', { class: 'g', 'aria-hidden': 'true' }, glyph),
-        // The last value is kept even here — "014 · 3 offline", never a word
-        // in place of the number.
-        `${d.device_id.replace(/^BWL-/, '')} · ${st.text}${gone ? ' offline' : ''}`));
+        h('span', { class: `st st-${cls}`, 'aria-hidden': 'true' }, glyph),
+        h('span', { class: 'id' }, d.device_id.replace(/^BWL-/, '')),
+        h('span', { class: 'ct' }, st.text),
+        batteryBar(d.battery_level, d.charging, `${d.device_id}: ${battWord}`)));
     }
-    card.append(pills);
+    card.append(strip);
   }
 
   return card;

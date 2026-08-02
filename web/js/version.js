@@ -4,4 +4,4 @@
 // is otherwise unanswerable from a photo of the screen.
 //
 // Separate from the firmware's include/version.h: they ship independently.
-export const APP_VERSION = '1.11';
+export const APP_VERSION = '1.12';
