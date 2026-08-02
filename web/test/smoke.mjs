@@ -432,12 +432,17 @@ console.log('\n[offline: last value kept, in red]');
   ok('no-data slot stays grey', noData?.querySelector('.slot-count') == null
     && noData?.querySelector('.slot-nodata') !== null);
 
-  // The thin problem strip: counts, not a wall of IDs, and it routes to
-  // Health where the diagnosis lives.
+  // The thin problem strip: ONE deduplicated count — the header capsules
+  // already itemize offline/fault/degraded/battery, and showing the same
+  // numbers twice was the bug. Union of problem devices in the fixtures:
+  // 002 fault, 008/022/023 degraded, 014 offline, 021 missed, 005 critical
+  // cell, 011 low cell = 8 stations.
   const strip = view.querySelector('.alert-strip');
   ok('the problem strip is present', strip != null);
-  ok('it counts the offline devices', /2 offline/.test(strip?.textContent || ''));
-  ok('it counts the sensor faults too', /1 sensor fault/.test(strip?.textContent || ''));
+  ok('it carries one deduplicated count', /8 stations need attention/.test(strip?.textContent || ''));
+  ok('it does not re-itemize the capsules',
+    !/offline|fault|degraded|battery/.test(strip?.textContent || ''));
+  ok('the message is wrap-proof', strip?.querySelector('.msg') !== null);
   ok('it points at Health', /Diagnose in Health/.test(strip?.textContent || ''));
   strip.dispatchEvent(new window.Event('click'));
   ok('clicking it opens Health filtered to problems',

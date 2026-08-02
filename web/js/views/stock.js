@@ -14,7 +14,7 @@
 import { h, empty, banner, batteryBar } from '../ui.js';
 import {
   LOCATION_NAMES, SERVING_LOCATIONS, MAX_BOWLS, slotStock, deviceStack,
-  deviceOffline, slotOffline, fleetSummary, weekdayOf, serviceDate,
+  deviceOffline, slotOffline, weekdayOf, serviceDate,
   fmtClock, fmtRelative, serviceState,
 } from '../domain.js';
 
@@ -32,39 +32,36 @@ export function renderStock(state) {
   }
 
   // The problem strip: one thin red bar that says "something needs a person"
-  // and takes them to Health to see what. Stock is the screen watched through
-  // service, so it carries the pointer, not the diagnosis — counts only, no
-  // wall of device IDs. Every count is a server-computed flag (deviceOffline
-  // wraps the two offline flags and nothing else), so this cannot false-alarm
-  // on ordinary dark hours.
-  const s = fleetSummary(devices);
-  const issues = [];
-  if (s.offline) issues.push(['✕', `${s.offline} offline`]);
-  if (s.fault) issues.push(['▲', `${s.fault} sensor fault${s.fault === 1 ? '' : 's'}`]);
-  if (s.degraded) issues.push(['◐', `${s.degraded} degraded`]);
-  if (s.batteryWarn) issues.push(['▮', `${s.batteryWarn} battery`]);
-  if (issues.length) {
+  // and takes them to Health to see what. The header capsules already itemize
+  // offline/fault/degraded/battery, so the strip does NOT repeat those counts
+  // (they used to show twice); it carries a single deduplicated figure — how
+  // many stations have ANY problem — and stays on one line even on a phone.
+  const attention = devices.filter(d => !d.awaiting_deployment
+    && (deviceOffline(d)
+      || d.stack_status === 'discontiguous'
+      || d.stack_status === 'degraded'
+      || ['low', 'critical'].includes(d.battery_level))).length;
+  if (attention) {
     frag.append(h('button', {
       class: 'alert-strip',
       title: 'Open the Health page to see which devices and why',
       onclick: () => { location.hash = '#/health?f=problems'; },
     },
-      ...issues.flatMap(([g, label]) => [
-        h('span', { class: 'g', 'aria-hidden': 'true' }, g),
-        h('span', {}, label),
-      ]),
-      h('span', { class: 'go' }, 'Diagnose in Health ›')));
+      h('span', { class: 'g', 'aria-hidden': 'true' }, '\u2715'),
+      h('span', { class: 'msg' },
+        `${attention} station${attention === 1 ? ' needs' : 's need'} attention`),
+      h('span', { class: 'go' }, 'Diagnose in Health \u203a')));
   }
 
-  // The one place symbols meet words. The cards below are glyph-only —
-  // minimal by request — so the legend carries the pairing the
+  // The one place symbols meet words. The cards below are glyph-only \u2014
+  // minimal by request \u2014 so the legend carries the pairing the
   // colour-never-alone rule demands, once per page instead of per chip.
   frag.append(h('div', { class: 'legend-line' },
-    h('span', {}, h('b', { class: 'st-ok' }, '●'), ' reporting'),
-    h('span', {}, h('b', { class: 'st-off' }, '✕'), ' offline'),
-    h('span', {}, h('b', { class: 'st-fault' }, '▲'), ' fault'),
-    h('span', {}, h('b', { class: 'st-deg' }, '◐'), ' degraded'),
-    h('span', {}, h('b', { class: 'st-none' }, '◌'), ' no reading')));
+    h('span', {}, h('b', { class: 'st-ok' }, '\u25cf'), ' reporting'),
+    h('span', {}, h('b', { class: 'st-off' }, '\u2715'), ' offline'),
+    h('span', {}, h('b', { class: 'st-fault' }, '\u25b2'), ' fault'),
+    h('span', {}, h('b', { class: 'st-deg' }, '\u25d0'), ' degraded'),
+    h('span', {}, h('b', { class: 'st-none' }, '\u25cc'), ' no reading')));
 
   if (!inService) {
     frag.append(banner('info', '◷',

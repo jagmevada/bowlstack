@@ -267,6 +267,8 @@ button:disabled { opacity: .45; cursor: default; }
   overflow-wrap: anywhere;
 }
 
+/* The capsules are the ONE place fleet counts are itemized. They may wrap to
+   a second row on a phone, but a chip never breaks internally. */
 .chips { display: flex; gap: .4rem; flex-wrap: wrap; padding: .5rem 0 .1rem; }
 
 .chip {
@@ -281,6 +283,11 @@ button:disabled { opacity: .45; cursor: default; }
   color: var(--ink-2);
   cursor: pointer;
   min-height: 30px;
+  white-space: nowrap;
+}
+@media (max-width: 480px) {
+  .chips { gap: .25rem .3rem; }
+  .chip { font-size: .72rem; padding: .2rem .45rem; min-height: 26px; gap: .25rem; }
 }
 .chip b { color: var(--ink); font-weight: 600; }
 .chip.is-critical { background: var(--critical-wash); border-color: transparent; }
@@ -354,6 +361,14 @@ button:disabled { opacity: .45; cursor: default; }
   min-height: 34px;
   font-size: .8rem;
   color: var(--ink);
+}
+/* One line always: the message ellipsizes before anything is allowed to
+   wrap — on a phone the old itemized strip shattered into a word per row. */
+.alert-strip .msg {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .alert-strip .g { color: var(--critical); flex: none; }
 .alert-strip .go {
