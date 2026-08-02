@@ -15,13 +15,13 @@
 import { h, badge, empty, levelColumn, banner } from '../ui.js';
 import {
   compareDevices, deviceSeverity, deviceStack, batteryInfo, positionLabel,
-  fmtRelative, fmtClock, serviceState,
+  deviceOffline, fmtRelative, fmtDateTime, serviceState,
 } from '../domain.js';
 
 const FILTERS = {
   all:      { label: 'All', test: () => true },
   problems: { label: 'Needs attention', test: d => !d.awaiting_deployment && deviceSeverity(d).rank >= 50 },
-  offline:  { label: 'Offline', test: d => d.offline },
+  offline:  { label: 'Offline', test: deviceOffline },
   battery:  { label: 'Battery', test: d => d.battery_level === 'low' || d.battery_level === 'critical' },
   fault:    { label: 'Faults', test: d => d.stack_status === 'discontiguous' || d.stack_status === 'degraded' },
 };
@@ -162,6 +162,10 @@ function deviceRow(d, tz) {
     badges.append(badge('idle', '◌', 'Never reported'));
   } else {
     if (d.offline) badges.append(badge('critical', '✕', 'Offline'));
+    else if (d.missed_last_service) {
+      badges.append(badge('critical', '✕', 'Missed last service',
+        'Did not report at all during the most recently completed service window.'));
+    }
     if (d.stack_status === 'discontiguous') badges.append(badge('critical', '▲', 'Impossible reading'));
     if (d.stack_status === 'degraded') badges.append(badge('warning', '◐', 'Count is a lower bound'));
     if (d.sensors_online != null && d.sensors_online < 4) {
@@ -172,7 +176,10 @@ function deviceRow(d, tz) {
       batt.absent ? 'No battery' : batt.label,
       d.battery_mv ? `${d.battery_mv} mV at the cell` : 'No cell detected'));
     if (d.charging) badges.append(badge('good', '⚡', 'Charging'));
-    if (d.data_is_stale) badges.append(badge('idle', '◷', `As of ${fmtClock(d.updated_at, tz)}`));
+    // fmtDateTime, not fmtClock: a time-only "As of 20:05" made a device dead
+    // since last Tuesday pixel-identical to one that reported at yesterday's
+    // dinner. The date is the information.
+    if (d.data_is_stale) badges.append(badge('idle', '◷', `As of ${fmtDateTime(d.updated_at, tz)}`));
   }
 
   const mid = h('div', { class: 'dev-mid' },
@@ -195,6 +202,14 @@ function deviceRow(d, tz) {
     levelColumn(d.levels),
     mid,
     h('div', { class: 'dev-right' },
-      h('span', { class: `dev-count${stack.kind === 'count' || stack.kind === 'bound' ? '' : ' na'}` },
-        stack.text)));
+      // Red only where there IS a last value to redden — the fault (`!`) and
+      // never-reported (`—`) renderings are not counts, so the `na` grey owns
+      // them and the offline red must not touch them. Reusing the same
+      // kind-test keeps the two classes structurally unable to disagree.
+      h('span', {
+        class: 'dev-count'
+          + (stack.kind === 'count' || stack.kind === 'bound'
+              ? (deviceOffline(d) ? ' is-offline' : '')
+              : ' na'),
+      }, stack.text)));
 }

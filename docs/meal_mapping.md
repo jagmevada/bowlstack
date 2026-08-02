@@ -32,6 +32,11 @@ supabase/reset_spares.sql      -- restores awaiting_deployment for the reserved 
 supabase/smoke_test.sql        -- 20 assertions; expect ALL PASS
 ```
 
+On a database that is already live, run the additive
+`supabase/weekly_menu_and_offline.sql` instead of re-running `schema.sql` —
+it added `meal_menu_template`, the template-aware preload and
+`meal_template_apply` without touching existing rows.
+
 `schema.sql` is the **complete** schema — the assignment model and
 `meal_food_mapping` are defined there directly, so there is no migration to apply
 afterwards and nothing that can drift from it.
@@ -97,9 +102,33 @@ export interface MealFoodMapping {
 export interface MealMappingPreloadRow {
   food_slot: FoodSlot
   food_name: string
+  /** Equal to the requested date => from the weekly template; earlier =>
+   *  carried over from that date. */
   source_date: string
-  /** false => inherited from an earlier day and NOT yet saved for this date. */
+  /** false => a draft (template or carry-over), NOT yet saved for this date. */
   is_saved: boolean
+}
+
+/** public.meal_menu_template — the fixed weekly menu. See §5b. */
+export interface MealMenuTemplate {
+  id: number
+  location: Exclude<Location, 'R'>   // a reserved unit serves nothing
+  weekday: 0 | 1 | 2 | 3 | 4 | 5 | 6 // 0 = Sunday — extract(dow) and getDay()
+  meal_type: MealType
+  food_slot: FoodSlot
+  food_name: string
+  created_at: string
+  updated_at: string
+}
+
+/** Row of public.meal_template_apply(...) — see §5b. */
+export interface MealTemplateApplyRow {
+  meal_date: string
+  meal_type: MealType
+  written: number
+  /** true => the meal already had rows (or completed earlier today) and was
+   *  left alone. */
+  skipped: boolean
 }
 
 /** public.slot_overview — per-DISH stock. The primary dashboard number. */
@@ -123,8 +152,11 @@ export interface SlotOverview {
   any_fault: boolean                // some device is discontiguous
   any_degraded: boolean             // some count is a lower bound
   any_battery_warn: boolean
-  any_offline: boolean
+  any_offline: boolean              // some stack died mid-window
   oldest_update: string | null
+  /** Some stack slept through the last completed service window. Keep its
+   *  last count on screen, rendered as last-known (red), never blanked. */
+  any_missed_service: boolean
 }
 
 /** public.device_overview — per-device detail, for the health view. */
@@ -140,7 +172,7 @@ export interface DeviceOverview {
   updated_at: string | null
   stale_for: string | null
   in_service: boolean
-  offline: boolean                  // should be reporting and is not — the alarm
+  offline: boolean                  // should be reporting RIGHT NOW and is not
   awaiting_deployment: boolean      // registered, never heard from — not a fault
   data_is_stale: boolean            // outside service hours; last-known values
   stack_count: number | null
@@ -153,6 +185,10 @@ export interface DeviceOverview {
   uptime_s: number | null
   firmware: string | null
   mac: string | null
+  /** Slept through the most recently completed service window — the alarm
+   *  that survives the dark hours. Deployed devices only; treat
+   *  (offline || missed_last_service) as "not talking when it should be". */
+  missed_last_service: boolean
 }
 ```
 
@@ -242,8 +278,8 @@ history row hangs off.
 
 ## 5. Preload (Part 4)
 
-Opening a meal inherits the most recent previous mapping for the same location and
-meal type, so the admin edits differences instead of retyping five dishes.
+Opening a meal preloads a draft, so the admin edits differences instead of
+retyping five dishes.
 
 ```ts
 const { data } = await supabase.rpc('meal_mapping_preload', {
@@ -251,19 +287,53 @@ const { data } = await supabase.rpc('meal_mapping_preload', {
 })
 ```
 
+Precedence, per `(location, meal_type, meal_date)`:
+
 | Situation | Returns |
 | --- | --- |
 | a mapping is already saved for this date | it, with `is_saved: true` |
-| none saved, an earlier one exists | the most recent, `is_saved: false` |
-| no history at all | empty — start with a blank form |
+| none saved, date is today-or-future, template has this weekday+meal | the weekly template, `is_saved: false`, **`source_date` = the requested date** |
+| none saved, no template match (or a past date) | the most recent previous same-meal menu, `is_saved: false`, `source_date` < the date |
+| nothing at all | empty — start with a blank form |
+
+The template branch is bounded to today-or-future deliberately: for a *past*
+gap, what was probably served is what was served around it (carry-forward), not
+what this week's template says.
 
 **`is_saved` is not decoration, and the UI must act on it.** A preloaded form is
 pixel-identical to a saved one. Without the flag, an admin who opens tomorrow's
 Lunch, agrees with every inherited dish, and navigates away would reasonably
 believe the menu was recorded — and no row would exist. Show inherited values as a
-draft, mark the source date, and require an explicit save.
+draft, mark the source, and require an explicit save.
 
-`source_date` is that date, for the "carried over from 24 Jul" line.
+`source_date` doubles as the origin marker: **equal to the requested date means
+"from the weekly template"**; an earlier date means "carried over from 24 Jul".
+
+---
+
+## 5b. The weekly template
+
+`meal_menu_template(location, weekday 0–6, meal_type, food_slot, food_name)`,
+0 = Sunday — `extract(dow)` and JS `getDay()` agree, so nobody converts. It is
+**configuration that produces menu rows, never itself the menu**: the dashboard
+views read only the dated table, because a weekday has no date and a read-time
+fallback would leave services with a dish name on screen and no dated row behind
+it — unattributable history, not retroactively fixable.
+
+The editor lives in the Menu tab's "Weekly template" mode. Bulk-freeze:
+
+```ts
+const { data } = await supabase.rpc('meal_template_apply', {
+  p_location: loc, p_from: today, p_to: addDays(today, 6), p_overwrite: false,
+})
+// -> rows of { meal_date, meal_type, written, skipped }
+```
+
+Rules the RPC enforces: past dates refused outright; today's already-completed
+meals skipped (writing this morning's Breakfast at 3pm would fabricate a served
+meal nobody recorded); a meal with ANY existing row skipped unless `p_overwrite`
+— a meal someone has touched belongs to them, including slots they deliberately
+deleted; range capped at 31 days.
 
 ---
 

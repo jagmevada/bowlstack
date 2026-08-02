@@ -24,6 +24,16 @@ supabase/seed_meal_mapping.sql     -- sample menus, so the dashboard shows dish 
 supabase/smoke_test.sql            -- 20 assertions; expect ALL PASS
 ```
 
+On a database that is already live, do NOT re-run `schema.sql` (it drops
+everything). Run the additive migration instead:
+
+```
+supabase/weekly_menu_and_offline.sql   -- missed-service flag + weekly template
+```
+
+It is idempotent, ends with its own PASS/FAIL verification, and `schema.sql`
+has been updated to produce the identical state on a fresh rebuild.
+
 ### 2. Credentials
 
 ```powershell
@@ -156,6 +166,18 @@ without a 10 s poll's request volume.
 Each of these is a way a reasonable implementation gets it wrong. They live in
 [js/domain.js](js/domain.js) so no screen re-decides them.
 
+**Offline keeps the last value — in red.** When a device is not reporting while
+it should be, its last count stays on screen (blanking it would send someone to
+a station the screen just went silent about) but turns red with a dashed
+underline — dashed because red on these numerals already means "critically
+low", so hue alone could not tell a full-but-stale position from an empty live
+one. The meter keeps its severity hue and gains a hatch; a banner on Stock
+names the silent devices. Two server flags drive all of it: `offline` (died
+mid-window) and `missed_last_service` (slept through the most recently
+completed service window — the flag that survives the dark hours, added
+because a device dead for six days used to look identical to a healthy one
+between meals). Requires `supabase/weekly_menu_and_offline.sql`.
+
 **Dark devices are not broken.** Devices are powered only during meal service
 and are dark ~16 h/day. The alarm is `offline` — which the database computes,
 service-hour aware. Nothing here derives staleness from `updated_at`; at 16 dark
@@ -224,6 +246,18 @@ worth knowing: a view that fills asynchronously must write to its slot **by
 id** (`fillSlot`), never to a node it captured — under patching the live node
 is kept and the freshly built one discarded, so a captured reference can be
 detached by the time the data lands.
+
+**The weekly template is configuration, not menu.** The Menu tab's "Weekly
+template" mode edits `meal_menu_template`, keyed by weekday (0 = Sunday,
+matching both Postgres `extract(dow)` and JS `getDay()`). The dashboard never
+reads it: a weekday has no date, so resolving dishes from it directly would
+let a service pass with a dish name on screen and no dated row behind it —
+permanently breaking the "what was served last Tuesday" join. It reaches the
+dashboard by materialisation only: the daily editor preloads from it (drafts
+say "From the weekly template" until saved), and "Apply to dates" writes real
+rows for a range — skipping any meal already entered, so deliberate one-off
+changes survive, and refusing past dates outright. A saved dish that differs
+from the template wears a quiet ◆ override badge.
 
 **Clearing a dish is a DELETE.** "No dish here" and "a dish with no name" are
 different, and a CHECK rejects the second — so blanks are filtered before the
@@ -295,7 +329,7 @@ npm install      # jsdom, only for the test — the app itself has no dependenci
 node smoke.mjs
 ```
 
-85 assertions. It loads the real `index.html`, stubs PostgREST with rows shaped
+121 assertions. It loads the real `index.html`, stubs PostgREST with rows shaped
 like `device_overview` / `slot_overview` / `status_events`, and drives every
 screen. It exists to protect the rules in the section above — each is one
 plausible edit away from breaking with nothing visibly wrong on screen.

@@ -16,7 +16,16 @@ supabase/seed_meal_mapping.sql -- sample menus, for the front-end test bed
 supabase/smoke_test.sql        -- 20 assertions; run BEFORE flashing any device
 ```
 
-Two files sit outside that sequence:
+On a database that is **already live**, never re-run `schema.sql`. Additive
+changes ship as their own idempotent file — currently:
+
+```
+supabase/weekly_menu_and_offline.sql  -- missed_last_service flag, window-edge
+                                      -- fix, weekly menu template (applied
+                                      -- 2026-08-02; safe to re-run)
+```
+
+Files outside the sequence:
 
 | | |
 | --- | --- |
@@ -70,6 +79,19 @@ a device stores a slot number and the dashboard resolves the dish. Keyed by date
 a past bowl count stays joinable to the dish that was actually in that slot. Full
 detail and the front-end contract: [meal_mapping.md](meal_mapping.md).
 
+### `meal_menu_template` — the fixed weekly menu, per weekday
+
+PK `(location, weekday, meal_type, food_slot)`, weekday `0–6` with **0 = Sunday**
+(Postgres `extract(dow)` and JS `getDay()` agree, so neither side converts).
+Configuration that *produces* `meal_food_mapping` rows — the dashboard views
+never read it, because a weekday has no date: resolving dishes from it directly
+would let a service pass with a dish name on screen and no dated row behind it,
+permanently breaking historical attribution. It is materialised by the menu
+editor's Save (which preloads from it) or `meal_template_apply(location, from,
+to, overwrite)`, which refuses past dates and today's already-completed meals,
+and skips any meal already entered unless `overwrite`. Locations `D/M/T` only —
+a reserved unit serves nothing. Staff-only CRUD; anon has no access of any kind.
+
 ### `device_status` — current state, one row per device
 
 Updated in place. Columns are nullable because the row exists before the device
@@ -114,11 +136,18 @@ schedule stacked on top of the change traffic.
 
 ### Offline detection
 
-`public.offline_after()` sets how long a device may be silent, while it *should*
-be reporting, before `device_overview.offline` goes true. It is a function rather
-than a literal so it can be retuned with one `CREATE OR REPLACE` — see
-`supabase/set_offline_threshold.sql` — instead of re-running `schema.sql`, which
-drops every table including the history.
+Two flags, two failure shapes:
+
+- `offline` — died **mid-window**. `public.offline_after()` sets how long a
+  device may be silent, while it *should* be reporting, before it goes true.
+  A function rather than a literal so it can be retuned with one
+  `CREATE OR REPLACE` in the SQL editor instead of re-running `schema.sql`,
+  which drops every table including the history. Clears when the window closes.
+- `missed_last_service` — **slept through a whole window**. True when a
+  reported, deployed device's `updated_at` precedes the start of the most
+  recently completed window (own timezone; see `last_service_window_start()`).
+  No threshold, no clearing at dusk: a device dead since Tuesday is still
+  flagged on Friday morning, which `offline` alone could never say.
 
 ```
 detection (worst case) = offline_after() + front-end poll interval
@@ -128,8 +157,8 @@ offline_after()        > heartbeat + one retry backoff
 That lower bound is not optional: a threshold shorter than the gap a **healthy**
 device leaves between posts makes every device alarm between its own heartbeats.
 
-At 20 s heartbeat, 15 s retry backoff, a 40 s threshold and the dashboard's 20 s
-poll, a dead device is flagged in **40–60 s**. Below ~40 s an ordinary WiFi
+At 20 s heartbeat, 15 s retry backoff, a 40 s threshold and the dashboard's 15 s
+poll, a dead device is flagged in **40–55 s**. Below ~40 s an ordinary WiFi
 reconnection starts reading as an outage.
 
 > **Raising the heartbeat rate costs requests, not rows.** `device_status` is
@@ -234,7 +263,14 @@ false alarm on every healthy device for two thirds of the day and bury a
 genuinely dead unit among 30 of them. The device has no clock, so the logic is
 entirely server-side.
 
-`in_service_window(at, tz, device_id, margin)` evaluates wall-clock windows in
+`in_service_window(at, tz, device_id, margin)` evaluates wall-clock windows with
+asymmetric edges: `margin` (default 90 s) is a boot grace after opening, and the
+close is sharp — the old ±10 min symmetric widening false-alarmed the fleet at
+both edges of every meal. Its sibling `last_service_window_start(tz, device_id)`
+anchors `missed_last_service`: a reported, deployed device whose `updated_at`
+precedes the start of the most recently completed window slept through a service
+it should have attended — the alarm that, unlike `offline`, survives the dark
+hours. It evaluates wall-clock windows in
 each installation's timezone. Adding any `service_windows` row for a device
 replaces the fleet defaults for that device entirely — list all three meals.
 

@@ -437,6 +437,33 @@ button:disabled { opacity: .45; cursor: default; }
 .slot-nodata { font-size: 1.15rem; font-weight: 600; color: var(--ink-3); }
 .slot-fault  { font-size: 1.15rem; font-weight: 600; color: var(--critical); }
 
+/* Offline: the last value is KEPT — it is still the best information there
+   is — but it must not read as live. Red carries the alarm; the DASHED
+   underline is the second, non-colour channel, because red on these
+   numerals already means "critically low" and hue alone could not tell a
+   full-but-stale position from an empty live one. */
+.slot-count.is-offline,
+.dev-count.is-offline,
+.hero.is-offline {
+  color: var(--critical);
+  text-decoration: underline dashed;
+  text-decoration-thickness: 2px;
+  text-underline-offset: .18em;
+}
+
+/* The "last known" caption. The word stays in ink (--critical is 3.62:1 on
+   the dark surface — fails AA for small text); only the ✕ glyph is red,
+   which is the same mechanism every badge already uses. */
+.slot-stale {
+  font-size: .72rem;
+  color: var(--ink-2);
+  display: inline-flex;
+  align-items: center;
+  gap: .25rem;
+  white-space: nowrap;
+}
+.slot-stale .g { color: var(--critical); }
+
 /* Meter: fill carries severity, track is a wash of the same colour. */
 .meter { height: 8px; border-radius: 99px; background: var(--sunken); overflow: hidden; }
 .meter > i { display: block; height: 100%; border-radius: 99px; background: var(--ink-3); }
@@ -446,6 +473,18 @@ button:disabled { opacity: .45; cursor: default; }
 .meter.is-good     > i { background: var(--good); }
 .meter.is-warning  > i { background: var(--warning); }
 .meter.is-critical > i { background: var(--critical); }
+
+/* A stale meter keeps its severity hue — recolouring the fill would lie
+   about quantity, painting a full-but-offline position as empty — and gains
+   a hatch that says "last-known reading". The stripes are a dark/light
+   pair, not var(--surface), so they stay visible over every fill colour in
+   both themes. Placed AFTER the colour rules: those use the `background`
+   shorthand, which resets background-image, and source order is what lets
+   this override stick. */
+.meter.is-stale > i {
+  background-image: repeating-linear-gradient(45deg,
+    rgba(0, 0, 0, .25) 0 3px, rgba(255, 255, 255, .35) 3px 6px);
+}
 
 .slot-notes { display: flex; flex-wrap: wrap; gap: .3rem; }
 .slot-sub { font-size: .78rem; color: var(--ink-2); line-height: 1.35; }

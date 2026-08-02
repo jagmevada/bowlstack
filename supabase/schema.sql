@@ -70,6 +70,7 @@ drop view  if exists public.device_overview;
 drop table if exists public.status_events      cascade;
 drop table if exists public.device_status      cascade;
 drop table if exists public.meal_food_mapping  cascade;
+drop table if exists public.meal_menu_template cascade;
 drop table if exists public.service_windows    cascade;
 drop table if exists public.devices            cascade;
 drop function if exists public.tg_device_status_stamp()   cascade;
@@ -77,7 +78,9 @@ drop function if exists public.tg_status_events_stamp()   cascade;
 drop function if exists public.tg_devices_create_status() cascade;
 drop function if exists public.tg_meal_food_mapping_touch() cascade;
 drop function if exists public.in_service_window(timestamptz, text, text, interval) cascade;
+drop function if exists public.last_service_window_start(text, text, timestamptz) cascade;
 drop function if exists public.offline_after() cascade;
+drop function if exists public.meal_template_apply(text, date, date, boolean) cascade;
 drop function if exists public.current_meal_type(text, timestamptz) cascade;
 drop function if exists public.current_meal_date(text, timestamptz) cascade;
 drop function if exists public.meal_mapping_preload(text, text, date) cascade;
@@ -348,11 +351,22 @@ values (null, 'breakfast', time '06:00', time '09:00'),
        (null, 'lunch',     time '11:30', time '14:00'),
        (null, 'dinner',    time '18:30', time '21:00');
 
+-- The edges are ASYMMETRIC, deliberately. An earlier version widened the
+-- window by 10 minutes at both ends, which alarmed at both edges of every
+-- meal: at 05:50 the window was "open" but devices had not booted
+-- (updated_at = last night -> offline true until the first report), and at
+-- 21:00-21:10 devices were legitimately powered down but still "expected".
+-- Three windows a day, two edges each -- the fleet cried wolf six times
+-- daily, which trains people to ignore the one alarm that matters.
+--
+-- `margin` is the boot grace: how long after opening before absence is
+-- judged. 90 s covers power-on + WiFi join + first PATCH. The close is
+-- sharp: a device that stops at ends_at is asleep, not missing.
 create or replace function public.in_service_window(
   at_ts  timestamptz,
   tz     text,
   dev_id text     default null,
-  margin interval default interval '10 minutes'
+  margin interval default interval '90 seconds'
 ) returns boolean language sql stable set search_path = '' as $$
   with local_now as (
     select (at_ts at time zone coalesce(tz, 'UTC'))::time as t
@@ -367,9 +381,49 @@ create or replace function public.in_service_window(
                          where x.device_id = dev_id)
   )
   select coalesce(bool_or(
-           (select t from local_now) >= (a.starts_at - margin)
-       and (select t from local_now) <= (a.ends_at   + margin)), false)
+           (select t from local_now) >= (a.starts_at + margin)
+       and (select t from local_now) <= a.ends_at), false)
     from applicable a;
+$$;
+
+-- When did the most recently COMPLETED service window start, in absolute
+-- time? The anchor for missed_last_service: a device whose updated_at
+-- precedes it slept through a whole window it should have attended --
+-- which, unlike plain staleness, is a fault the dark hours cannot excuse.
+--
+-- Anchored on the window START, not its end, so staff powering a station
+-- down early never flags it: reporting at any point during the window
+-- clears the device. Evaluated in the device's own timezone; (date + time)
+-- AT TIME ZONE tz makes a 21:00 IST dinner that is already tomorrow in UTC
+-- resolve correctly. Today's and yesterday's instances suffice: the
+-- service_window_order CHECK forces every window to close the same local
+-- day it opens, so yesterday always contributes a completed candidate and
+-- the result is never NULL for a device with any applicable window.
+create or replace function public.last_service_window_start(
+  tz     text,
+  dev_id text        default null,
+  at_ts  timestamptz default now()
+) returns timestamptz language sql stable set search_path = '' as $$
+  with applicable as (
+    select w.starts_at, w.ends_at from public.service_windows w
+      where w.device_id = dev_id
+    union all
+    select w.starts_at, w.ends_at from public.service_windows w
+      where w.device_id is null
+        and not exists (select 1 from public.service_windows x
+                         where x.device_id = dev_id)
+  ),
+  local_day as (
+    select (at_ts at time zone coalesce(tz, 'UTC'))::date as d
+  ),
+  candidates as (
+    select ((ld.d - n) + a.starts_at) at time zone coalesce(tz, 'UTC') as w_start,
+           ((ld.d - n) + a.ends_at)   at time zone coalesce(tz, 'UTC') as w_end
+      from applicable a
+     cross join local_day ld
+     cross join generate_series(0, 1) n
+  )
+  select max(w_start) from candidates where w_end <= at_ts;
 $$;
 
 -- How long a device may be silent, while it is SUPPOSED to be reporting, before
@@ -486,10 +540,52 @@ create trigger meal_food_mapping_touch
   before update on public.meal_food_mapping
   for each row execute function public.tg_meal_food_mapping_touch();
 
--- Preload a mapping from the most recent previous meal of the same type and
--- location, so an admin edits differences instead of retyping five dishes.
--- Today's Lunch inherits yesterday's Lunch; tomorrow's Breakfast inherits
--- today's. Nothing at all if there is no history -- the UI starts empty.
+-- The fixed weekly menu, per weekday. Configuration that PRODUCES
+-- meal_food_mapping rows; never itself the menu -- the dashboard views keep
+-- reading the dated table and nothing else. A weekday-keyed template has no
+-- date, so if the views resolved dishes from it directly, a whole service
+-- could pass with a dish name on screen and no dated row behind it, after
+-- which the historical join returns NULL for that day forever and next
+-- year's template edit would silently rewrite what "was served" last
+-- Tuesday. The template reaches the dashboard only by being MATERIALISED:
+-- the editor's Save, or meal_template_apply() (section 6b).
+--
+-- weekday is 0-6 with 0 = Sunday -- Postgres extract(dow) AND JavaScript
+-- Date.getDay(), so neither side converts. isodow (1=Mon..7=Sun) was
+-- rejected: that off-by-one serves Monday's menu on Sunday and survives
+-- testing until a week boundary.
+create table public.meal_menu_template (
+  id         bigint generated always as identity,
+
+  -- 'R' excluded: reserved units occupy no serving position, so a template
+  -- row there could only be a mistake -- and one that would break
+  -- smoke_test's carry-forward fixture, which deliberately uses 'R' as a
+  -- location no real menu touches.
+  location   text     not null check (location in ('D','M','T')),
+  weekday    smallint not null check (weekday between 0 and 6),
+  meal_type  text     not null check (meal_type in ('Breakfast','Lunch','Dinner')),
+  food_slot  smallint not null check (food_slot between 1 and 8),
+
+  -- Same CHECK as the dated table, for the same reason: a blank name is
+  -- not a mapping, and clearing a slot is a DELETE.
+  food_name  text     not null check (length(btrim(food_name)) > 0),
+
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+
+  constraint meal_menu_template_pk
+    primary key (location, weekday, meal_type, food_slot),
+  constraint meal_menu_template_id_key unique (id)
+);
+
+create trigger meal_menu_template_touch
+  before update on public.meal_menu_template
+  for each row execute function public.tg_meal_food_mapping_touch();
+
+-- Preload a mapping: saved rows for the exact date first; else, for
+-- today-or-future dates, the weekly template for that weekday; else the
+-- most recent previous meal of the same type and location (carry-forward).
+-- Nothing at all if there is no history -- the UI starts empty.
 --
 -- `is_saved` is why this is a function and not a plain query, and the UI MUST act
 -- on it. A preloaded form is pixel-identical to a saved one, so without the flag
@@ -513,6 +609,19 @@ create or replace function public.meal_mapping_preload(
        and m.meal_type = p_meal_type
        and m.meal_date = p_meal_date
   ),
+  -- The weekly template, for TODAY-OR-FUTURE dates only. source_date is the
+  -- target date itself -- the marker the UI reads as "from the template"
+  -- (carry-forward always carries an earlier date). Past gaps never see the
+  -- template: what was probably served then is what was served around it,
+  -- not what this week's configuration says.
+  templ as (
+    select t.food_slot, t.food_name, p_meal_date as source_date, false as is_saved
+      from public.meal_menu_template t
+     where t.location  = p_location
+       and t.meal_type = p_meal_type
+       and t.weekday   = extract(dow from p_meal_date)::smallint
+       and p_meal_date >= public.current_meal_date('Asia/Kolkata')
+  ),
   previous as (
     select m.food_slot, m.food_name, m.meal_date as source_date, false as is_saved
       from public.meal_food_mapping m
@@ -528,18 +637,151 @@ create or replace function public.meal_mapping_preload(
   )
   select * from exact
   union all
+  select * from templ    where not exists (select 1 from exact)
+  union all
   select * from previous where not exists (select 1 from exact)
+                           and not exists (select 1 from templ)
   order by food_slot
 $$;
 
 -- ---------------------------------------------------------------------
+-- 6b. meal_menu_template -- the fixed weekly menu, per weekday.
+--
+-- Configuration that PRODUCES meal_food_mapping rows; never itself the
+-- menu. The dashboard views keep reading the dated table and nothing
+-- else: a weekday-keyed template has no date, so if the views resolved
+-- dishes from it directly, a whole service could pass with a dish name on
+-- screen and no dated row behind it -- after which the historical join in
+-- docs/meal_mapping.md returns NULL for that day forever, and next year's
+-- template edit would silently rewrite what "was served" last Tuesday.
+-- The template reaches the dashboard only by being MATERIALISED: the
+-- editor's Save, or meal_template_apply() over a date range.
+--
+-- weekday is 0-6 with 0 = Sunday -- Postgres extract(dow) AND JavaScript
+-- Date.getDay(), so neither side converts. isodow (1=Mon..7=Sun) was
+-- rejected: that off-by-one serves Monday's menu on Sunday and survives
+-- testing until a week boundary.
+--
+-- Location 'R' is excluded: reserved units occupy no serving position, so
+-- a template row there could only be a mistake -- and one that would break
+-- smoke_test's carry-forward fixture, which deliberately uses 'R' as a
+-- location no real menu touches.
+--
+-- (The table itself is created in section 6, before meal_mapping_preload:
+-- SQL-language function bodies are validated at CREATE time, so the
+-- template must exist before the preload that reads it.)
+-- ---------------------------------------------------------------------
+
+-- Freeze the template into dated rows -- "apply this week" is this, called
+-- with today .. today+6.
+--
+--   - Past dates are refused outright: writing today's template into last
+--     month would fabricate history as ordinary, unmarked rows -- the
+--     exact corruption the date key exists to prevent.
+--   - Skips at MEAL granularity: if ANY row exists for (location, date,
+--     meal), that whole meal is left alone. Row-level filling looked
+--     friendlier but silently resurrects a slot someone deliberately
+--     DELETEd ("no dal today"), and does it as a saved row nobody typed.
+--   - p_overwrite := true resets each meal in the range to the template
+--     exactly (delete then insert); the UI gates it behind a confirm.
+--   - Range capped at 31 days: a fat-fingered year would write ~5k rows.
+--
+-- Runs as the INVOKER: authenticated's own grants on meal_food_mapping
+-- authorise the writes, so this adds no privilege anywhere.
+create or replace function public.meal_template_apply(
+  p_location  text,
+  p_from      date,
+  p_to        date,
+  p_overwrite boolean default false
+) returns table (
+  meal_date   date,
+  meal_type   text,
+  written     integer,
+  skipped     boolean
+) language plpgsql set search_path = '' as $$
+declare
+  v_today date := public.current_meal_date('Asia/Kolkata');
+  v_date  date;
+  v_meal  text;
+  v_n     integer;
+begin
+  if p_from is null or p_to is null or p_location is null then
+    raise exception 'meal_template_apply: location and both dates are required';
+  end if;
+  if p_from < v_today then
+    raise exception 'meal_template_apply: % is in the past -- the template must never rewrite history', p_from;
+  end if;
+  if p_to < p_from then
+    raise exception 'meal_template_apply: range is backwards (% .. %)', p_from, p_to;
+  end if;
+  if p_to - p_from > 31 then
+    raise exception 'meal_template_apply: range is % days; the cap is 31', p_to - p_from;
+  end if;
+
+  for v_date in select d::date from generate_series(p_from, p_to, interval '1 day') d loop
+    foreach v_meal in array array['Breakfast','Lunch','Dinner'] loop
+      if not exists (select 1 from public.meal_menu_template t
+                      where t.location = p_location
+                        and t.weekday  = extract(dow from v_date)::smallint
+                        and t.meal_type = v_meal) then
+        continue;
+      end if;
+
+      -- Today's ALREADY-COMPLETED meals are history too, just very recent
+      -- history: writing the template into this morning's Breakfast at 3pm
+      -- fabricates a served meal nobody recorded. Skip them -- reported as
+      -- skipped so the summary does not silently under-deliver.
+      if v_date = v_today
+         and exists (select 1 from public.service_windows w
+                      where w.device_id is null
+                        and initcap(w.label) = v_meal
+                        and (now() at time zone 'Asia/Kolkata')::time > w.ends_at) then
+        meal_date := v_date; meal_type := v_meal; written := 0; skipped := true;
+        return next;
+        continue;
+      end if;
+
+      if not p_overwrite
+         and exists (select 1 from public.meal_food_mapping m
+                      where m.location = p_location
+                        and m.meal_date = v_date
+                        and m.meal_type = v_meal) then
+        meal_date := v_date; meal_type := v_meal; written := 0; skipped := true;
+        return next;
+        continue;
+      end if;
+
+      if p_overwrite then
+        delete from public.meal_food_mapping m
+         where m.location = p_location
+           and m.meal_date = v_date
+           and m.meal_type = v_meal;
+      end if;
+
+      insert into public.meal_food_mapping
+             (location, meal_type, meal_date, food_slot, food_name)
+      select t.location, t.meal_type, v_date, t.food_slot, t.food_name
+        from public.meal_menu_template t
+       where t.location = p_location
+         and t.weekday  = extract(dow from v_date)::smallint
+         and t.meal_type = v_meal;
+      get diagnostics v_n = row_count;
+
+      meal_date := v_date; meal_type := v_meal; written := v_n; skipped := false;
+      return next;
+    end loop;
+  end loop;
+end $$;
+
+-- ---------------------------------------------------------------------
 -- 7. Row-level security
 -- ---------------------------------------------------------------------
-alter table public.devices           enable row level security;
-alter table public.device_status     enable row level security;
-alter table public.status_events     enable row level security;
-alter table public.service_windows   enable row level security;
-alter table public.meal_food_mapping enable row level security;
+alter table public.devices            enable row level security;
+alter table public.device_status      enable row level security;
+alter table public.status_events      enable row level security;
+alter table public.service_windows    enable row level security;
+alter table public.meal_food_mapping  enable row level security;
+alter table public.meal_menu_template enable row level security;
 
 -- devices: no anon policy at all, so anon is denied everything. The foreign
 -- keys from the other tables still work -- referential integrity checks
@@ -557,6 +799,11 @@ create policy devices_update_staff on public.devices
 -- so granting anon access would hand every field unit the whole site's
 -- configuration for no benefit.
 create policy meal_food_mapping_rw_staff on public.meal_food_mapping
+  for all to authenticated using (true) with check (true);
+
+-- meal_menu_template: same posture, same argument -- a device stores a slot
+-- number and never learns the menu, let alone the whole week's.
+create policy meal_menu_template_rw_staff on public.meal_menu_template
   for all to authenticated using (true) with check (true);
 
 -- device_status: the device UPDATEs only -- there is no INSERT policy because
@@ -595,11 +842,12 @@ create policy service_windows_select_staff on public.service_windows
 --    table with ALL granted to anon via ALTER DEFAULT PRIVILEGES. Revoke
 --    first; missing this is the easiest way to believe you have RLS and not.
 -- ---------------------------------------------------------------------
-revoke all on public.devices           from anon, authenticated, public;
-revoke all on public.device_status     from anon, authenticated, public;
-revoke all on public.status_events     from anon, authenticated, public;
-revoke all on public.service_windows   from anon, authenticated, public;
-revoke all on public.meal_food_mapping from anon, authenticated, public;
+revoke all on public.devices            from anon, authenticated, public;
+revoke all on public.device_status      from anon, authenticated, public;
+revoke all on public.status_events      from anon, authenticated, public;
+revoke all on public.service_windows    from anon, authenticated, public;
+revoke all on public.meal_food_mapping  from anon, authenticated, public;
+revoke all on public.meal_menu_template from anon, authenticated, public;
 
 -- Device write path.
 --
@@ -639,6 +887,9 @@ grant update (location, food_slot, label, timezone)
 -- sequence ACL check, and the id cannot be supplied by a client.
 grant select, insert, update, delete on public.meal_food_mapping to authenticated;
 
+-- The weekly template is staff configuration like the menu itself.
+grant select, insert, update, delete on public.meal_menu_template to authenticated;
+
 revoke all on function public.tg_device_status_stamp()   from public, anon, authenticated;
 revoke all on function public.tg_status_events_stamp()   from public, anon, authenticated;
 revoke all on function public.tg_devices_create_status() from public, anon, authenticated;
@@ -649,12 +900,20 @@ revoke all on function public.offline_after() from public, anon;
 revoke all on function public.current_meal_type(text, timestamptz) from public, anon;
 revoke all on function public.current_meal_date(text, timestamptz) from public, anon;
 revoke all on function public.meal_mapping_preload(text, text, date) from public, anon;
+revoke all on function public.last_service_window_start(text, text, timestamptz)
+  from public, anon;
+revoke all on function public.meal_template_apply(text, date, date, boolean)
+  from public, anon;
 grant execute on function public.in_service_window(timestamptz, text, text, interval)
+  to authenticated;
+grant execute on function public.last_service_window_start(text, text, timestamptz)
   to authenticated;
 grant execute on function public.offline_after() to authenticated;
 grant execute on function public.current_meal_type(text, timestamptz) to authenticated;
 grant execute on function public.current_meal_date(text, timestamptz) to authenticated;
 grant execute on function public.meal_mapping_preload(text, text, date) to authenticated;
+grant execute on function public.meal_template_apply(text, date, date, boolean)
+  to authenticated;
 
 -- ---------------------------------------------------------------------
 -- 9. Dashboard views.
@@ -702,7 +961,35 @@ select d.device_id,
 
        s.stack_count, s.stack_status, s.levels,
        s.sensors_online, s.battery_mv, s.battery_level, s.charging,
-       s.uptime_s, s.firmware, s.mac
+       s.uptime_s, s.firmware, s.mac,
+
+       -- Slept through the most recently completed service window. Unlike
+       -- `offline` this survives the dark hours: a device dead since Tuesday
+       -- stays flagged on Friday morning, instead of becoming
+       -- indistinguishable from a healthy unit between meals. Appended LAST
+       -- so the live database's CREATE OR REPLACE VIEW (which cannot reorder
+       -- columns) and this rebuild agree exactly. Coalesced because a NULL
+       -- anchor (no applicable window at all) must read "not flagged".
+       --
+       -- GATED ON DEPLOYMENT: a unit parked at 'R' or stripped of its slot
+       -- (the swap-a-failed-board workflow) keeps reported = true with a
+       -- frozen updated_at forever, and without the gate it would carry a
+       -- permanent fleet-wide alarm only reset_spares.sql could clear. A
+       -- unit that serves no position has no service to miss.
+       --
+       -- KNOWN LIMITS, both deliberate: a site holiday flags every deployed
+       -- device until the next served meal; and a device that died MIDWAY
+       -- through a window is unflagged from that window's close to the next
+       -- window's open -- anchoring on the window END instead would
+       -- false-alarm every time staff power a station down early. It was
+       -- red while its window ran (`offline`) and goes red again the moment
+       -- the next one opens.
+       coalesce(coalesce(s.reported, false)
+                and d.location in ('D','M','T')
+                and d.food_slot is not null
+                and s.updated_at <
+                    public.last_service_window_start(d.timezone, d.device_id),
+                false) as missed_last_service
   from public.devices d
   left join public.device_status s using (device_id)
   left join public.meal_food_mapping m
@@ -750,7 +1037,18 @@ select d.location,
        bool_or(coalesce(s.reported, false)
                and public.in_service_window(now(), d.timezone, d.device_id)
                and s.updated_at < now() - public.offline_after()) as any_offline,
-       min(s.updated_at)                                       as oldest_update
+       min(s.updated_at)                                       as oldest_update,
+
+       -- Some stack at this position slept through the last completed
+       -- window. The stock screen keeps the last count but must say it is
+       -- last-known, not live. Appended last -- see device_overview, whose
+       -- deployment gate is restated here so the two cannot drift.
+       bool_or(coalesce(coalesce(s.reported, false)
+               and d.location in ('D','M','T')
+               and d.food_slot is not null
+               and s.updated_at <
+                   public.last_service_window_start(d.timezone, d.device_id),
+               false))                                         as any_missed_service
   from public.devices d
   left join public.device_status s using (device_id)
   left join public.meal_food_mapping m

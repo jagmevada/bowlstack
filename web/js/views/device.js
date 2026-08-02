@@ -15,8 +15,8 @@ import { h, badge, empty, banner, levelColumn, copyText, fillSlot } from '../ui.
 import { unwrap, describeError } from '../supa.js';
 import { stepChart, statusTimeline, STATUS_STYLE } from '../chart.js';
 import {
-  batteryInfo, deviceStack, deviceSeverity, positionLabel, serviceState,
-  fmtRelative, fmtDateTime, fmtUptime,
+  batteryInfo, deviceStack, deviceSeverity, deviceOffline, positionLabel,
+  serviceState, fmtRelative, fmtDateTime, fmtUptime,
 } from '../domain.js';
 import { APP_VERSION } from '../version.js';
 
@@ -66,6 +66,12 @@ export function renderDevice(state, params, ctx) {
     frag.append(banner('critical', '✕',
       h('b', {}, 'Offline during service. '),
       `Should be reporting and is not — last update ${fmtRelative(dev.updated_at)}.`));
+  } else if (dev.missed_last_service) {
+    frag.append(banner('critical', '✕',
+      h('b', {}, 'Missed the last service. '),
+      `Did not report at all during the most recently completed service window — `,
+      `last heard ${fmtRelative(dev.updated_at)} (${fmtDateTime(dev.updated_at, tz)}). `,
+      'Values below are its last known state.'));
   } else if (dev.data_is_stale) {
     frag.append(banner('info', '◷',
       h('b', {}, 'Outside service hours. '),
@@ -93,9 +99,22 @@ export function renderDevice(state, params, ctx) {
     h('div', { style: 'display:flex;gap:1rem;align-items:center;margin-top:.5rem' },
       levelColumn(dev.levels, true),
       h('div', {},
-        h('div', { class: 'hero' }, stack.text),
+        // The critical banner above already carries the glyph and the word,
+        // so the red here is an accelerator, not a lone colour signal. Only
+        // a real count is reddened — `!` and `—` are not last values.
+        h('div', {
+          class: 'hero'
+            + (deviceOffline(dev) && (stack.kind === 'count' || stack.kind === 'bound')
+                ? ' is-offline' : ''),
+        }, stack.text),
         h('div', { class: 'muted', style: 'font-size:.82rem' },
-          stack.note || `of 4 bowls · ${dev.stack_status || 'no status'}`))),
+          // "Last known" prefixes the note rather than replacing it: a stale
+          // lower bound is still a lower bound, and hiding the degraded/fault
+          // explanation because the device also went silent would drop the
+          // more actionable half of the story.
+          deviceOffline(dev)
+            ? `Last known — ${fmtRelative(dev.updated_at)}${stack.note ? ` · ${stack.note}` : ''}`
+            : stack.note || `of 4 bowls · ${dev.stack_status || 'no status'}`))),
     h('div', { class: 'level-rows', style: 'margin-top:.75rem' },
       ...(dev.levels || []).map((v, i) =>
         h('div', { class: 'level-row' },

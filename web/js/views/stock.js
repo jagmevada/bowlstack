@@ -14,7 +14,7 @@
 import { h, badge, empty, banner } from '../ui.js';
 import {
   LOCATION_NAMES, SERVING_LOCATIONS, slotStock, stockSeverity, deviceStack,
-  fmtClock, fmtRelative, serviceState,
+  deviceOffline, slotOffline, fmtClock, fmtRelative, serviceState,
 } from '../domain.js';
 
 export function renderStock(state) {
@@ -28,6 +28,24 @@ export function renderStock(state) {
     const k = `${d.location}|${d.food_slot}`;
     if (!byPosition.has(k)) byPosition.set(k, []);
     byPosition.get(k).push(d);
+  }
+
+  // Name the silent stations out loud. `deviceOffline` is the server's two
+  // flags and nothing else, so this cannot false-alarm on ordinary dark
+  // hours — a device between meals is neither offline nor missed. Scoped to
+  // DEPLOYED devices because this screen only draws deployed positions: a
+  // banner naming a unit with no card here would send someone hunting for a
+  // station that does not exist. Parked units still surface on Health.
+  const silent = devices
+    .filter(d => SERVING_LOCATIONS.includes(d.location) && d.food_slot != null)
+    .filter(deviceOffline)
+    .map(d => d.device_id).sort();
+  if (silent.length) {
+    const named = silent.slice(0, 6).join(', ')
+      + (silent.length > 6 ? ` and ${silent.length - 6} more` : '');
+    frag.append(banner('critical', '✕',
+      h('b', {}, `${silent.length} device${silent.length === 1 ? ' is' : 's are'} offline. `),
+      `${named} — showing last known counts, in red.`));
   }
 
   if (!inService) {
@@ -72,6 +90,11 @@ function slotCard(sl, stacks, inService, tz) {
   const okStacks = stacks.filter(d => d.stack_status === 'ok' && d.reported).length;
   const severity = stock.kind === 'count' ? stockSeverity(stock.trusted, okStacks) : stock.severity;
 
+  // The server's flags are the authority; the per-device rows only quantify
+  // the wording. Never derived from updated_at.
+  const offlineStacks = stacks.filter(deviceOffline).length;
+  const anyOffline = slotOffline(sl) || offlineStacks > 0;
+
   const card = h('div', { class: 'slot' });
 
   card.append(h('div', { class: 'slot-top' },
@@ -91,16 +114,35 @@ function slotCard(sl, stacks, inService, tz) {
     card.append(h('div', { class: 'slot-figure' },
       h('span', { class: 'slot-nodata' }, 'No data')));
   } else {
+    // An offline stack's last count is KEPT — blanking it would send someone
+    // to a station the screen just went silent about — but it turns red with
+    // a dashed underline and a "last known" caption. The fault and no-data
+    // branches above are untouched: they render no numeral, so there is
+    // nothing to redden and no number is ever put back where those withheld
+    // one.
     card.append(h('div', { class: 'slot-figure' },
-      h('span', { class: `slot-count${severity === 'critical' ? ' is-critical' : ''}` },
-        sl.any_degraded ? `≥${stock.trusted}` : String(stock.trusted)),
-      h('span', { class: 'slot-of' }, `of ${stock.capacity} bowls`)));
+      h('span', {
+        class: 'slot-count'
+          + (severity === 'critical' ? ' is-critical' : '')
+          + (anyOffline ? ' is-offline' : ''),
+      }, sl.any_degraded ? `≥${stock.trusted}` : String(stock.trusted)),
+      h('span', { class: 'slot-of' }, `of ${stock.capacity} bowls`),
+      anyOffline
+        ? h('span', {
+            class: 'slot-stale',
+            title: 'A stack here stopped reporting during service. This is the last count it sent.',
+          }, h('span', { class: 'g', 'aria-hidden': 'true' }, '✕'), 'last known')
+        : null));
   }
 
   const pct = stock.capacity && stock.trusted != null
     ? Math.max(0, Math.min(100, (stock.trusted / stock.capacity) * 100)) : 0;
-  card.append(h('div', { class: severity === 'idle' ? 'meter' : `meter is-${severity}` },
-    h('i', { style: `width:${pct}%` })));
+  // The meter keeps its severity hue — recolouring the fill would lie about
+  // quantity — and gains a hatch that marks it last-known.
+  card.append(h('div', {
+    class: (severity === 'idle' ? 'meter' : `meter is-${severity}`)
+      + (anyOffline ? ' is-stale' : ''),
+  }, h('i', { style: `width:${pct}%` })));
 
   const notes = h('div', { class: 'slot-notes' });
   if (sl.any_fault) {
@@ -111,7 +153,12 @@ function slotCard(sl, stacks, inService, tz) {
     }
   }
   if (sl.any_degraded) notes.append(badge('warning', '◐', 'Lower bound'));
-  if (sl.any_offline) notes.append(badge('critical', '✕', 'Stack offline'));
+  if (anyOffline) {
+    notes.append(badge('critical', '✕',
+      offlineStacks && stacks.length && offlineStacks < stacks.length
+        ? `Stack offline — ${offlineStacks} of ${stacks.length}`
+        : 'Stack offline'));
+  }
   if (sl.any_battery_warn) notes.append(badge('warning', '▮', 'Battery'));
   if (Number(sl.devices_reported) < Number(sl.devices)) {
     notes.append(badge('warning', '◔',
@@ -130,22 +177,26 @@ function slotCard(sl, stacks, inService, tz) {
     const pills = h('div', { class: 'slot-notes' });
     for (const d of stacks.sort((a, b) => a.device_id.localeCompare(b.device_id))) {
       const st = deviceStack(d);
-      const cls = d.offline ? 'critical'
-                : st.kind === 'fault' ? 'critical'
+      const gone = deviceOffline(d);
+      // A fault beats offline on the glyph: "check the sensors" is the more
+      // actionable instruction, and the pill keeps the word `offline` anyway.
+      const cls = st.kind === 'fault' || gone ? 'critical'
                 : st.kind === 'bound' ? 'warning'
                 : st.kind === 'none' ? 'idle' : 'good';
-      const glyph = d.offline ? '✕'
-                  : st.kind === 'fault' ? '▲'
+      const glyph = st.kind === 'fault' ? '▲'
+                  : gone ? '✕'
                   : st.kind === 'bound' ? '◐'
                   : st.kind === 'none' ? '◌' : '●';
       pills.append(h('a', {
         class: `badge is-${cls}`,
         href: `#/device/${encodeURIComponent(d.device_id)}`,
         style: 'text-decoration:none',
-        title: `${d.device_id} — ${d.offline ? 'offline' : st.note || 'reading OK'} · updated ${fmtRelative(d.updated_at)}`,
+        title: `${d.device_id} — ${gone ? 'offline; showing its last value' : st.note || 'reading OK'} · updated ${fmtRelative(d.updated_at)}`,
       },
         h('span', { class: 'g', 'aria-hidden': 'true' }, glyph),
-        `${d.device_id.replace(/^BWL-/, '')} · ${d.offline ? 'offline' : st.text}`));
+        // The last value is kept even here — "014 · 3 offline", never a word
+        // in place of the number.
+        `${d.device_id.replace(/^BWL-/, '')} · ${st.text}${gone ? ' offline' : ''}`));
     }
     card.append(pills);
   }

@@ -64,6 +64,7 @@ ASSIGN.forEach(([loc, slot, n], i) => {
   const fault = id === 'BWL-002';
   const degr = id === 'BWL-008';
   const off = id === 'BWL-014';
+  const missed = id === 'BWL-021';   // slept through the last completed window
   const noBatt = id === 'BWL-019';
   const critB = id === 'BWL-005';
   const never = id === 'BWL-024';
@@ -79,9 +80,10 @@ ASSIGN.forEach(([loc, slot, n], i) => {
     label: `${AREA[loc]} slot ${slot}`, timezone: 'Asia/Kolkata',
     current_food: MENU[loc][slot], current_meal: 'Lunch',
     reported: !never,
-    updated_at: never ? null : iso(now - (off ? 20 * 60_000 : 25_000)),
+    updated_at: never ? null : iso(now - (off ? 20 * 60_000 : missed ? 30 * 3600_000 : 25_000)),
     stale_for: '00:00:25', in_service: true,
     offline: off, awaiting_deployment: never, data_is_stale: false,
+    missed_last_service: missed,
     stack_count: never ? null : levels.filter(l => l === 'present').length,
     stack_status: never ? null : fault ? 'discontiguous' : degr ? 'degraded' : 'ok',
     levels: never ? null : levels,
@@ -105,7 +107,7 @@ for (let n = 25; n <= 32; n++) {
     offline: false, awaiting_deployment: true, data_is_stale: false,
     stack_count: null, stack_status: null, levels: null, sensors_online: null,
     battery_mv: null, battery_level: null, charging: null, uptime_s: null,
-    firmware: null, mac: null,
+    firmware: null, mac: null, missed_last_service: false,
   });
 }
 
@@ -129,6 +131,7 @@ for (const loc of ['D', 'M', 'T']) {
       any_battery_warn: mine.some(d => ['low', 'critical'].includes(d.battery_level)),
       any_offline: mine.some(d => d.offline),
       oldest_update: rep.map(d => d.updated_at).sort()[0] ?? null,
+      any_missed_service: mine.some(d => d.missed_last_service),
     });
   }
 }
@@ -137,6 +140,7 @@ slots.push({
   devices: 1, devices_reported: 0, bowls_capacity: 4, bowls_trusted: null,
   bowls_reported: null, any_fault: false, any_degraded: false,
   any_battery_warn: false, any_offline: false, oldest_update: null,
+  any_missed_service: false,
 });
 
 // status_events, with a seq gap, a second boot_id and one backdated row.
@@ -162,8 +166,18 @@ const preload = [1, 2, 3, 4, 5].map(s => ({
   food_slot: s, food_name: MENU.D[s], source_date: '2026-07-26', is_saved: false,
 }));
 
+// Weekly template fixture: D has a full Lunch row set for every weekday.
+const templateRows = [];
+for (let wd = 0; wd <= 6; wd++) {
+  for (let slot = 1; slot <= 5; slot++) {
+    templateRows.push({ location: 'D', weekday: wd, meal_type: 'Lunch',
+                        food_slot: slot, food_name: `T-${MENU.D[slot]}` });
+  }
+}
+
 // ---- fake PostgREST ---------------------------------------------------
 const calls = [];
+let preloadSourceDate = null;   // set per-test to mark a template draft
 function builder(table) {
   const rec = { table, filters: [] };
   calls.push(rec);
@@ -176,6 +190,7 @@ function builder(table) {
       : table === 'slot_overview' ? slots
       : table === 'status_events' ? events
       : table === 'meal_food_mapping' ? [{ meal_type: 'Lunch', food_slot: 1, food_name: 'Rice' }]
+      : table === 'meal_menu_template' ? templateRows
       : [];
     return Promise.resolve({ data, error: null }).then(res, rej);
   };
@@ -192,7 +207,18 @@ window.supabase = {
     from: builder,
     rpc: (name, args) => {
       calls.push({ rpc: name, args });
-      return Promise.resolve({ data: preload, error: null });
+      if (name === 'meal_template_apply') {
+        return Promise.resolve({ data: [
+          { meal_date: args.p_from, meal_type: 'Lunch', written: 5, skipped: false },
+          { meal_date: args.p_from, meal_type: 'Dinner', written: 0, skipped: true },
+        ], error: null });
+      }
+      return Promise.resolve({
+        data: preloadSourceDate
+          ? preload.map(r => ({ ...r, source_date: preloadSourceDate }))
+          : preload,
+        error: null,
+      });
     },
     auth: {
       getSession: async () => ({ data: { session }, error: null }),
@@ -273,7 +299,10 @@ ok('app pane visible', !hidden('app'));
 ok('queried device_overview', calls.some(c => c.table === 'device_overview'));
 ok('queried slot_overview', calls.some(c => c.table === 'slot_overview'));
 ok('fleet chips rendered', window.document.getElementById('fleet-chips').children.length >= 5);
-ok('offline chip counts 1', /1offline/.test(window.document.getElementById('fleet-chips').textContent));
+// 2 = BWL-014 (offline mid-window) + BWL-021 (missed the last window): the
+// chip counts everything not talking when it should be.
+ok('offline chip counts both silent devices',
+  /2offline/.test(window.document.getElementById('fleet-chips').textContent));
 ok('meal indicator live', /Lunch/.test(window.document.getElementById('meal-indicator').textContent));
 {
   const v = window.document.getElementById('app-version');
@@ -292,6 +321,36 @@ ok('offline stack surfaced', text().includes('Stack offline'));
 ok('stack pills link to devices', view.querySelector('a[href^="#/device/"]') !== null);
 ok('capacity comes from the view', text().includes('of 4 bowls') && text().includes('of 12 bowls'));
 
+console.log('\n[offline: last value kept, in red]');
+{
+  // D5 holds BWL-021 (missed the last completed window) and BWL-022 (fine).
+  const cards = [...view.querySelectorAll('.slot')];
+  const d5 = cards.find(c => c.textContent.includes('Khichdi'));
+  ok('missed-service slot keeps its number', d5?.querySelector('.slot-count') !== null);
+  ok('and the number is red', d5?.querySelector('.slot-count.is-offline') !== null);
+  ok('with the last-known caption', /last known/.test(d5?.textContent || ''));
+  ok('and a hatched meter', d5?.querySelector('.meter.is-stale') !== null);
+  ok('badge counts the silent stacks', /Stack offline \u2014 1 of 2/.test(d5?.textContent || ''));
+  ok('the pill keeps the number beside the word',
+    [...(d5?.querySelectorAll('a.badge') || [])].some(a => /\d+ offline/.test(a.textContent)));
+
+  // M2 is BWL-014: offline AND at 0 bowls -- both meanings must coexist.
+  const m2 = cards.find(c => c.querySelector('.slot-count.is-critical.is-offline'));
+  ok('an offline+critical slot carries both classes', m2 != null);
+
+  // The fault and no-data treatments are not regressed: neither renders a
+  // numeral, so neither can have gained a red one.
+  const faultCard = cards.find(c => /Check station/.test(c.textContent));
+  ok('fault slot still shows no count at all', faultCard?.querySelector('.slot-count') == null);
+  const noData = cards.find(c => /No data/.test(c.textContent));
+  ok('no-data slot stays grey', noData?.querySelector('.slot-count') == null
+    && noData?.querySelector('.slot-nodata') !== null);
+
+  ok('the banner names the silent devices',
+    /devices are offline|device is offline/.test(text())
+    && /BWL-014/.test(text()) && /BWL-021/.test(text()));
+}
+
 console.log('\n[health]');
 await go('#/health');
 const rows = [...view.querySelectorAll('.dev')];
@@ -301,8 +360,22 @@ ok('fault device near top', rows.slice(0, 3).some(r => r.textContent.includes('B
 ok('awaiting section present', text().includes('Awaiting deployment'));
 ok('no-battery device says No battery', text().includes('No battery'));
 ok('never-reported shows no count', text().includes('Never reported'));
+{
+  const row21 = [...view.querySelectorAll('.dev')].find(r => r.textContent.includes('BWL-021'));
+  ok('missed-service device wears the badge', /Missed last service/.test(row21?.textContent || ''));
+  ok('its last count is red', row21?.querySelector('.dev-count.is-offline') !== null);
+  ok('missed-service sorts into the top three',
+    [...view.querySelectorAll('.dev')].slice(0, 3).some(r => r.textContent.includes('BWL-021')));
+  const row14 = [...view.querySelectorAll('.dev')].find(r => r.textContent.includes('BWL-014'));
+  ok('offline device count is red too', row14?.querySelector('.dev-count.is-offline') !== null);
+  const faultRow = [...view.querySelectorAll('.dev')].find(r => r.textContent.includes('BWL-002'));
+  ok('a fault row never gains the red count', faultRow?.querySelector('.dev-count.is-offline') == null
+    && faultRow?.querySelector('.dev-count.na') !== null);
+}
 await go('#/health?f=offline');
-ok('filter narrows to offline', view.querySelectorAll('.dev').length === 1);
+ok('offline filter includes the missed-service device',
+  view.querySelectorAll('.dev').length === 2
+  && ['BWL-014', 'BWL-021'].every(id => text().includes(id)));
 
 console.log('\n[device]');
 await go('#/device/BWL-008?h=24');
@@ -398,6 +471,104 @@ await go('#/health');
   search.blur();
 
 }
+
+console.log('\n[menu: weekly template]');
+await go('#/menu?loc=D&meal=Lunch&mode=week');
+{
+  ok('mode toggle present and pressed',
+    [...view.querySelectorAll('button')].some(b =>
+      b.textContent === 'Weekly template' && b.getAttribute('aria-pressed') === 'true'));
+  ok('seven day chips', ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+    .every(d => [...view.querySelectorAll('button')].some(b => b.textContent === d)));
+  ok('queried the template table', calls.some(c => c.table === 'meal_menu_template'));
+  ok('coverage map shows entered counts', view.querySelector('table') !== null
+    && /5/.test(view.querySelector('table')?.textContent || ''));
+  ok('slot inputs prefilled from the template',
+    [...view.querySelectorAll('.row-form input[type=text]')].some(i => i.value === 'T-Rice'));
+  ok('no literal null leaked into the url', !location.hash.includes('null'));
+
+  const saveBtn = [...view.querySelectorAll('button')].find(b => b.textContent === 'Save template');
+  ok('save button present', !!saveBtn);
+  if (saveBtn) {
+    saveBtn.dispatchEvent(new window.Event('click'));
+    await new Promise(r => setTimeout(r, 120));
+    const up = [...calls].reverse().find(c =>
+      c.table === 'meal_menu_template' && c.filters.some(f => f[0] === 'upsert'));
+    ok('template save upserts on its natural key',
+      up?.filters.find(f => f[0] === 'upsert')?.[2]?.onConflict
+        === 'location,weekday,meal_type,food_slot');
+    const payload = up?.filters.find(f => f[0] === 'upsert')?.[1] || [];
+    ok('no blank names, weekday attached',
+      payload.length > 0 && payload.every(r =>
+        r.food_name?.trim() && r.weekday >= 0 && r.weekday <= 6));
+  }
+}
+
+console.log('\n[menu: the day survives every action]');
+// The bug all three reviewers found independently: go() rebuilt the query
+// without `day`, so Save/Reload/Copy and the Area/Meal selects snapped the
+// editor back to today's weekday — an admin editing Wednesday was silently
+// looking at (and then overwriting) Saturday.
+await go('#/menu?loc=D&meal=Lunch&mode=week&day=3');
+{
+  ok('day chip 3 (Wednesday) is pressed',
+    [...view.querySelectorAll('button')].some(b =>
+      b.textContent === 'Wed' && b.getAttribute('aria-pressed') === 'true'));
+  const saveBtn = [...view.querySelectorAll('button')].find(b => b.textContent === 'Save template');
+  saveBtn.dispatchEvent(new window.Event('click'));
+  await new Promise(r => setTimeout(r, 120));
+  ok('day survives Save', /day=3/.test(location.hash), location.hash);
+  ok('still on Wednesday after Save',
+    [...view.querySelectorAll('button')].some(b =>
+      b.textContent === 'Wed' && b.getAttribute('aria-pressed') === 'true'));
+
+  const mealSel = [...view.querySelectorAll('select')].find(sel =>
+    [...sel.options].some(o => o.value === 'Dinner'));
+  mealSel.value = 'Dinner';
+  mealSel.dispatchEvent(new window.Event('change'));
+  await new Promise(r => setTimeout(r, 120));
+  ok('day survives a meal switch', /day=3/.test(location.hash), location.hash);
+}
+
+console.log('\n[menu: copy-weekday really overwrites]');
+await go('#/menu?loc=D&meal=Lunch&mode=week&day=3');
+{
+  const copyBtn = [...view.querySelectorAll('button')].find(b => b.textContent === 'Copy');
+  copyBtn.dispatchEvent(new window.Event('click'));
+  await new Promise(r => setTimeout(r, 150));
+  const del = [...calls].reverse().find(c =>
+    c.table === 'meal_menu_template' && c.filters.some(f => f[0] === 'delete'));
+  ok('copy deletes the target days before writing',
+    !!del && del.filters.some(f => f[0] === 'in' && f[1] === 'weekday'));
+}
+
+console.log('\n[menu: apply template to dates]');
+await go('#/menu?loc=D&meal=Lunch&mode=week');
+{
+  const applyBtn = [...view.querySelectorAll('button')].find(b => b.textContent === 'Apply to dates');
+  ok('apply card present', !!applyBtn);
+  if (applyBtn) {
+    applyBtn.dispatchEvent(new window.Event('click'));
+    await new Promise(r => setTimeout(r, 120));
+    const call = [...calls].reverse().find(c => c.rpc === 'meal_template_apply');
+    ok('calls the apply RPC', !!call);
+    ok('defaults to fill-gaps, never overwrite', call?.args?.p_overwrite === false);
+    ok('scoped to the visible location', call?.args?.p_location === 'D');
+    ok('reports written and skipped meals',
+      /5 dishes written/.test(text()) && /1 meal skipped/.test(text()));
+  }
+}
+
+console.log('\n[menu: template draft in the daily editor]');
+// A preload whose source_date equals the requested date is the template-draft
+// marker; the daily editor must say so rather than claiming a carry-over.
+preloadSourceDate = '2026-08-05';
+await go('#/menu?loc=D&meal=Lunch&date=2026-08-05');
+{
+  ok('template draft banner shown', /From the weekly template/.test(text()));
+  ok('and it does not claim a carry-over', !/Carried over from/.test(text()));
+}
+preloadSourceDate = null;
 
 console.log('\n[health: finding a specific device]');
 await go('#/health?f=offline');

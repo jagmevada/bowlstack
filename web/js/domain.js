@@ -13,6 +13,20 @@ export const MEAL_TYPES = ['Breakfast', 'Lunch', 'Dinner'];
 export const FOOD_SLOTS = [1, 2, 3, 4, 5, 6, 7, 8];
 export const DEFAULT_TZ = 'Asia/Kolkata';
 
+/** Index 0 = Sunday, matching Postgres extract(dow), JS Date.getDay(), and the
+ *  meal_menu_template.weekday column — one convention end to end, because a
+ *  dow/isodow mix-up serves Monday's menu on Sunday and survives testing until
+ *  a week boundary. */
+export const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+/** Weekday of a YYYY-MM-DD service date, 0 = Sunday. Parsed at noon UTC the
+ *  way addDays() already does, so a browser in any timezone lands on the same
+ *  day. (fmtDay parses at local midnight, which is fine for formatting but
+ *  must never be the basis for the weekday.) */
+export function weekdayOf(dateStr) {
+  return new Date(`${dateStr}T12:00:00Z`).getUTCDay();
+}
+
 /** Fleet service windows, for the local-clock fallback in the menu editor only.
  *  Liveness is never computed here — the server owns that (see `offline`). */
 export const SERVICE_WINDOWS = [
@@ -119,6 +133,33 @@ export function stockSeverity(trusted, okStacks) {
   return 'good';
 }
 
+// --- liveness ---------------------------------------------------------
+//
+// Both flags are the SERVER's. Nothing here ever derives its own staleness
+// from updated_at — devices are dark ~16 h a day by design and that
+// arithmetic would false-alarm on every healthy unit.
+//
+//   offline              died mid-window: should be reporting NOW and is not.
+//                        Clears when the window closes.
+//   missed_last_service  slept through the most recently completed service
+//                        window. Survives the dark hours, which is what
+//                        `offline` alone could not do — a device dead since
+//                        Tuesday used to look identical to a healthy one
+//                        between meals.
+//
+// The UI treats either as "offline" (red, last value kept) because the
+// operator's question is the same: this station is not talking.
+
+/** Is this device not reporting when it should be? */
+export function deviceOffline(dev) {
+  return !!(dev.offline || dev.missed_last_service);
+}
+
+/** Is some stack at this dish position not reporting when it should be? */
+export function slotOffline(slot) {
+  return !!(slot.any_offline || slot.any_missed_service);
+}
+
 // --- device severity -------------------------------------------------
 
 /**
@@ -138,6 +179,7 @@ export function deviceSeverity(dev) {
     return { rank: -1, level: 'idle', reasons: ['Awaiting deployment'] };
   }
   if (dev.offline) { rank = Math.max(rank, 100); reasons.push('Offline during service'); }
+  if (dev.missed_last_service) { rank = Math.max(rank, 85); reasons.push('Missed the last service — not reporting'); }
   if (dev.stack_status === 'discontiguous') { rank = Math.max(rank, 90); reasons.push('Impossible level pattern'); }
   if (dev.battery_level === 'critical') { rank = Math.max(rank, 80); reasons.push('Battery critical'); }
   if (dev.battery_level === 'low') { rank = Math.max(rank, 60); reasons.push('Battery low'); }
@@ -182,7 +224,9 @@ export function fleetSummary(devices) {
   };
   for (const d of devices) {
     if (d.awaiting_deployment) { s.awaiting++; continue; }
-    if (d.offline) s.offline++;
+    // The chip counts everything not talking when it should be — the acute
+    // in-window flag and the slept-through-a-window flag alike.
+    if (deviceOffline(d)) s.offline++;
     if (d.stack_status === 'discontiguous') s.fault++;
     if (d.stack_status === 'degraded') s.degraded++;
     if (d.battery_level === 'low' || d.battery_level === 'critical') s.batteryWarn++;

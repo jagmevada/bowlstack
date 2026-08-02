@@ -59,7 +59,8 @@ const { data } = await supabase.from('device_overview').select('*')
 | `updated_at` | timestamptz | last report |
 | `stale_for` | interval | `now() - updated_at` |
 | `in_service` | bool | is it currently within a meal-service window |
-| `offline` | bool | **should be reporting and is not** — the alarm |
+| `offline` | bool | **should be reporting right now and is not** — the in-window alarm |
+| `missed_last_service` | bool | slept through the most recently completed service window — the alarm that survives the dark hours |
 | `awaiting_deployment` | bool | registered, never heard from — not a fault |
 | `data_is_stale` | bool | outside service hours: numbers are last-known, not live |
 | `stack_count` | int | **0–4 bowls — the primary number** |
@@ -80,18 +81,34 @@ const { data } = await supabase.from('device_overview').select('*')
 These distinctions are the difference between a useful dashboard and one that
 cries wolf.
 
-### `offline` vs `awaiting_deployment` vs `data_is_stale`
+### `offline` vs `missed_last_service` vs `awaiting_deployment` vs `data_is_stale`
 
 | State | Meaning | UI treatment |
 | --- | --- | --- |
 | `awaiting_deployment` | registered but never installed | grey / hide from the stock view |
-| `data_is_stale` | outside service hours; last known values | show, marked "as of <time>" |
-| `offline` | **should be reporting and is not** | **alarm** |
+| `data_is_stale` | outside service hours; last known values | show, marked "as of <date time>" |
+| `offline` | should be reporting **right now** and is not (died mid-window) | **alarm**; clears when the window closes |
+| `missed_last_service` | reported nothing during the most recently **completed** window | **alarm**, and it persists between meals |
 
-`offline` is already service-hour aware — it is only true when the device ought
-to be awake. **Do not compute your own staleness alarm from `updated_at`**: at
-16 dark hours a day that would false-alarm on every healthy device and bury the
-one that genuinely failed.
+The two alarms are complementary. `offline` is gated on the service window, so
+outside meals it is false for every device — which is correct, but it made a
+unit dead for six days indistinguishable from a healthy unit between meals.
+`missed_last_service` closes that gap: anchored on the *start* of the last
+completed window (so staff powering a station down early never trips it), gated
+on deployment (a spare parked at `R` has no service to miss), and true until
+the device reports again. The dashboard treats either flag as "offline": the
+last value is kept on screen but rendered red, because blanking it would send
+someone to a station the screen just went silent about.
+
+Known, deliberate limits: a site holiday flags every deployed device until the
+next served meal, and a device that died *midway* through a window is unflagged
+from that window's close until the next one opens (it was red via `offline`
+while its window ran).
+
+**Do not compute your own staleness alarm from `updated_at`**: at 16 dark hours
+a day that would false-alarm on every healthy device and bury the one that
+genuinely failed. Both flags above are computed server-side, service-hour
+aware, in each device's own timezone.
 
 ### `stack_status` — trust the count only when `ok`
 
@@ -234,9 +251,11 @@ supabase.channel('bowlstack')
 
 **How fast is offline?** `offline` goes true once a device that *should* be
 reporting has been silent for `public.offline_after()` — currently **40 s**. With
-a 20 s poll that is **40–60 s** from the device actually dying. Retune it with
-`supabase/set_offline_threshold.sql`; it must stay above the firmware heartbeat
-plus one retry, or healthy devices alarm between their own posts.
+the dashboard's 15 s poll that is **40–55 s** from the device actually dying.
+Retune it with one `CREATE OR REPLACE` of `offline_after()` in the SQL editor;
+it must stay above the firmware heartbeat plus one retry, or healthy devices
+alarm between their own posts. `missed_last_service` needs no threshold at all —
+it flips when a completed window passes with no report.
 
 ---
 
@@ -250,8 +269,10 @@ sum across them. Group by `location`, order by `food_slot`.
 
 Slots are physical positions. **What food sits in slot 3 changes with the meal**
 — breakfast, lunch and dinner rotate through Dal/Kadhi, Rice, Curry, Roti and so
-on. The slot→food mapping is **front-end configuration and is not modelled in
-the database yet** — it is yours to design.
+on. The slot→food mapping lives in `meal_food_mapping` (per date) with a weekly
+plan in `meal_menu_template` (per weekday) — see
+[meal_mapping.md](meal_mapping.md) for the full contract, including why the
+views never read the template directly.
 
 ### Health view
 
@@ -277,7 +298,11 @@ Meal windows (fleet defaults, per-device overrides possible):
 | lunch | 11:30–14:00 |
 | dinner | 18:30–21:00 |
 
-Evaluated in each device's `timezone` with a 10-minute margin at both ends.
+Evaluated in each device's `timezone`. The edges are asymmetric: a **90-second
+boot grace after opening** (power-on + WiFi join + first report) and a **sharp
+close**. The old ±10-minute margin alarmed the whole fleet at both edges of
+every meal — before opening (window "open", devices not yet booted) and after
+close (devices legitimately off, still "expected").
 
 A stack is **0–4** bowls. A device replaced in the field keeps its `device_id`;
 only `mac` changes.
