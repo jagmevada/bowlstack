@@ -531,21 +531,31 @@ ok('lists devices', rows.length >= 24);
 ok('offline device sorts first', rows[0].textContent.includes('BWL-014'), rows[0]?.textContent.slice(0, 40));
 ok('fault device near top', rows.slice(0, 3).some(r => r.textContent.includes('BWL-002')));
 ok('awaiting section present', text().includes('Awaiting deployment'));
-ok('no-battery device says No battery', text().includes('No battery'));
-ok('never-reported shows no count', text().includes('Never reported'));
+// Rows are symbolic now — the words ride tooltips and the device page.
+ok('health rows carry no badge chips',
+  view.querySelectorAll('.dev .badge').length === 0);
+ok('the health legend pairs glyphs with words', view.querySelector('.legend-line') !== null);
+ok('no-battery device shows the dashed empty case',
+  [...view.querySelectorAll('.dev')].find(r => r.textContent.includes('BWL-019'))
+    ?.querySelector('.batt.lvl-none') !== null);
+ok('every deployed row wears a battery glyph',
+  [...view.querySelectorAll('.section')].shift()
+  && [...view.querySelectorAll('.section')][0].querySelectorAll('.dev').length ===
+     [...view.querySelectorAll('.section')][0].querySelectorAll('.dev .batt').length);
+ok('never-reported shows no count',
+  [...view.querySelectorAll('.dev')].find(r => r.textContent.includes('BWL-025'))
+    ?.querySelector('.dev-count.na')?.textContent === '—');
 {
   const row21 = [...view.querySelectorAll('.dev')].find(r => r.textContent.includes('BWL-021'));
-  ok('missed-service device wears the badge', /Missed last service/.test(row21?.textContent || ''));
+  ok('missed-service device wears the ✕ glyph', row21?.querySelector('.st-off') !== null);
+  ok('and its tooltip states the silence', /last service/.test(row21?.title || ''));
   ok('its last count is red', row21?.querySelector('.dev-count.is-offline') !== null);
   ok('missed-service sorts into the top three',
     [...view.querySelectorAll('.dev')].slice(0, 3).some(r => r.textContent.includes('BWL-021')));
-  ok('the row says OFFLINE in words, with the silence stated',
-    /OFFLINE — no telemetry/.test(row21?.textContent || '')
-    && /last known/.test(row21?.textContent || ''));
+  ok('the row itself prints no state words', !/OFFLINE|offline/.test(row21?.textContent || ''));
   const row14 = [...view.querySelectorAll('.dev')].find(r => r.textContent.includes('BWL-014'));
   ok('offline device count is red too', row14?.querySelector('.dev-count.is-offline') !== null);
-  ok('the in-window offline row says it too',
-    /OFFLINE — no telemetry/.test(row14?.textContent || ''));
+  ok('the in-window offline row wears ✕ too', row14?.querySelector('.st-off') !== null);
   const healthy = [...view.querySelectorAll('.dev')].find(r => r.textContent.includes('BWL-001'));
   ok('a healthy row never says OFFLINE', !/OFFLINE/.test(healthy?.textContent || ''));
   const faultRow = [...view.querySelectorAll('.dev')].find(r => r.textContent.includes('BWL-002'));
@@ -573,14 +583,15 @@ ok('degraded filter shows exactly the degraded devices',
   const full = [...view.querySelectorAll('.dev')].find(r => r.textContent.includes('BWL-022'));
   ok('full degraded stack shows plain 4, never >=4',
     full?.querySelector('.dev-count')?.textContent === '4');
-  ok('and says the count is still exact', /count still exact/.test(full?.textContent || ''));
+  ok('and the dead sensor rides its tooltip', /Sensor down/.test(full?.title || '')
+    && full?.querySelector('.st-deg') !== null);
   // Zero sensors online = zero detection: no number at all, however loudly
   // the payload claims one.
   const blind = [...view.querySelectorAll('.dev')].find(r => r.textContent.includes('BWL-023'));
   ok('zero-sensor device shows no count at all',
     blind?.querySelector('.dev-count')?.textContent === '\u2014'
     && blind?.querySelector('.dev-count.na') !== null);
-  ok('its sensors badge tells the real story', /0\/4 sensors/.test(blind?.textContent || ''));
+  ok('its tooltip tells the real sensor story', /0 of 4 sensors/.test(blind?.title || ''));
   ok('no lower-bound claim on a blind device', !/lower bound/i.test(blind?.textContent || ''));
 }
 {
@@ -606,7 +617,8 @@ await go('#/stock');
   const rows = [...view.querySelectorAll('.dev')];
   ok('shows exactly the never-reported devices', rows.length === 9,
     String(rows.length));
-  ok('every row is an awaiting one', rows.every(r => /Never reported|awaiting/.test(r.textContent)));
+  ok('every row is an awaiting one',
+    rows.every(r => r.querySelector('.st-none') && r.querySelector('.dev-count.na')));
   ok('no deployed device leaks in', !rows.some(r => r.textContent.includes('BWL-001')));
   ok('the hidden-count banner stays truthful', /23 of 32 devices hidden/.test(text()));
 }
@@ -626,6 +638,18 @@ ok('buffered event detected', /1 buffered offline/.test(text()));
 ok('event table present', view.querySelector('table tbody tr') !== null);
 ok('fault row shows no count in table',
   [...view.querySelectorAll('table tbody tr')].some(r => /discontiguous/.test(r.textContent) && /—/.test(r.textContent)));
+ok('five history ranges offered',
+  ['2 h', '6 h', '12 h', '1 d', '2 d'].every(l =>
+    [...view.querySelectorAll('.toolbar .ghost')].some(b => b.textContent === l)));
+ok('stack-now draws the levels exactly once',
+  view.querySelectorAll('.level-row').length === 4 && view.querySelector('.levels') === null);
+ok('fault paints blue on the timeline, never red',
+  view.querySelector('svg rect[fill="var(--series-1)"]') !== null);
+ok('the timeline explains blank', /blank = powered off/.test(text()));
+await go('#/device/BWL-021');
+ok('the offline words live on the device page', /Went dark during service/.test(text()));
+await go('#/device/BWL-008?h=24');
+await new Promise(r => setTimeout(r, 60));
 
 const queriesBefore = calls.filter(c => c.table === 'status_events').length;
 window.dispatchEvent(new window.Event('hashchange'));

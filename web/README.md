@@ -350,6 +350,7 @@ it too, so a deploy cannot leave half an old shell behind.
 | 1.12 | symbolic slot cards: per-stack glyph lines, 4-segment battery bars with charge bolt, page legend; light-theme contrast fixes from adversarial review |
 | 1.13 | fleet counts shown once — the strip carries a single deduplicated figure; chips and strip behave on a phone |
 | 1.14 | the poll idles at 10 min outside service windows; hidden tabs never poll |
+| 1.15 | Health becomes a symbolic roster — one glyph line per device, whole fleet on a phone screen; device history offers 2 h–2 d; the reading-status band is repainted (blue fault, amber degraded, red battery, grey in-window offline, blank when powered off) and honest about silence; Stack-now draws the levels once |
 
 ### Tests
 
@@ -359,7 +360,7 @@ npm install      # jsdom, only for the test — the app itself has no dependenci
 node smoke.mjs
 ```
 
-221 assertions. It loads the real `index.html`, stubs PostgREST with rows shaped
+230 assertions. It loads the real `index.html`, stubs PostgREST with rows shaped
 like `device_overview` / `slot_overview` / `status_events`, and drives every
 screen. It exists to protect the rules in the section above — each is one
 plausible edit away from breaking with nothing visibly wrong on screen.

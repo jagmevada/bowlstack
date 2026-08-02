@@ -14,7 +14,7 @@
 import { h, empty, banner, batteryBar } from '../ui.js';
 import {
   LOCATION_NAMES, SERVING_LOCATIONS, MAX_BOWLS, slotStock, deviceStack,
-  deviceOffline, slotOffline, weekdayOf, serviceDate,
+  deviceGlyph, deviceOffline, slotOffline, weekdayOf, serviceDate,
   fmtClock, fmtRelative, serviceState,
 } from '../domain.js';
 
@@ -218,17 +218,7 @@ function slotCard(sl, stacks, inService, tz, template) {
     const strip = h('div', { class: 'dev-strip' });
     for (const d of stacks.sort((a, b) => a.device_id.localeCompare(b.device_id))) {
       const st = deviceStack(d);
-      const gone = deviceOffline(d);
-      const [cls, glyph, word] =
-        st.kind === 'fault' || d.stack_status === 'discontiguous'
-          ? ['fault', '▲', 'impossible reading — check the sensors']
-          : gone
-            ? ['off', '✕', 'offline — showing its last value']
-            : d.stack_status === 'degraded'
-              ? ['deg', '◐', 'a sensor is down']
-              : st.kind === 'none'
-                ? ['none', '◌', 'no reading']
-                : ['ok', '●', 'reporting'];
+      const g = deviceGlyph(d);
       const battWord = d.battery_level == null
         ? 'no battery detected'
         : `battery ${d.battery_level}`
@@ -237,9 +227,9 @@ function slotCard(sl, stacks, inService, tz, template) {
       strip.append(h('a', {
         class: 'dev-line',
         href: `#/device/${encodeURIComponent(d.device_id)}`,
-        title: `${d.device_id} — ${word} · updated ${fmtRelative(d.updated_at)} · ${battWord}`,
+        title: `${d.device_id} — ${g.word} · updated ${fmtRelative(d.updated_at)} · ${battWord}`,
       },
-        h('span', { class: `st st-${cls}`, 'aria-hidden': 'true' }, glyph),
+        h('span', { class: `st st-${g.cls}`, 'aria-hidden': 'true' }, g.glyph),
         h('span', { class: 'id' }, d.device_id.replace(/^BWL-/, '')),
         h('span', { class: 'ct' }, st.text),
         batteryBar(d.battery_level, d.charging, `${d.device_id}: ${battWord}`)));

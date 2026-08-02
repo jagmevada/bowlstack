@@ -180,6 +180,24 @@ export function slotOffline(slot) {
  * NOT recomputed from updated_at: devices are dark ~16 h a day by design, so
  * that would false-alarm on every healthy unit and bury the real failure.
  */
+/** One state glyph per device, shared by Stock's strip and Health's roster.
+ *  Priority mirrors severity: an impossible reading outranks silence
+ *  outranks a dead sensor outranks no reading. Each state owns a distinct
+ *  SHAPE as well as a colour (classes st-*), so the pairing survives
+ *  colour-blindness; the words appear once per page, in the legend. */
+export function deviceGlyph(d) {
+  const st = deviceStack(d);
+  if (st.kind === 'fault' || d.stack_status === 'discontiguous')
+    return { cls: 'fault', glyph: '\u25b2', word: 'impossible reading \u2014 check the sensors' };
+  if (deviceOffline(d))
+    return { cls: 'off', glyph: '\u2715', word: 'offline \u2014 showing its last value' };
+  if (d.stack_status === 'degraded')
+    return { cls: 'deg', glyph: '\u25d0', word: 'a sensor is down' };
+  if (st.kind === 'none')
+    return { cls: 'none', glyph: '\u25cc', word: 'no reading' };
+  return { cls: 'ok', glyph: '\u25cf', word: 'reporting' };
+}
+
 export function deviceSeverity(dev) {
   const reasons = [];
   let rank = 0;

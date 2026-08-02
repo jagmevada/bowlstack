@@ -619,6 +619,26 @@ button:disabled { opacity: .45; cursor: default; }
 /* --- health list ---------------------------------------------------- */
 
 .dev-list { display: grid; gap: .5rem; }
+.dev-list.compact { gap: .3rem; }
+
+/* The Health roster row: glyph, id, position, levels, count, battery — one
+   symbolic line per device so a phone shows the fleet without scrolling.
+   Words live in the tooltip and on the device page. */
+.dev.devc {
+  grid-template-columns: 1rem auto 2.2rem auto 1fr auto;
+  align-items: center;
+  gap: .55rem;
+  padding: .3rem .6rem;
+  min-height: 34px;
+}
+.dev.devc .st { text-align: center; }
+.dev.devc .devc-pos {
+  font-size: .75rem;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+.dev.devc .dev-count { font-size: 1.05rem; text-align: right; }
+.dev.devc .batt-slot { width: 26px; }
 
 .dev {
   display: grid;
@@ -674,6 +694,16 @@ button:disabled { opacity: .45; cursor: default; }
 }
 .levels.lg { width: 74px; gap: 3px; }
 .levels.lg i { height: 26px; border-radius: 4px; }
+/* Roster variant: the same four cells laid on their side so a row stays one
+   line tall. Children arrive top-of-stack first (f4), so rtl flow puts f1
+   at the LEFT — reading order matches the station's bottom-up numbering. */
+.levels.mini {
+  grid-auto-flow: column;
+  grid-auto-columns: 9px;
+  width: auto;
+  direction: rtl;
+}
+.levels.mini i { height: 13px; }
 
 .level-rows { display: grid; gap: 3px; }
 .level-row {

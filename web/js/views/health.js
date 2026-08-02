@@ -2,7 +2,10 @@
 //  Health — sorted by severity, never by device_id.
 //
 //  The point of this screen is to surface the one station that needs
-//  attention, not to enumerate thirty healthy ones.
+//  attention, not to enumerate thirty healthy ones. Rows are SYMBOLIC —
+//  one glyph line per device, same vocabulary as Stock — so a phone shows
+//  the whole fleet without scrolling. The words live in each row's
+//  tooltip and, in full, on the device page the row links to.
 //
 //  Three states that look alike and mean different things:
 //    awaiting_deployment  registered, never installed   -> greyed, own section
@@ -12,10 +15,10 @@
 //  from updated_at.
 // ====================================================================
 
-import { h, badge, empty, levelColumn, banner } from '../ui.js';
+import { h, empty, levelColumn, banner, batteryBar } from '../ui.js';
 import {
-  compareDevices, deviceSeverity, deviceStack, batteryInfo, positionLabel,
-  deviceOffline, fmtRelative, fmtDateTime, serviceState,
+  compareDevices, deviceSeverity, deviceStack, deviceGlyph,
+  deviceOffline, fmtRelative,
 } from '../domain.js';
 
 // `fault` and `degraded` are DIFFERENT failures and get different filters —
@@ -40,7 +43,6 @@ const FILTERS = {
 export function renderHealth(state, params) {
   const frag = document.createDocumentFragment();
   const devices = state.devices;
-  const { tz } = serviceState(devices);
   const active = FILTERS[params.get('f')] ? params.get('f') : 'all';
   const locFilter = params.get('loc') || '';
   const query = (params.get('q') || '').trim();
@@ -88,6 +90,15 @@ export function renderHealth(state, params) {
   bar.append(search);
   frag.append(bar);
 
+  // Same glyph/word pairing as Stock, once per page — the rows themselves
+  // never print a state word.
+  frag.append(h('div', { class: 'legend-line' },
+    h('span', {}, h('b', { class: 'st-ok' }, '●'), ' reporting'),
+    h('span', {}, h('b', { class: 'st-off' }, '✕'), ' offline'),
+    h('span', {}, h('b', { class: 'st-fault' }, '▲'), ' fault'),
+    h('span', {}, h('b', { class: 'st-deg' }, '◐'), ' degraded'),
+    h('span', {}, h('b', { class: 'st-none' }, '◌'), ' no reading')));
+
   const deployed = devices.filter(d => !d.awaiting_deployment);
 
   const live = (searching ? deployed.filter(matches) : deployed
@@ -131,8 +142,8 @@ export function renderHealth(state, params) {
   }
 
   if (live.length) {
-    const list = h('div', { class: 'dev-list' });
-    for (const d of live) list.append(deviceRow(d, tz));
+    const list = h('div', { class: 'dev-list compact' });
+    for (const d of live) list.append(deviceRow(d));
     frag.append(h('div', { class: 'section' },
       h('div', { class: 'section-head' },
         h('h2', {}, searching ? 'Matches' : active === 'all' ? 'Deployed' : FILTERS[active].label),
@@ -143,8 +154,8 @@ export function renderHealth(state, params) {
   }
 
   if (waiting.length && waitingShown) {
-    const list = h('div', { class: 'dev-list' });
-    for (const d of waiting) list.append(deviceRow(d, tz));
+    const list = h('div', { class: 'dev-list compact' });
+    for (const d of waiting) list.append(deviceRow(d));
     frag.append(h('div', { class: 'section' },
       h('div', { class: 'section-head' },
         h('h2', { class: 'muted' }, 'Awaiting deployment'),
@@ -163,88 +174,54 @@ function setParam(key, value) {
   location.hash = `#${path}${qs ? `?${qs}` : ''}`;
 }
 
-function deviceRow(d, tz) {
+function miniLevels(levels) {
+  const col = levelColumn(levels);
+  col.classList.add('mini');
+  return col;
+}
+
+// One line per device: glyph · id · position · levels · count · battery.
+// Everything the old badge stack said now rides the tooltip; the device page
+// says it in full sentences. The full device_id stays (this is the roster
+// someone searches), the position compresses to D3-style.
+function deviceRow(d) {
   const sev = deviceSeverity(d);
   const stack = deviceStack(d);
-  const batt = batteryInfo(d.battery_level);
-
-  const badges = h('div', { class: 'dev-badges' });
-
-  if (d.awaiting_deployment) {
-    badges.append(badge('idle', '◌', 'Never reported'));
-  } else {
-    if (d.offline) badges.append(badge('critical', '✕', 'Offline'));
-    else if (d.missed_last_service) {
-      badges.append(badge('critical', '✕', 'Missed last service',
-        'Was not reporting when the last completed service window ended — it went '
-        + 'dark mid-service or never came up.'));
-    }
-    if (d.stack_status === 'discontiguous') badges.append(badge('critical', '▲', 'Impossible reading'));
-    // The degraded badge follows what the NUMBER actually is: a real lower
-    // bound, an exact count despite the dead sensor (bound saturated at the
-    // 4-bowl ceiling), or nothing at all (zero sensors — the 0/4 badge below
-    // carries that story).
-    if (d.stack_status === 'degraded' && stack.kind === 'bound') {
-      badges.append(badge('warning', '◐', 'Count is a lower bound'));
-    } else if (d.stack_status === 'degraded' && stack.kind === 'count') {
-      badges.append(badge('warning', '◐', 'Sensor down — count still exact',
-        'The stack is full, so the dead sensor leaves no ambiguity.'));
-    }
-    if (d.sensors_online != null && d.sensors_online < 4) {
-      badges.append(badge(d.sensors_online === 0 ? 'critical' : 'warning', '◉',
-        `${d.sensors_online}/4 sensors`));
-    }
-    badges.append(badge(batt.status === 'idle' ? 'idle' : batt.status, batt.glyph,
-      batt.absent ? 'No battery' : batt.label,
-      d.battery_mv ? `${d.battery_mv} mV at the cell` : 'No cell detected'));
-    if (d.charging) badges.append(badge('good', '⚡', 'Charging'));
-    // fmtDateTime, not fmtClock: a time-only "As of 20:05" made a device dead
-    // since last Tuesday pixel-identical to one that reported at yesterday's
-    // dinner. The date is the information.
-    if (d.data_is_stale) badges.append(badge('idle', '◷', `As of ${fmtDateTime(d.updated_at, tz)}`));
-  }
-
-  // The status line under the badges. For a silent device it says OFFLINE in
-  // so many words — a badge among five other badges was too easy to read past,
-  // and every other number on the row is last-known, which deserves stating.
-  const gone = deviceOffline(d);
-  const statusLine = d.awaiting_deployment
-    ? h('div', { class: 'dev-where' }, 'Registered, awaiting installation')
-    : gone
-      ? h('div', { class: 'dev-offline-line' },
-          h('span', { class: 'g', 'aria-hidden': 'true' }, '✕'),
-          `OFFLINE — no telemetry. Last heard ${fmtRelative(d.updated_at)}`,
-          h('span', { class: 'dim', style: 'font-weight:400' },
-            ` · values shown are last known${d.firmware ? ` · fw ${d.firmware}` : ''}`))
-      : h('div', { class: 'dev-where' },
-          `Updated ${fmtRelative(d.updated_at)}${d.firmware ? ` · fw ${d.firmware}` : ''}`);
-
-  const mid = h('div', { class: 'dev-mid' },
-    h('div', {},
-      h('span', { class: 'dev-id' }, d.device_id),
-      ' ',
-      h('span', { class: 'dev-where' }, positionLabel(d)),
-      d.current_food ? h('span', { class: 'dev-where' }, ` · ${d.current_food}`) : null),
-    badges,
-    statusLine);
+  const g = deviceGlyph(d);
+  const battWord = d.battery_level == null
+    ? 'no battery detected'
+    : `battery ${d.battery_level}`
+      + `${d.battery_mv ? ` (${d.battery_mv} mV)` : ''}`
+      + `${d.charging ? ' — charging' : ''}`;
+  const title = [
+    sev.reasons.join(' · ') || 'Healthy',
+    d.updated_at ? `updated ${fmtRelative(d.updated_at)}` : 'never reported',
+    d.awaiting_deployment ? null : battWord,
+    d.firmware ? `fw ${d.firmware}` : null,
+  ].filter(Boolean).join(' · ');
 
   return h('a', {
-    class: `dev sev-${sev.level}`,
+    class: `dev devc sev-${sev.level}`,
     href: `#/device/${encodeURIComponent(d.device_id)}`,
     style: 'text-decoration:none;color:inherit',
-    title: sev.reasons.join(' · ') || 'Healthy',
+    title,
   },
-    levelColumn(d.levels),
-    mid,
-    h('div', { class: 'dev-right' },
-      // Red only where there IS a last value to redden — the fault (`!`) and
-      // never-reported (`—`) renderings are not counts, so the `na` grey owns
-      // them and the offline red must not touch them. Reusing the same
-      // kind-test keeps the two classes structurally unable to disagree.
-      h('span', {
-        class: 'dev-count'
-          + (stack.kind === 'count' || stack.kind === 'bound'
-              ? (deviceOffline(d) ? ' is-offline' : '')
-              : ' na'),
-      }, stack.text)));
+    h('span', { class: `st st-${g.cls}`, 'aria-hidden': 'true' }, g.glyph),
+    h('span', { class: 'dev-id' }, d.device_id),
+    h('span', { class: 'devc-pos' },
+      d.location != null && d.food_slot != null ? `${d.location}${d.food_slot}`
+        : d.location != null ? d.location : '—'),
+    miniLevels(d.levels),
+    // Red only where there IS a last value to redden — the fault (`!`) and
+    // never-reported (`—`) renderings are not counts, so the `na` grey owns
+    // them and the offline red must not touch them.
+    h('span', {
+      class: 'dev-count'
+        + (stack.kind === 'count' || stack.kind === 'bound'
+            ? (deviceOffline(d) ? ' is-offline' : '')
+            : ' na'),
+    }, stack.text),
+    d.awaiting_deployment
+      ? h('span', { class: 'batt-slot', 'aria-hidden': 'true' })
+      : batteryBar(d.battery_level, d.charging, battWord));
 }

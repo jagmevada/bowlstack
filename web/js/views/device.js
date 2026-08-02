@@ -11,7 +11,7 @@
 //  describing moments up to 5 s apart.
 // ====================================================================
 
-import { h, badge, empty, banner, levelColumn, copyText, fillSlot } from '../ui.js';
+import { h, badge, empty, banner, copyText, fillSlot } from '../ui.js';
 import { unwrap, describeError } from '../supa.js';
 import { stepChart, statusTimeline, STATUS_STYLE } from '../chart.js';
 import {
@@ -21,9 +21,11 @@ import {
 import { APP_VERSION } from '../version.js';
 
 const WINDOWS = [
+  { key: '2',  label: '2 h',  hours: 2 },
   { key: '6',  label: '6 h',  hours: 6 },
-  { key: '24', label: '24 h', hours: 24 },
-  { key: '72', label: '3 days', hours: 72 },
+  { key: '12', label: '12 h', hours: 12 },
+  { key: '24', label: '1 d',  hours: 24 },
+  { key: '48', label: '2 d',  hours: 48 },
 ];
 
 // The page redraws on the 20 s fleet poll so the header stays live, but history
@@ -107,8 +109,16 @@ export function renderDevice(state, params, ctx) {
 
   grid.append(h('div', { class: 'card' },
     h('div', { class: 'chart-title' }, 'Stack now'),
-    h('div', { style: 'display:flex;gap:1rem;align-items:center;margin-top:.5rem' },
-      levelColumn(dev.levels, true),
+    h('div', { style: 'display:flex;gap:1.2rem;align-items:center;margin-top:.5rem' },
+      // ONE labelled column — f-label, cell, state word. It used to be an
+      // unlabelled column here PLUS a labelled repeat of the same four
+      // levels below the count: the same fact drawn twice.
+      h('div', { class: 'level-rows' },
+        ...(dev.levels || ['unknown', 'unknown', 'unknown', 'unknown']).map((v, i) =>
+          h('div', { class: 'level-row' },
+            h('span', { class: 'k' }, `f${i + 1}`),
+            h('span', { class: `bar ${v}` }),
+            h('span', { class: 'dim' }, v))).reverse()),
       h('div', {},
         // The critical banner above already carries the glyph and the word,
         // so the red here is an accelerator, not a lone colour signal. Only
@@ -126,14 +136,8 @@ export function renderDevice(state, params, ctx) {
           deviceOffline(dev)
             ? `Last known — ${fmtRelative(dev.updated_at)}${stack.note ? ` · ${stack.note}` : ''}`
             : stack.note || `of 4 bowls · ${dev.stack_status || 'no status'}`))),
-    h('div', { class: 'level-rows', style: 'margin-top:.75rem' },
-      ...(dev.levels || []).map((v, i) =>
-        h('div', { class: 'level-row' },
-          h('span', { class: 'k' }, `f${i + 1}`),
-          h('span', { class: `bar ${v}` }),
-          h('span', { class: 'dim' }, v))).reverse()),
-    h('div', { class: 'dim', style: 'font-size:.75rem;margin-top:.4rem' },
-      'f1 is the bottom bowl.')));
+    h('div', { class: 'dim', style: 'font-size:.75rem;margin-top:.5rem' },
+      'f4 on top, f1 the bottom bowl — as on the station.')));
 
   grid.append(h('div', { class: 'card' },
     h('div', { class: 'chart-title' }, 'Power'),
@@ -248,6 +252,7 @@ function renderHistory(rowsDesc, dev, tz, hours) {
     t: new Date(r.recorded_at).getTime(),
     v: r.stack_count,
     status: r.stack_status,
+    battery: r.battery_level,
     reason: r.reason,
   }));
 
@@ -261,7 +266,7 @@ function renderHistory(rowsDesc, dev, tz, hours) {
     })));
 
   frag.append(h('div', { class: 'card', style: 'margin-bottom:.7rem' },
-    statusTimeline({ points, tz, width })));
+    statusTimeline({ points, tz, width, dev })));
 
   frag.append(reliability(rows, hours, tz));
 
