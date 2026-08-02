@@ -175,7 +175,16 @@ function deviceRow(d, tz) {
         + 'dark mid-service or never came up.'));
     }
     if (d.stack_status === 'discontiguous') badges.append(badge('critical', '▲', 'Impossible reading'));
-    if (d.stack_status === 'degraded') badges.append(badge('warning', '◐', 'Count is a lower bound'));
+    // The degraded badge follows what the NUMBER actually is: a real lower
+    // bound, an exact count despite the dead sensor (bound saturated at the
+    // 4-bowl ceiling), or nothing at all (zero sensors — the 0/4 badge below
+    // carries that story).
+    if (d.stack_status === 'degraded' && stack.kind === 'bound') {
+      badges.append(badge('warning', '◐', 'Count is a lower bound'));
+    } else if (d.stack_status === 'degraded' && stack.kind === 'count') {
+      badges.append(badge('warning', '◐', 'Sensor down — count still exact',
+        'The stack is full, so the dead sensor leaves no ambiguity.'));
+    }
     if (d.sensors_online != null && d.sensors_online < 4) {
       badges.append(badge(d.sensors_online === 0 ? 'critical' : 'warning', '◉',
         `${d.sensors_online}/4 sensors`));

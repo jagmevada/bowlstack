@@ -63,6 +63,8 @@ ASSIGN.forEach(([loc, slot, n], i) => {
   // One device seeded into each awkward state the UI has a rule for.
   const fault = id === 'BWL-002';
   const degr = id === 'BWL-008';
+  const degrFull = id === 'BWL-022';   // degraded but the stack is FULL: >=4 of 4 is exactly 4
+  const noSense = id === 'BWL-023';    // zero sensors online; the count in the payload is a leftover
   const off = id === 'BWL-014';
   const missed = id === 'BWL-021';   // slept through the last completed window
   const noBatt = id === 'BWL-019';
@@ -70,6 +72,8 @@ ASSIGN.forEach(([loc, slot, n], i) => {
   const never = id === 'BWL-024';
   const levels = fault ? ['absent', 'present', 'absent', 'absent']
     : degr ? ['present', 'present', 'unknown', 'absent']
+    : degrFull ? ['present', 'present', 'present', 'present']
+    : noSense ? ['unknown', 'unknown', 'unknown', 'unknown']
     : [['absent', 'absent', 'absent', 'absent'],
        ['present', 'absent', 'absent', 'absent'],
        ['present', 'present', 'absent', 'absent'],
@@ -84,10 +88,11 @@ ASSIGN.forEach(([loc, slot, n], i) => {
     stale_for: '00:00:25', in_service: true,
     offline: off, awaiting_deployment: never, data_is_stale: false,
     missed_last_service: missed,
-    stack_count: never ? null : levels.filter(l => l === 'present').length,
-    stack_status: never ? null : fault ? 'discontiguous' : degr ? 'degraded' : 'ok',
+    stack_count: never ? null : noSense ? 4 : levels.filter(l => l === 'present').length,
+    stack_status: never ? null : fault ? 'discontiguous'
+      : (degr || degrFull || noSense) ? 'degraded' : 'ok',
     levels: never ? null : levels,
-    sensors_online: never ? null : degr ? 3 : 4,
+    sensors_online: never ? null : noSense ? 0 : (degr || degrFull) ? 3 : 4,
     battery_mv: never ? null : noBatt ? null : critB ? 3320 : 4020,
     battery_level: never ? null : noBatt ? null : critB ? 'critical' : 'good',
     charging: never ? null : id === 'BWL-001',
@@ -404,8 +409,24 @@ await go('#/health?f=fault');
 ok('fault filter shows exactly the impossible-reading device',
   view.querySelectorAll('.dev').length === 1 && text().includes('BWL-002'));
 await go('#/health?f=degraded');
-ok('degraded filter shows exactly the dead-sensor device',
-  view.querySelectorAll('.dev').length === 1 && text().includes('BWL-008'));
+ok('degraded filter shows exactly the degraded devices',
+  view.querySelectorAll('.dev').length === 3
+  && ['BWL-008', 'BWL-022', 'BWL-023'].every(id => text().includes(id)));
+{
+  // A bound saturated at the 4-bowl ceiling is the exact answer, not ">=4".
+  const full = [...view.querySelectorAll('.dev')].find(r => r.textContent.includes('BWL-022'));
+  ok('full degraded stack shows plain 4, never >=4',
+    full?.querySelector('.dev-count')?.textContent === '4');
+  ok('and says the count is still exact', /count still exact/.test(full?.textContent || ''));
+  // Zero sensors online = zero detection: no number at all, however loudly
+  // the payload claims one.
+  const blind = [...view.querySelectorAll('.dev')].find(r => r.textContent.includes('BWL-023'));
+  ok('zero-sensor device shows no count at all',
+    blind?.querySelector('.dev-count')?.textContent === '\u2014'
+    && blind?.querySelector('.dev-count.na') !== null);
+  ok('its sensors badge tells the real story', /0\/4 sensors/.test(blind?.textContent || ''));
+  ok('no lower-bound claim on a blind device', !/lower bound/i.test(blind?.textContent || ''));
+}
 {
   const chips = [...window.document.getElementById('fleet-chips').children];
   const faultChip = chips.find(c => /faults/.test(c.textContent));

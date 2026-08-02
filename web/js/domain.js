@@ -66,14 +66,32 @@ export function batteryInfo(level) {
  *   count  — trustworthy.
  *   none   — never reported.
  */
+/** A stack physically holds at most this many bowls. */
+export const MAX_BOWLS = 4;
+
 export function deviceStack(dev) {
   if (!dev.reported || dev.stack_count == null) {
     return { kind: 'none', text: '—', note: 'No reading' };
+  }
+  // Zero working sensors means zero detection: whatever count rode along in
+  // the payload is a leftover, not a measurement. Rendering it — even as a
+  // bound — would dress a blind device up as data. (Strict === : null means
+  // the column is absent, not that the sensors are.)
+  if (dev.sensors_online === 0) {
+    return { kind: 'none', text: '—', note: 'No working sensors — no reading' };
   }
   if (dev.stack_status === 'discontiguous') {
     return { kind: 'fault', text: '!', note: 'Impossible reading — check the sensors' };
   }
   if (dev.stack_status === 'degraded') {
+    // A lower bound at the physical ceiling is not a bound, it is the answer:
+    // "≥4" of a maximum 4 says exactly 4, and printing the ≥ reads as
+    // nonsense ("more than full?"). The sensor is still down — the badges
+    // say so — but the number is exact.
+    if (dev.stack_count >= MAX_BOWLS) {
+      return { kind: 'count', value: MAX_BOWLS, text: String(MAX_BOWLS),
+               note: 'A sensor is down, but a full stack leaves no ambiguity' };
+    }
     return { kind: 'bound', value: dev.stack_count, text: `≥${dev.stack_count}`,
              note: 'A sensor is down — this is a lower bound' };
   }

@@ -85,10 +85,21 @@ export function renderDevice(state, params, ctx) {
       'cannot float, so this is a failed sensor, a misaligned mount, or an obstruction ',
       '— not a count.'));
   } else if (dev.stack_status === 'degraded') {
-    frag.append(banner('warning', '◐',
-      h('b', {}, 'Count is a lower bound. '),
-      'A sensor between the top bowl and the first empty level is down, so there may ',
-      'be more bowls than shown.'));
+    if (stack.kind === 'none') {
+      frag.append(banner('critical', '◉',
+        h('b', {}, 'No working sensors. '),
+        'Every level sensor is offline, so there is no bowl reading at all — ',
+        'any count in the payload is a leftover, not a measurement.'));
+    } else if (stack.kind === 'count') {
+      frag.append(banner('warning', '◐',
+        h('b', {}, 'A sensor is down — but the count is still exact. '),
+        'The stack is full, and a full stack leaves a dead sensor nothing to hide.'));
+    } else {
+      frag.append(banner('warning', '◐',
+        h('b', {}, 'Count is a lower bound. '),
+        'A sensor between the top bowl and the first empty level is down, so there may ',
+        'be more bowls than shown.'));
+    }
   }
 
   // --- current state -------------------------------------------------
