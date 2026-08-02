@@ -361,6 +361,8 @@ ok('meal indicator live', /Lunch/.test(window.document.getElementById('meal-indi
 
 console.log('\n[stock]');
 ok('renders three areas', ['Darshanarthi', 'Mahatma', 'Tiffin'].every(a => text().includes(a)));
+ok('each area sits on its own wash',
+  ['D', 'M', 'T'].every(l => view.querySelector(`.area.area-${l}`) !== null));
 ok('dish names resolved', text().includes('Khichdi') && text().includes('Chaas'));
 ok('fault slot shows no count', text().includes('Check station'));
 ok('no-data slot says No data', text().includes('No data'));

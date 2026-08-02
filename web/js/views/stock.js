@@ -88,16 +88,19 @@ export function renderStock(state) {
     const totalTrusted = rows.reduce((n, r) => n + (r.bowls_trusted == null ? 0 : Number(r.bowls_trusted)), 0);
     const totalCap = rows.reduce((n, r) => n + Number(r.bowls_capacity || 0), 0);
 
-    frag.append(h('div', { class: 'area-head' },
-      h('h2', {}, LOCATION_NAMES[loc] || loc),
-      h('span', { class: 'dim' }, `${totalTrusted} of ${totalCap} bowls across ${rows.length} positions`)));
-
+    // Each area sits on its own faint wash — D blue-ish, M violet, T teal —
+    // so the eye finds an area without reading its name. The hues stay off
+    // the status palette (red/green/amber carry meaning; these carry place).
     const grid = h('div', { class: 'slot-grid' });
     for (const sl of rows) {
       grid.append(slotCard(sl, byPosition.get(`${loc}|${sl.food_slot}`) || [],
         inService, tz, state.template || []));
     }
-    frag.append(grid);
+    frag.append(h('section', { class: `area area-${loc}` },
+      h('div', { class: 'area-head' },
+        h('h2', {}, LOCATION_NAMES[loc] || loc),
+        h('span', { class: 'dim' }, `${totalTrusted} of ${totalCap} bowls across ${rows.length} positions`)),
+      grid));
   }
 
   return frag;

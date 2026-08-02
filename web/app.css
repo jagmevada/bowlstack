@@ -496,6 +496,50 @@ button:disabled { opacity: .45; cursor: default; }
   text-shadow: 0 0 2px var(--surface), 0 0 2px var(--surface), 0 0 3px var(--surface);
 }
 
+/* Per-area washes: place, not status. A faint tint per serving area plus a
+   matching dot on the heading, so an area is found without reading — and no
+   hue the status palette already owns (red/green/amber mean things). */
+.area {
+  border-radius: 14px;
+  padding: .55rem .6rem .7rem;
+  margin-bottom: .9rem;
+  background: var(--area-wash, transparent);
+}
+.area-D { --area-wash: rgba(42, 120, 214, .07);  --area-accent: #2a78d6; }
+.area-M { --area-wash: rgba(150, 86, 209, .08);  --area-accent: #8b4fc0; }
+.area-T { --area-wash: rgba(13, 148, 136, .08);  --area-accent: #0d9488; }
+:root[data-theme="dark"] .area-D { --area-wash: rgba(57, 135, 229, .13); --area-accent: #5f9fe8; }
+:root[data-theme="dark"] .area-M { --area-wash: rgba(163, 106, 224, .14); --area-accent: #b183e0; }
+:root[data-theme="dark"] .area-T { --area-wash: rgba(20, 184, 166, .13); --area-accent: #2dd4bf; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .area-D { --area-wash: rgba(57, 135, 229, .13); --area-accent: #5f9fe8; }
+  :root:not([data-theme="light"]) .area-M { --area-wash: rgba(163, 106, 224, .14); --area-accent: #b183e0; }
+  :root:not([data-theme="light"]) .area-T { --area-wash: rgba(20, 184, 166, .13); --area-accent: #2dd4bf; }
+}
+/* Frozen-row behaviour: while an area is on screen its heading stays
+   latched just under the top bar, so mid-scroll you always know WHOSE
+   slots you are reading. The gradient re-creates wash-over-plane opaquely,
+   so cards slide underneath without showing through. */
+.area .area-head {
+  position: sticky;
+  top: var(--topbar-h, 96px);
+  z-index: 5;
+  background: linear-gradient(0deg, var(--area-wash, transparent), var(--area-wash, transparent)), var(--plane);
+  border-radius: 10px;
+  padding: .35rem .5rem;
+  margin: -.2rem -.15rem .4rem;
+}
+
+.area .area-head h2::before {
+  content: '';
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 99px;
+  margin-right: .45rem;
+  background: var(--area-accent, var(--ink-3));
+}
+
 /* --- stock view ---------------------------------------------------- */
 
 .area-head {

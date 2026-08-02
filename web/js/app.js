@@ -56,6 +56,18 @@ const el = {
   freshness: document.getElementById('freshness'),
 };
 
+// The Stock area headings latch below the top bar while scrolling
+// (position: sticky), and the bar's height varies as its rows wrap — so a
+// CSS variable tracks the real height. jsdom has no ResizeObserver; the
+// one-shot call covers it.
+const topbarEl = document.querySelector('.topbar');
+const setTopbarH = () =>
+  // Flush against the bar — any gap becomes a slit that card content
+  // scrolls visibly through.
+  document.documentElement.style.setProperty('--topbar-h', `${topbarEl?.offsetHeight || 0}px`);
+if (window.ResizeObserver && topbarEl) new ResizeObserver(setTopbarH).observe(topbarEl);
+setTopbarH();
+
 let client = null;
 let pollTimer = null;
 let tickTimer = null;
