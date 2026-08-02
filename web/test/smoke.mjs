@@ -610,6 +610,37 @@ await go('#/health');
 
 }
 
+console.log('\n[menu: a touched form survives the refetch]');
+// Field report: open the menu, start typing, and the background refetch lands
+// half a second later — rewriting the inputs with the fetched values, so Save
+// then saves the OLD menu. Once the user has typed anything, the fill must
+// keep its hands off.
+preloadSourceDate = '2026-08-09';        // makes the refetch differ from cache
+await go('#/menu?locs=D&meal=Lunch&date=2026-08-09');
+await new Promise(r => setTimeout(r, 150));
+preloadSourceDate = null;                 // next fetch differs from cache again
+await go('#/menu?locs=D&meal=Dinner&date=2026-08-09');
+{
+  // Type immediately — before the async refetch resolves.
+  const input = view.querySelector('.menu-col input');
+  input.value = 'My New Dish';
+  input.dispatchEvent(new window.Event('input', { bubbles: true }));
+  await new Promise(r => setTimeout(r, 250));   // let the refetch land
+  ok('typed value survives a differing refetch',
+    view.querySelector('.menu-col input')?.value === 'My New Dish',
+    view.querySelector('.menu-col input')?.value);
+
+  const saveBtn = [...view.querySelectorAll('button')].find(b => /^Save/.test(b.textContent));
+  saveBtn.dispatchEvent(new window.Event('click'));
+  await new Promise(r => setTimeout(r, 200));
+  const up = [...calls].reverse().find(c => c.table === 'meal_food_mapping'
+    && c.filters.some(f => f[0] === 'upsert'));
+  const payload = up?.filters.find(f => f[0] === 'upsert')?.[1] || [];
+  ok('and Save writes what was typed, not the fetched old menu',
+    payload.some(r => r.food_name === 'My New Dish'),
+    JSON.stringify(payload.map(r => r.food_name)));
+}
+
 console.log('\n[menu: multi-area verification grid]');
 await go('#/menu?meal=Lunch&date=2026-08-06');
 {

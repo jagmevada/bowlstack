@@ -134,6 +134,11 @@ export function renderMenu(state, params, ctx) {
   const build = () => dailyGrid(ctx, state, { locs, allMode, meal, date, tz, go });
   const box = h('div', { id: SLOT_ID },
     allCached ? build() : h('div', { class: 'empty' }, 'Loading menu…'));
+  // The moment the user touches the form it is THEIRS: the background refetch
+  // must never replace it. Field report: typing began before the refetch
+  // landed, the fill rewrote the inputs with the fetched values, and Save then
+  // dutifully saved the OLD menu — "I changed it but nothing changes".
+  box.addEventListener('input', () => { box.dataset.dirty = '1'; });
   frag.append(box);
 
   // Guard the async fill both ways: a response for a hash that has moved on
@@ -154,11 +159,13 @@ export function renderMenu(state, params, ctx) {
         }
         preloadCache.set(k, r);
       }
-      if (location.hash !== issuedFor || !changed) return;
+      const live = document.getElementById(SLOT_ID) || box;
+      if (location.hash !== issuedFor || !changed || live.dataset.dirty) return;
       fillSlot(SLOT_ID, box, build());
     })
     .catch(err => {
-      if (location.hash !== issuedFor) return;
+      const live = document.getElementById(SLOT_ID) || box;
+      if (location.hash !== issuedFor || live.dataset.dirty) return;
       fillSlot(SLOT_ID, box, banner('critical', '✕', describeError(err)));
     });
 
@@ -531,6 +538,8 @@ function renderWeekMode(state, ctx, { locs, allMode, meal, day, tz, go }) {
   const build = () => weekGrid(state, ctx, { locs, allMode, meal, day, tz, go });
   const box = h('div', { id: WEEK_SLOT_ID },
     allCached ? build() : h('div', { class: 'empty' }, 'Loading template…'));
+  // Touched form = the user's form; the refetch keeps its hands off.
+  box.addEventListener('input', () => { box.dataset.dirty = '1'; });
   frag.append(box);
 
   // Same two fill-guards as the daily editor: never paint a superseded hash,
@@ -544,7 +553,8 @@ function renderWeekMode(state, ctx, { locs, allMode, meal, day, tz, go }) {
         if (!prev || JSON.stringify(prev) !== JSON.stringify(all)) changed = true;
         templateCache.set(l, all);
       }
-      if (location.hash !== issuedFor || !changed) return;
+      const live = document.getElementById(WEEK_SLOT_ID) || box;
+      if (location.hash !== issuedFor || !changed || live.dataset.dirty) return;
       fillSlot(WEEK_SLOT_ID, box, build());
     })
     .catch(err => {
