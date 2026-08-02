@@ -22,6 +22,13 @@ export function saveConfig(url, anonKey) {
   localStorage.setItem(LS_KEY, JSON.stringify({
     url: url.trim().replace(/\/+$/, ''),
     anonKey: anonKey.trim(),
+    // The first-run screen exists so a host with no generated config.js
+    // (Vercel, a bare file server) still works. Whoever pastes a key here
+    // wants the product's no-login experience, so the stored connection
+    // carries anonymous auto-login. Without this, a hand-configured browser
+    // fell through to the staff-account form -- for which no account has
+    // ever existed anywhere.
+    autoLogin: 'anonymous',
   }));
 }
 
@@ -37,11 +44,20 @@ export function clearConfig() {
  * entirely therefore does not produce a public dashboard; it produces an empty
  * one, which is indistinguishable on screen from a dead fleet.
  *
- * Deployment-level only, never localStorage: it is a property of the
- * installation, not of the browser looking at it.
+ * Deployment config (config.js) supplies it for hosted builds; a connection
+ * pasted into the first-run screen carries its own (anonymous) so hosts with
+ * no generated config.js work too.
  */
 export function readAutoLogin() {
-  const a = (window.BOWLSTACK_CONFIG || {}).autoLogin;
+  // Same precedence as readConfig: what this browser was told explicitly
+  // (the first-run screen) wins over the deployment's baked config. A stored
+  // connection without an explicit mode means anonymous -- the screen never
+  // offered accounts, so that is what its user chose.
+  let a = (window.BOWLSTACK_CONFIG || {}).autoLogin;
+  try {
+    const stored = JSON.parse(localStorage.getItem(LS_KEY) || 'null');
+    if (stored && stored.url && stored.anonKey) a = stored.autoLogin ?? 'anonymous';
+  } catch { /* corrupt entry -- keep the deployment value */ }
   if (!a) return null;
   if (a === 'anonymous') return { mode: 'anonymous' };
   if (a.email && a.password) return { mode: 'password', email: a.email, password: a.password };

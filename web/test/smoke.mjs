@@ -322,6 +322,24 @@ ok('sign-out hidden when auto-login is on',
 ok('anonymous user labelled',
   /anonymously/i.test(window.document.getElementById('menu-user').textContent));
 
+console.log('\n[hand-configured hosts: no login form ever]');
+{
+  // A Vercel-style host has no generated config.js; the first-run screen
+  // stores the connection per-browser. That stored connection must imply
+  // anonymous auto-login — the field hit a staff-account form for which no
+  // account has ever existed.
+  const { saveConfig, readAutoLogin, clearConfig } = await import('../js/supa.js');
+  const savedBaked = window.BOWLSTACK_CONFIG;
+  window.BOWLSTACK_CONFIG = undefined;          // no deployment config at all
+  saveConfig('https://x.supabase.co/', 'somekey');
+  ok('a pasted connection auto-logs-in anonymously',
+    readAutoLogin()?.mode === 'anonymous');
+  clearConfig();
+  window.BOWLSTACK_CONFIG = savedBaked;
+  ok('deployment config still honoured afterwards',
+    readAutoLogin()?.mode === 'anonymous');
+}
+
 console.log('\n[shell]');
 ok('app pane visible', !hidden('app'));
 ok('queried device_overview', calls.some(c => c.table === 'device_overview'));
