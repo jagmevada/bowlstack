@@ -705,6 +705,64 @@ await go('#/menu?loc=D&meal=Lunch&mode=week&day=3');
     !!del && del.filters.some(f => f[0] === 'in' && f[1] === 'weekday'));
 }
 
+console.log('\n[menu: All areas — type once, save everywhere]');
+await go('#/menu?locs=all&meal=Lunch&date=2026-08-06');
+{
+  ok('All-areas capsule pressed',
+    [...view.querySelectorAll('button')].some(b =>
+      b.textContent === 'All areas' && b.getAttribute('aria-pressed') === 'true'));
+  ok('one combined column', view.querySelectorAll('.menu-col').length === 1
+    && /All areas/.test(view.querySelector('.menu-col h3')?.textContent || ''));
+  // The stub preload returns identical rows per area, so every slot agrees.
+  ok('slots prefill where the areas agree',
+    [...view.querySelectorAll('.menu-col input')].some(i => i.value === 'Khichdi'));
+  ok('agreement chip shown', /same everywhere|same menu/.test(text()));
+
+  // Blank one slot, then save: filled fields fan out to every area in ONE
+  // upsert; the blank is skipped — never a delete.
+  const inputs = [...view.querySelectorAll('.menu-col input')];
+  inputs[0].value = '';
+  const delBefore = calls.filter(c => c.table === 'meal_food_mapping'
+    && c.filters.some(f => f[0] === 'delete')).length;
+  const saveBtn = [...view.querySelectorAll('button')].find(b => b.textContent === 'Save to all 3 areas');
+  ok('save button says all 3 areas', !!saveBtn);
+  saveBtn.dispatchEvent(new window.Event('click'));
+  await new Promise(r => setTimeout(r, 200));
+  const up = [...calls].reverse().find(c => c.table === 'meal_food_mapping'
+    && c.filters.some(f => f[0] === 'upsert'));
+  const payload = up?.filters.find(f => f[0] === 'upsert')?.[1] || [];
+  ok('one upsert fans out to D, M and T',
+    ['D', 'M', 'T'].every(l => payload.some(r => r.location === l)));
+  ok('four slots x three areas = 12 rows (the blank skipped)',
+    payload.length === 12, String(payload.length));
+  const delAfter = calls.filter(c => c.table === 'meal_food_mapping'
+    && c.filters.some(f => f[0] === 'delete')).length;
+  ok('a blank in All mode never deletes', delAfter === delBefore);
+
+  // Clicking a single area while in All narrows to that area.
+  const tiffin = [...view.querySelectorAll('button')].find(b => b.textContent === 'Tiffin');
+  tiffin.dispatchEvent(new window.Event('click'));
+  await new Promise(r => setTimeout(r, 150));
+  ok('clicking one area exits All into that area',
+    /locs=T(&|$)/.test(location.hash) && view.querySelectorAll('.menu-col').length === 1
+    && /Tiffin/.test(view.querySelector('.menu-col h3')?.textContent || ''));
+}
+
+console.log('\n[menu: All areas in the weekly template]');
+await go('#/menu?mode=week&locs=all&meal=Lunch');
+{
+  ok('one combined template column', view.querySelectorAll('.menu-col').length === 1
+    && /All areas/.test(view.querySelector('.menu-col h3')?.textContent || ''));
+  // Template fixture: D has Lunch slots 1-5, M only slot 6, T nothing — the
+  // areas disagree, so the chip must say so and the differing slots stay blank.
+  ok('disagreement is named', /differs in slot/.test(text()));
+  ok('differing slots stay blank with the marker',
+    [...view.querySelectorAll('.menu-col input')].some(i =>
+      i.value === '' && i.placeholder.includes('differs')));
+  ok('save to all 3 areas offered',
+    [...view.querySelectorAll('button')].some(b => b.textContent === 'Save to all 3 areas'));
+}
+
 console.log('\n[menu: weekly template is multi-area too]');
 await go('#/menu?mode=week&meal=Lunch');
 {

@@ -33,6 +33,35 @@ function parseLocs(params) {
   return picked.length ? [...new Set(picked)] : [...SERVING_LOCATIONS];
 }
 
+/** The area capsule row, shared by both modes.
+ *  [All areas] [Darshanarthi] [Mahatma] [Tiffin]
+ *  "All areas" is a MODE — one column, typed once, written to every area —
+ *  not merely all three selected. Clicking it again returns to three
+ *  individual columns; clicking a single area while in it narrows to that
+ *  area, which is the "now let me make Tiffin different" gesture. */
+function areaCapsules({ allMode, locs, go }) {
+  return [
+    h('button', {
+      class: 'ghost', 'aria-pressed': String(allMode),
+      title: 'One form for every area: type the menu once, save it to all three. '
+        + 'Deselect to edit areas individually.',
+      onclick: () => go({ locs: allMode ? SERVING_LOCATIONS.join(',') : 'all' }),
+    }, 'All areas'),
+    ...SERVING_LOCATIONS.map(l => {
+      const on = !allMode && locs.includes(l);
+      return h('button', {
+        class: 'ghost', 'aria-pressed': String(on),
+        onclick: () => {
+          if (allMode) { go({ locs: l }); return; }
+          const next = on ? locs.filter(x => x !== l) : [...locs, l];
+          if (!next.length) { toast('Keep at least one area selected'); return; }
+          go({ locs: SERVING_LOCATIONS.filter(x => next.includes(x)).join(',') });
+        },
+      }, LOCATION_NAMES[l]);
+    }),
+  ];
+}
+
 export function renderMenu(state, params, ctx) {
   const { tz } = serviceState(state.devices);
   const mode = params.get('mode') === 'week' ? 'week' : 'date';
@@ -41,16 +70,20 @@ export function renderMenu(state, params, ctx) {
   const day = /^[0-6]$/.test(params.get('day') || '')
     ? Number(params.get('day'))
     : weekdayOf(serviceDate(tz));
-  const locs = parseLocs(params);   // both modes; multi-select capsules
+  // "All areas" is a distinct mode, not just all three selected: one column,
+  // typed once, written identically to D, M and T.
+  const allMode = (params.get('locs') ?? '') === 'all';
+  const locs = allMode ? [...SERVING_LOCATIONS] : parseLocs(params);
 
   // Navigating to the hash you are already on fires no event, so a save that
   // "reloads by navigating to itself" would silently do nothing — fall back
   // to an explicit re-render. Null patch values DELETE their key, or the URL
   // would collect literal "null"s.
   const go = (patch) => {
+    const locsParam = allMode ? 'all' : locs.join(',');
     const q = mode === 'week'
-      ? { locs: locs.join(','), meal, day, mode }
-      : { locs: locs.join(','), meal, date };
+      ? { locs: locsParam, meal, day, mode }
+      : { locs: locsParam, meal, date };
     Object.assign(q, patch);
     for (const k of Object.keys(q)) if (q[k] == null) delete q[k];
     const next = `#/menu?${new URLSearchParams(q)}`;
@@ -74,7 +107,7 @@ export function renderMenu(state, params, ctx) {
     }, 'Weekly template')));
 
   if (mode === 'week') {
-    frag.append(renderWeekMode(state, ctx, { locs, meal, day, tz, go }));
+    frag.append(renderWeekMode(state, ctx, { locs, allMode, meal, day, tz, go }));
     return frag;
   }
 
@@ -89,17 +122,7 @@ export function renderMenu(state, params, ctx) {
     }, m))));
 
   frag.append(h('div', { class: 'toolbar' },
-    ...SERVING_LOCATIONS.map(l => {
-      const on = locs.includes(l);
-      return h('button', {
-        class: 'ghost', 'aria-pressed': String(on),
-        onclick: () => {
-          const next = on ? locs.filter(x => x !== l) : [...locs, l];
-          if (!next.length) { toast('Keep at least one area selected'); return; }
-          go({ locs: SERVING_LOCATIONS.filter(x => next.includes(x)).join(',') });
-        },
-      }, LOCATION_NAMES[l]);
-    }),
+    ...areaCapsules({ allMode, locs, go }),
     h('span', { class: 'grow' }),
     h('button', { class: 'ghost', onclick: () => go({ date: addDays(date, -1) }), title: 'Previous day' }, '‹'),
     h('input', { type: 'date', value: date, 'aria-label': 'Service date', style: 'max-width:11rem',
@@ -108,7 +131,7 @@ export function renderMenu(state, params, ctx) {
     h('button', { class: 'ghost', onclick: () => go({ date: serviceDate(tz) }) }, 'Today')));
 
   const allCached = locs.every(l => preloadCache.get(`${l}|${meal}|${date}`));
-  const build = () => dailyGrid(ctx, state, { locs, meal, date, tz, go });
+  const build = () => dailyGrid(ctx, state, { locs, allMode, meal, date, tz, go });
   const box = h('div', { id: SLOT_ID },
     allCached ? build() : h('div', { class: 'empty' }, 'Loading menu…'));
   frag.append(box);
@@ -161,42 +184,78 @@ async function load(client, loc, meal, date) {
   return { rows, tpl };
 }
 
-function dailyGrid(ctx, state, { locs, meal, date, tz, go }) {
+function dailyGrid(ctx, state, { locs, allMode, meal, date, tz, go }) {
   const frag = document.createDocumentFragment();
   const inputsByLoc = new Map();
 
   frag.append(h('div', { class: 'chart-sub', style: 'margin:.5rem 0 0' },
     `${meal} · ${fmtDay(date)}. Slot numbers are the painted positions on the `,
-    'stations. Blank a field and Save to remove that dish.'));
+    'stations. ',
+    allMode
+      ? 'One form, three areas: filled fields save everywhere; blanks are left '
+        + 'untouched (a blank may mean the areas differ — remove dishes per area).'
+      : 'Blank a field and Save to remove that dish.'));
 
   const grid = h('div', { class: 'menu-grid' });
-  for (const l of locs) {
-    const { rows = [], tpl = null } = preloadCache.get(`${l}|${meal}|${date}`) || {};
-    grid.append(menuColumn(state, { loc: l, meal, date, rows, tpl, inputsByLoc }));
+  if (allMode) {
+    grid.append(combinedDailyColumn(state, { locs, meal, date, inputsByLoc }));
+  } else {
+    for (const l of locs) {
+      const { rows = [], tpl = null } = preloadCache.get(`${l}|${meal}|${date}`) || {};
+      grid.append(menuColumn(state, { loc: l, meal, date, rows, tpl, inputsByLoc }));
+    }
   }
   frag.append(grid);
 
   const status = h('span', { class: 'dim', style: 'font-size:.8rem' });
   const saveBtn = h('button', { class: 'primary', type: 'button' },
-    locs.length === 1 ? 'Save menu' : `Save all ${locs.length} areas`);
+    allMode ? 'Save to all 3 areas'
+      : locs.length === 1 ? 'Save menu' : `Save all ${locs.length} areas`);
   saveBtn.addEventListener('click', async () => {
     saveBtn.disabled = true;
     status.textContent = 'Saving…';
     const failures = [];
     let dishes = 0;
-    for (const l of locs) {
+    if (allMode) {
+      // One upsert carrying every area's rows. Blanks are SKIPPED, never
+      // deleted: in this mode a blank can mean "the areas disagree", and
+      // deleting three areas' dishes off the back of that ambiguity would be
+      // the worst kind of helpful.
       try {
-        dishes += await saveArea(ctx, {
-          loc: l, meal, date, inputs: inputsByLoc.get(l)?.inputs || new Map(),
-        });
-        preloadCache.delete(`${l}|${meal}|${date}`);
+        const inputs = inputsByLoc.get('ALL')?.inputs || new Map();
+        const payload = [];
+        for (const [slot, input] of inputs) {
+          const name = input.value.trim();
+          if (!name) continue;
+          for (const l of locs) {
+            payload.push({ location: l, meal_type: meal, meal_date: date,
+                           food_slot: slot, food_name: name });
+          }
+        }
+        if (payload.length) {
+          unwrap(await ctx.client.from('meal_food_mapping')
+            .upsert(payload, { onConflict: 'location,meal_date,meal_type,food_slot' }));
+        }
+        dishes = payload.length;
+        for (const l of locs) preloadCache.delete(`${l}|${meal}|${date}`);
       } catch (err) {
-        failures.push(`${LOCATION_NAMES[l]}: ${describeError(err)}`);
+        failures.push(describeError(err));
+      }
+    } else {
+      for (const l of locs) {
+        try {
+          dishes += await saveArea(ctx, {
+            loc: l, meal, date, inputs: inputsByLoc.get(l)?.inputs || new Map(),
+          });
+          preloadCache.delete(`${l}|${meal}|${date}`);
+        } catch (err) {
+          failures.push(`${LOCATION_NAMES[l]}: ${describeError(err)}`);
+        }
       }
     }
     if (failures.length) {
       status.textContent = failures.join(' · ');
-      toast(`Saved with errors — ${failures.length} area(s) failed`, true);
+      toast(`Saved with errors — ${failures.length} failure(s)`, true);
     } else {
       status.textContent = '';
       toast(`Saved ${dishes} dish${dishes === 1 ? '' : 'es'} across ${locs.length} area${locs.length === 1 ? '' : 's'}`);
@@ -212,6 +271,70 @@ function dailyGrid(ctx, state, { locs, meal, date, tz, go }) {
 
   frag.append(copyDayCard(ctx, { locs, date, tz }));
   return frag;
+}
+
+/** The "All areas" column: one set of inputs for every area. A slot prefills
+ *  only where every area agrees; where they differ it stays blank with a
+ *  "differs" marker, and saving skips it. */
+function combinedDailyColumn(state, { locs, meal, date, inputsByLoc }) {
+  const perLoc = new Map(locs.map(l => {
+    const { rows = [] } = preloadCache.get(`${l}|${meal}|${date}`) || {};
+    return [l, new Map(rows.map(r => [Number(r.food_slot), r]))];
+  }));
+  const deployedSlots = [...new Set(state.devices
+    .filter(d => SERVING_LOCATIONS.includes(d.location) && d.food_slot != null)
+    .map(d => Number(d.food_slot)))].sort((a, b) => a - b);
+  const slots = [...new Set([
+    ...deployedSlots,
+    ...locs.flatMap(l => [...perLoc.get(l).keys()]),
+  ])].sort((a, b) => a - b);
+  if (!slots.length) slots.push(1, 2, 3, 4, 5);
+
+  // Do the three areas currently agree?
+  const differing = [];
+  for (const slot of slots) {
+    const names = locs.map(l => perLoc.get(l).get(slot)?.food_name ?? '');
+    if (new Set(names).size > 1) differing.push(slot);
+  }
+  const allSaved = locs.every(l =>
+    [...perLoc.get(l).values()].length && [...perLoc.get(l).values()].every(r => r.is_saved));
+
+  const chip = differing.length
+    ? badge('warning', '≠', `differs in slot${differing.length === 1 ? '' : 's'} ${differing.join(', ')}`,
+        'The areas do not serve the same menu here. Differing slots are left '
+        + 'blank below and are never overwritten by a blank — deselect All to '
+        + 'see each area.')
+    : allSaved
+      ? badge('good', '✓', 'same menu, all recorded')
+      : badge('warning', '◐', 'same everywhere — save to record',
+          'The areas agree but not every area has this recorded yet.');
+
+  const col = h('div', { class: 'card menu-col' },
+    h('div', { class: 'menu-col-head' },
+      h('h3', {}, 'All areas'),
+      chip));
+
+  const inputs = new Map();
+  inputsByLoc.set('ALL', { inputs });
+  for (const slot of slots) {
+    const names = locs.map(l => perLoc.get(l).get(slot)?.food_name ?? '');
+    const agreed = new Set(names).size === 1 ? names[0] : '';
+    const differs = new Set(names).size > 1;
+    const input = h('input', {
+      type: 'text', value: agreed, placeholder: differs ? '≠ differs by area' : 'No dish',
+      'aria-label': `All areas slot ${slot} dish`,
+      autocomplete: 'off', maxlength: 60,
+      title: differs
+        ? locs.map((l, i) => `${LOCATION_NAMES[l]}: ${names[i] || '—'}`).join(' · ')
+        : undefined,
+    });
+    inputs.set(slot, input);
+    col.append(h('div', { class: 'row-form' },
+      h('span', { class: 'slotno' }, String(slot)),
+      input,
+      differs ? badge('warning', '≠', 'differs') : h('span', {})));
+  }
+  return col;
 }
 
 function menuColumn(state, { loc, meal, date, rows, tpl, inputsByLoc }) {
@@ -362,7 +485,7 @@ async function loadTemplate(client, loc) {
   return res.data || [];
 }
 
-function renderWeekMode(state, ctx, { locs, meal, day, tz, go }) {
+function renderWeekMode(state, ctx, { locs, allMode, meal, day, tz, go }) {
   const frag = document.createDocumentFragment();
 
   frag.append(h('div', { class: 'toolbar' },
@@ -372,17 +495,7 @@ function renderWeekMode(state, ctx, { locs, meal, day, tz, go }) {
     }, m))));
 
   frag.append(h('div', { class: 'toolbar' },
-    ...SERVING_LOCATIONS.map(l => {
-      const on = locs.includes(l);
-      return h('button', {
-        class: 'ghost', 'aria-pressed': String(on),
-        onclick: () => {
-          const next = on ? locs.filter(x => x !== l) : [...locs, l];
-          if (!next.length) { toast('Keep at least one area selected'); return; }
-          go({ locs: SERVING_LOCATIONS.filter(x => next.includes(x)).join(',') });
-        },
-      }, LOCATION_NAMES[l]);
-    })));
+    ...areaCapsules({ allMode, locs, go })));
 
   // Day chips. Sunday-first to match weekday 0 = Sunday end to end.
   const chips = h('div', { class: 'toolbar' });
@@ -395,7 +508,7 @@ function renderWeekMode(state, ctx, { locs, meal, day, tz, go }) {
   frag.append(chips);
 
   const allCached = locs.every(l => templateCache.get(l));
-  const build = () => weekGrid(state, ctx, { locs, meal, day, tz, go });
+  const build = () => weekGrid(state, ctx, { locs, allMode, meal, day, tz, go });
   const box = h('div', { id: WEEK_SLOT_ID },
     allCached ? build() : h('div', { class: 'empty' }, 'Loading template…'));
   frag.append(box);
@@ -426,26 +539,62 @@ function renderWeekMode(state, ctx, { locs, meal, day, tz, go }) {
   return frag;
 }
 
-function weekGrid(state, ctx, { locs, meal, day, tz, go }) {
+function weekGrid(state, ctx, { locs, allMode, meal, day, tz, go }) {
   const frag = document.createDocumentFragment();
   const inputsByLoc = new Map();
 
   frag.append(h('div', { class: 'chart-sub', style: 'margin:.5rem 0 0' },
     `Every ${WEEKDAYS[day]} · ${meal}. This is the plan, not any particular date `,
-    '— the daily editor and Apply turn it into recorded menus. Blank a field ',
-    'and Save to remove that dish from the plan.'));
+    '— the daily editor and Apply turn it into recorded menus. ',
+    allMode
+      ? 'One form, three areas: filled fields save to every area\'s plan; '
+        + 'blanks are left untouched.'
+      : 'Blank a field and Save to remove that dish from the plan.'));
 
   const grid = h('div', { class: 'menu-grid' });
-  for (const l of locs) grid.append(weekColumn(state, { loc: l, meal, day, inputsByLoc }));
+  if (allMode) {
+    grid.append(combinedWeekColumn(state, { locs, meal, day, inputsByLoc }));
+  } else {
+    for (const l of locs) grid.append(weekColumn(state, { loc: l, meal, day, inputsByLoc }));
+  }
   frag.append(grid);
 
   const status = h('span', { class: 'dim', style: 'font-size:.8rem' });
   const saveBtn = h('button', { class: 'primary', type: 'button' },
-    locs.length === 1 ? 'Save template' : `Save template — ${locs.length} areas`);
+    allMode ? 'Save to all 3 areas'
+      : locs.length === 1 ? 'Save template' : `Save template — ${locs.length} areas`);
   saveBtn.addEventListener('click', async () => {
     saveBtn.disabled = true;
     status.textContent = 'Saving…';
     const failures = [];
+    if (allMode) {
+      // Same rule as the daily All form: filled fields write everywhere,
+      // blanks never delete — a blank can mean the areas' plans disagree.
+      try {
+        const inputs = inputsByLoc.get('ALL')?.inputs || new Map();
+        const payload = [];
+        for (const [slot, input] of inputs) {
+          const name = input.value.trim();
+          if (!name) continue;
+          for (const l of locs) {
+            payload.push({ location: l, weekday: day, meal_type: meal,
+                           food_slot: slot, food_name: name });
+          }
+        }
+        if (payload.length) {
+          unwrap(await ctx.client.from('meal_menu_template')
+            .upsert(payload, { onConflict: 'location,weekday,meal_type,food_slot' }));
+        }
+        for (const l of locs) templateCache.delete(l);
+      } catch (err) {
+        failures.push(describeError(err));
+      }
+      if (failures.length) { status.textContent = failures.join(' · '); toast('Saved with errors', true); }
+      else { status.textContent = ''; toast('Template saved to all areas'); }
+      saveBtn.disabled = false;
+      go({});
+      return;
+    }
     for (const l of locs) {
       const entry = inputsByLoc.get(l);
       if (!entry) continue;
@@ -498,6 +647,64 @@ function weekGrid(state, ctx, { locs, meal, day, tz, go }) {
   if (locs.length === 1) frag.append(copyAreaCard(ctx, { loc: locs[0], go }));
   frag.append(applyTemplateCard(ctx, { locs, tz }));
   return frag;
+}
+
+/** The "All areas" template column: one plan for every area's weekday+meal.
+ *  Prefills only where every area's plan agrees; differing slots stay blank
+ *  and are never overwritten by a blank. */
+function combinedWeekColumn(state, { locs, meal, day, inputsByLoc }) {
+  const perLoc = new Map(locs.map(l => {
+    const all = templateCache.get(l) || [];
+    return [l, new Map(all
+      .filter(r => r.weekday === day && r.meal_type === meal)
+      .map(r => [Number(r.food_slot), r.food_name]))];
+  }));
+  const deployedSlots = [...new Set(state.devices
+    .filter(d => SERVING_LOCATIONS.includes(d.location) && d.food_slot != null)
+    .map(d => Number(d.food_slot)))].sort((a, b) => a - b);
+  const slots = [...new Set([
+    ...deployedSlots,
+    ...locs.flatMap(l => [...perLoc.get(l).keys()]),
+  ])].sort((a, b) => a - b);
+  if (!slots.length) slots.push(1, 2, 3, 4, 5);
+
+  const differing = [];
+  for (const slot of slots) {
+    const names = locs.map(l => perLoc.get(l).get(slot) ?? '');
+    if (new Set(names).size > 1) differing.push(slot);
+  }
+  const chip = differing.length
+    ? badge('warning', '≠', `differs in slot${differing.length === 1 ? '' : 's'} ${differing.join(', ')}`,
+        'The areas\' plans disagree here. Differing slots are blank below and '
+        + 'a blank never overwrites — deselect All to see each area.')
+    : badge('good', '✓', 'same plan in all areas');
+
+  const col = h('div', { class: 'card menu-col' },
+    h('div', { class: 'menu-col-head' },
+      h('h3', {}, 'All areas'),
+      chip));
+
+  const inputs = new Map();
+  inputsByLoc.set('ALL', { inputs });
+  for (const slot of slots) {
+    const names = locs.map(l => perLoc.get(l).get(slot) ?? '');
+    const agreed = new Set(names).size === 1 ? names[0] : '';
+    const differs = new Set(names).size > 1;
+    const input = h('input', {
+      type: 'text', value: agreed, placeholder: differs ? '≠ differs by area' : 'No dish',
+      'aria-label': `All areas slot ${slot} dish`,
+      autocomplete: 'off', maxlength: 60,
+      title: differs
+        ? locs.map((l, i) => `${LOCATION_NAMES[l]}: ${names[i] || '—'}`).join(' · ')
+        : undefined,
+    });
+    inputs.set(slot, input);
+    col.append(h('div', { class: 'row-form' },
+      h('span', { class: 'slotno' }, String(slot)),
+      input,
+      differs ? badge('warning', '≠', 'differs') : h('span', {})));
+  }
+  return col;
 }
 
 function weekColumn(state, { loc, meal, day, inputsByLoc }) {
