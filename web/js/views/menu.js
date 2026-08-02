@@ -224,6 +224,7 @@ function dailyGrid(ctx, state, { locs, allMode, meal, date, tz, go }) {
     status.textContent = 'Saving…';
     const failures = [];
     let dishes = 0;
+    let removed = 0;
     if (allMode) {
       // One upsert carrying every area's rows. A BLANK DELETES — but only
       // where every area had agreed on the dish, so the intent is
@@ -258,6 +259,7 @@ function dailyGrid(ctx, state, { locs, allMode, meal, date, tz, go }) {
             .in('food_slot', toDelete));
         }
         dishes = payload.length;
+        removed = toDelete.length * locs.length;
         for (const l of locs) preloadCache.delete(`${l}|${meal}|${date}`);
       } catch (err) {
         failures.push(describeError(err));
@@ -265,9 +267,11 @@ function dailyGrid(ctx, state, { locs, allMode, meal, date, tz, go }) {
     } else {
       for (const l of locs) {
         try {
-          dishes += await saveArea(ctx, {
+          const r = await saveArea(ctx, {
             loc: l, meal, date, inputs: inputsByLoc.get(l)?.inputs || new Map(),
           });
+          dishes += r.written;
+          removed += r.deleted;
           preloadCache.delete(`${l}|${meal}|${date}`);
         } catch (err) {
           failures.push(`${LOCATION_NAMES[l]}: ${describeError(err)}`);
@@ -279,7 +283,16 @@ function dailyGrid(ctx, state, { locs, allMode, meal, date, tz, go }) {
       toast(`Saved with errors — ${failures.length} failure(s)`, true);
     } else {
       status.textContent = '';
-      toast(`Saved ${dishes} dish${dishes === 1 ? '' : 'es'} across ${locs.length} area${locs.length === 1 ? '' : 's'}`);
+      // Say what actually happened — deletions included. "Saved 0 dishes"
+      // after removing four read as failure; and blanking a DRAFT stores
+      // nothing at all, which deserves saying out loud rather than letting
+      // the suggestion's return on reload read as a bug.
+      const parts = [];
+      if (dishes) parts.push(`saved ${dishes} dish${dishes === 1 ? '' : 'es'}`);
+      if (removed) parts.push(`removed ${removed}`);
+      toast(parts.length
+        ? `${parts.join(', ')} across ${locs.length} area${locs.length === 1 ? '' : 's'}`
+        : 'Nothing recorded — blanked drafts simply disappear');
     }
     saveBtn.disabled = false;
     go({});
@@ -438,7 +451,7 @@ async function saveArea(ctx, { loc, meal, date, inputs }) {
       .eq('location', loc).eq('meal_type', meal).eq('meal_date', date)
       .in('food_slot', toDelete));
   }
-  return payload.length;
+  return { written: payload.length, deleted: toDelete.length };
 }
 
 /** Copy the selected areas' whole day (all three meals) to another date. */

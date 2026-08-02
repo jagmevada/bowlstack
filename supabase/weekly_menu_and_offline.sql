@@ -304,6 +304,11 @@ create or replace function public.meal_mapping_preload(
        and t.weekday   = extract(dow from p_meal_date)::smallint
        and p_meal_date >= public.current_meal_date('Asia/Kolkata')
   ),
+  -- Carry-forward means "probably the same as the LAST service" -- so it
+  -- only reaches back two days. Unbounded, it resurrected week-old menus as
+  -- drafts that could never be refused: blanking a draft deletes nothing
+  -- (there are no rows for the date), so refresh brought the zombie back.
+  -- Field report: slots blanked and saved kept "restoring from 26 Jul".
   previous as (
     select m.food_slot, m.food_name, m.meal_date as source_date, false as is_saved
       from public.meal_food_mapping m
@@ -315,6 +320,7 @@ create or replace function public.meal_mapping_preload(
           where m2.location  = p_location
             and m2.meal_type = p_meal_type
             and m2.meal_date < p_meal_date
+            and m2.meal_date >= p_meal_date - 2
        )
   )
   select * from exact

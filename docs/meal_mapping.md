@@ -293,12 +293,17 @@ Precedence, per `(location, meal_type, meal_date)`:
 | --- | --- |
 | a mapping is already saved for this date | it, with `is_saved: true` |
 | none saved, date is today-or-future, template has this weekday+meal | the weekly template, `is_saved: false`, **`source_date` = the requested date** |
-| none saved, no template match (or a past date) | the most recent previous same-meal menu, `is_saved: false`, `source_date` < the date |
+| none saved, no template match (or a past date) | the most recent previous same-meal menu **from the last 2 days only**, `is_saved: false`, `source_date` < the date |
 | nothing at all | empty — start with a blank form |
 
 The template branch is bounded to today-or-future deliberately: for a *past*
 gap, what was probably served is what was served around it (carry-forward), not
 what this week's template says.
+
+Carry-forward reaches back **two days at most**. It means "probably the same
+as the last service" — a week-old menu is not that, and an unbounded draft can
+never be refused: blanking it deletes nothing (no rows exist for the date), so
+it resurfaced on every reload.
 
 **`is_saved` is not decoration, and the UI must act on it.** A preloaded form is
 pixel-identical to a saved one. Without the flag, an admin who opens tomorrow's
