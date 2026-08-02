@@ -179,7 +179,7 @@ export function deviceSeverity(dev) {
     return { rank: -1, level: 'idle', reasons: ['Awaiting deployment'] };
   }
   if (dev.offline) { rank = Math.max(rank, 100); reasons.push('Offline during service'); }
-  if (dev.missed_last_service) { rank = Math.max(rank, 85); reasons.push('Missed the last service — not reporting'); }
+  if (dev.missed_last_service) { rank = Math.max(rank, 85); reasons.push('Not reporting since before the last service ended'); }
   if (dev.stack_status === 'discontiguous') { rank = Math.max(rank, 90); reasons.push('Impossible level pattern'); }
   if (dev.battery_level === 'critical') { rank = Math.max(rank, 80); reasons.push('Battery critical'); }
   if (dev.battery_level === 'low') { rank = Math.max(rank, 60); reasons.push('Battery low'); }

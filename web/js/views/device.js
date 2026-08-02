@@ -68,8 +68,8 @@ export function renderDevice(state, params, ctx) {
       `Should be reporting and is not — last update ${fmtRelative(dev.updated_at)}.`));
   } else if (dev.missed_last_service) {
     frag.append(banner('critical', '✕',
-      h('b', {}, 'Missed the last service. '),
-      `Did not report at all during the most recently completed service window — `,
+      h('b', {}, 'Went dark during service. '),
+      `Was not reporting when the last service window ended — `,
       `last heard ${fmtRelative(dev.updated_at)} (${fmtDateTime(dev.updated_at, tz)}). `,
       'Values below are its last known state.'));
   } else if (dev.data_is_stale) {

@@ -164,7 +164,8 @@ function deviceRow(d, tz) {
     if (d.offline) badges.append(badge('critical', '✕', 'Offline'));
     else if (d.missed_last_service) {
       badges.append(badge('critical', '✕', 'Missed last service',
-        'Did not report at all during the most recently completed service window.'));
+        'Was not reporting when the last completed service window ended — it went '
+        + 'dark mid-service or never came up.'));
     }
     if (d.stack_status === 'discontiguous') badges.append(badge('critical', '▲', 'Impossible reading'));
     if (d.stack_status === 'degraded') badges.append(badge('warning', '◐', 'Count is a lower bound'));
