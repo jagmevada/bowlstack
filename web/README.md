@@ -147,13 +147,18 @@ worse than none).
 | Tab | Source | What it is for |
 | --- | --- | --- |
 | **Stock** | `slot_overview` | Bowls left per dish position, per area. The screen watched during service. |
-| **Health** | `device_overview` | Every device, **sorted by severity**. Answers "which station needs someone". |
+| **Health** | `device_overview` | Every device, **sorted by severity**, as a symbolic roster — one glyph line per device, whole fleet on a phone screen. Answers "which station needs someone". |
 | Device detail | `device_overview` + `status_events` | One device: levels, battery, history, and the reliability numbers a trial exists to collect. |
 | **Menu** | `meal_mapping_preload` + `meal_food_mapping` + `meal_menu_template` | Daily mode: one column per selected area (capsule multi-select), one meal at a time — the morning verification surface. Weekly mode: the template. |
 | **Devices** | `devices` | Assign `location`, `food_slot`, `label`. Rare — hardware moves only. |
 
-Data refreshes every **15 s** while the tab is visible, and polls rather than
-subscribing: at the firmware's 20 s heartbeat, 32 devices would push ~140k
+Left/right **swipe** moves between the four tabs on a phone; each Stock area
+sits on its own colour wash with its heading latched below the tab bar while
+its slots scroll.
+
+Data refreshes every **15 s** while the tab is visible and a meal window is
+open (idling to one poll per 10 minutes outside — see Known limits), and
+polls rather than subscribing: at the firmware's 20 s heartbeat, 32 devices would push ~140k
 realtime messages a day at a screen glanced at every few minutes.
 
 The poll interval is sized against the server's alarm, not picked round.
@@ -175,10 +180,10 @@ it should be, its last count stays on screen (blanking it would send someone to
 a station the screen just went silent about) but turns red — and red on a
 numeral means only this, so no second channel is needed. The confidence bar
 stripes the silent stack's share; the problem strip on Stock
-carries a thin red problem strip — counts of offline / fault / degraded /
-battery issues — that clicks through to Health filtered to problems; the Health
-row for a silent device says OFFLINE in words, with "values shown are last
-known". Two server flags drive all of it: `offline` (died
+carries a single deduplicated "N stations need attention" figure that clicks
+through to Health filtered to problems; a silent device's Health row wears the
+✕ glyph with the silence stated in its tooltip, and the device page says it
+in full sentences. Two server flags drive all of it: `offline` (died
 mid-window) and `missed_last_service` (slept through the most recently
 completed service window — the flag that survives the dark hours, added
 because a device dead for six days used to look identical to a healthy one
@@ -234,7 +239,36 @@ status palette cannot separate four levels on hue (warning against serious
 measures below the threshold at which two colours are reliably distinguished,
 and good against critical is the classic red/green pair under deuteranopia).
 So colour says fine / watch / act, severity *order* is carried by position in
-the list, and every badge pairs its colour with a distinct glyph and a word.
+the list, and every glyph owns a distinct SHAPE as well as a colour.
+
+**Symbols carry status on the dense screens.** Stock cards and the Health
+roster print no state words: each stack is one line — glyph (● reporting,
+✕ offline, ▲ fault, ◐ degraded, ◌ no reading), id, count, and a
+4-segment battery glyph with a bolt overlay when the charger is on. A
+once-per-page legend pairs each glyph with its word; tooltips and the device
+page carry the sentences. The glyph decision is one shared function
+(`deviceGlyph` in domain.js), so Stock and Health cannot drift apart.
+
+**The reading-status band is honest about silence.** On the device page the
+band paints green reading-OK, blue fault, amber degraded, red battery
+low/critical, grey offline-during-service, and *blank* for powered off —
+red belongs to the battery, and dark hours are blank, never a state. With a
+change-only history, silence is derived honestly: a long gap ending in a
+`boot` row is blanked (the device was off), the live tail is held only to
+`updated_at` (the heartbeat proves liveness even when nothing changes), and
+grey comes solely from the server's window-aware `offline` flag.
+
+**Place has its own colours.** Each Stock area sits on a faint wash —
+Darshanarthi blue, Mahatma violet, Tiffin teal — chosen off the status
+palette entirely: red/green/amber mean things here, so place gets hues that
+do not. The area heading stays latched below the tab bar while its slots
+scroll, Excel frozen-row style.
+
+**A swipe navigates only when it cannot be anything else.** A fast,
+decisively horizontal flick moves between the tabs; a scroll, a chart drag,
+a sideways table, a gesture starting in an input, and — above all — a Menu
+page holding unsaved drafts all refuse it, because an accidental swipe must
+not throw away half-typed dishes.
 
 **History is not a time series.** `status_events` has one row per real change,
 so the chart is a step (the value between rows is genuinely constant) and gaps

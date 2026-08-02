@@ -236,6 +236,15 @@ moments up to 5 s apart. Order by `recorded_at`, never by `id` or `received_at`.
 has no clock. It can be meaningfully earlier than `received_at` after a network
 outage — that is correct, not a bug.
 
+A worked example of using these fields honestly — the trial dashboard's
+reading-status band derives *silence* from a change-only log like this: a long
+gap that ends in a `reason = 'boot'` row means the device was powered off for
+most of it (paint nothing); the live tail is trusted only up to
+`device_overview.updated_at`, since the heartbeat PATCHes it even when no event
+is appended; and "offline right now" comes solely from the server's `offline`
+flag, never from a client-side gap heuristic — a healthy device produces no
+events for hours while perfectly alive.
+
 ---
 
 ## 7. Real-time (optional)
@@ -290,7 +299,8 @@ views never read the template directly.
 Battery, charging, `sensors_online`, `firmware`, `offline`,
 `awaiting_deployment`. This is what lets the kitchen in-charge tell the service
 counter in-charge which station needs attention — so sort by severity, not by
-device ID.
+device ID. (The trial dashboard renders this as a symbolic roster — one glyph
+line per device — with the sentences on each device's own page.)
 
 ### Configuration page
 

@@ -89,7 +89,7 @@ monitoring.
 | **4 — task fabric** | done. FreeRTOS split so measurement never stalls on the network |
 | **5 — indicators & power** | done. Five status LEDs, measured Li-ion SoC curve, charger sense |
 | **6 — fleet stress test** | in progress. `esp32dev-fleet` simulates `BWL-002`…`032` against the live project. Known sim gap: its ~60 s post cadence exceeds the 40 s offline threshold, so simulated units flap offline on the dashboard — see [docs/firmware.md](docs/firmware.md) §7 |
-| **7 — front-end** | **live** — v1.14 on GitHub Pages: five screens, weekly-menu template with morning auto-apply, offline/fault surfacing, symbolic per-stack status with battery bars, service-hour-aware polling. 221-assertion smoke suite. See [web/README.md](web/README.md) |
+| **7 — front-end** | **live** — v1.20 on GitHub Pages: five screens, weekly-menu template with morning auto-apply, symbolic status throughout (glyphs + battery bars on Stock and the Health roster), colour-washed areas with latched headings, swipe navigation, an honest reading-status timeline, service-hour-aware polling. 239-assertion smoke suite. See [web/README.md](web/README.md) |
 
 ### Verified on hardware
 

@@ -38,15 +38,23 @@ Design implications worth deciding early:
 - **Outside service hours the numbers are last-known, not live.** `data_is_stale`
   says so; the UI must, too, or a coordinator will act on a stale count.
 
-**As built (v1.14):** the count renders in ink, with red reserved for exactly
+**As built (v1.20):** the count renders in ink, with red reserved for exactly
 one meaning — the figure is compromised (offline / fault / degraded somewhere
 in the position). A capsule meter under the number carries data confidence. Each
 stack is one symbolic line — state glyph (● ✕ ▲ ◐ ◌), id, count, and a
 4-segment battery glyph with a charge bolt — with a once-per-page legend; the
-words live in tooltips and on Health. Fleet counts are itemized once, in the
-header capsules; a one-line red strip carries a single deduplicated
-"N stations need attention" and routes to Health. Outside service windows the
-poll idles at 10 minutes to save egress.
+words live in tooltips and on the device page. Fleet counts are itemized once,
+in the header capsules (one phone row); a one-line red strip carries a single
+deduplicated "N stations need attention" and routes to Health. Each area sits
+on its own colour wash (D blue, M violet, T teal — hues off the status
+palette) with its heading latched below the tab bar while its slots scroll.
+Health is the same vocabulary as a dense roster: one 34px glyph line per
+device, whole fleet on a phone screen, detail on the device page — where
+history offers 2 h–2 d ranges and the reading-status band paints green OK /
+blue fault / amber degraded / red battery / grey in-window offline / blank
+powered-off, honestly derived from boot gaps, `updated_at` and the server's
+`offline` flag. Left/right swipe moves between the four tabs. Outside service
+windows the poll idles at 10 minutes to save egress.
 
 ### Health view
 
