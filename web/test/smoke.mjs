@@ -484,6 +484,21 @@ console.log('\n[stock: symbolic cards & battery bars]');
     /still reading correctly\./.test(faultCard?.textContent || ''));
 }
 
+console.log('\n[swipe navigation]');
+{
+  const { swipeTarget } = await import('../js/app.js');
+  ok('left swipe on Stock lands on Health', swipeTarget('stock', -120, 10, 200, false) === 'health');
+  ok('right swipe on Health returns to Stock', swipeTarget('health', 120, -8, 200, false) === 'stock');
+  ok('left swipe on Devices has nowhere to go', swipeTarget('assign', -120, 0, 200, false) === null);
+  ok('right swipe on Stock has nowhere to go', swipeTarget('stock', 120, 0, 200, false) === null);
+  ok('a mostly-vertical drag is a scroll, not a swipe', swipeTarget('stock', -70, 60, 200, false) === null);
+  ok('a slow drag never navigates', swipeTarget('stock', -120, 0, 900, false) === null);
+  ok('a short nudge never navigates', swipeTarget('stock', -30, 0, 150, false) === null);
+  ok('the device page ignores swipes', swipeTarget('device', -120, 0, 200, false) === null);
+  ok('an unsaved menu draft blocks the swipe', swipeTarget('menu', -120, 0, 200, true) === null);
+  ok('menu swipes on to Devices when clean', swipeTarget('menu', -120, 0, 200, false) === 'assign');
+}
+
 console.log('\n[stock: outside service hours]');
 {
   // The As-of line and the outside-service banner only exist when the WHOLE

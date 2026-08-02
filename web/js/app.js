@@ -366,6 +366,51 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
+// --- swipe navigation --------------------------------------------------
+//
+// Left/right swipe moves between the four top-level tabs, in tab-bar order.
+// Deliberately narrow: only on those four routes (never the device page,
+// whose charts own horizontal gestures), only for a fast and decisively
+// horizontal swipe, never from inside an input or a sideways-scrolling
+// container, and never while the Menu page holds an unsaved draft — an
+// accidental swipe must not throw away half-typed dishes.
+
+const SWIPE_TABS = ['stock', 'health', 'menu', 'assign'];
+
+/** Pure decision, exported for the smoke suite: the route a swipe lands on,
+ *  or null when the gesture must be ignored. dx<0 is a leftward swipe. */
+export function swipeTarget(route, dx, dy, elapsedMs, hasDirtyForm) {
+  if (elapsedMs > 600) return null;                        // a drag, not a flick
+  if (Math.abs(dx) < 60) return null;                      // too small to mean it
+  if (Math.abs(dx) < 2 * Math.abs(dy)) return null;        // mostly a scroll
+  if (hasDirtyForm) return null;
+  const i = SWIPE_TABS.indexOf(route);
+  if (i < 0) return null;
+  return SWIPE_TABS[i + (dx < 0 ? 1 : -1)] || null;
+}
+
+let swipeStart = null;
+document.addEventListener('touchstart', e => {
+  if (e.touches.length !== 1) { swipeStart = null; return; }
+  const t = e.touches[0];
+  swipeStart = {
+    x: t.clientX, y: t.clientY, at: Date.now(),
+    skip: !!(e.target.closest
+      && e.target.closest('input, textarea, select, .table-wrap, .chart-wrap, .tabs')),
+  };
+}, { passive: true });
+document.addEventListener('touchend', e => {
+  const s0 = swipeStart; swipeStart = null;
+  if (!s0 || s0.skip || el.app.hidden) return;
+  const t = e.changedTouches && e.changedTouches[0];
+  if (!t) return;
+  const route = (location.hash.replace(/^#\//, '').split('?')[0].split('/')[0]) || 'stock';
+  const next = swipeTarget(route,
+    t.clientX - s0.x, t.clientY - s0.y, Date.now() - s0.at,
+    !!el.view.querySelector('[data-dirty="1"]'));
+  if (next) location.hash = `#/${next}`;
+}, { passive: true });
+
 // --- chrome rendering -------------------------------------------------
 
 function renderChrome() {
