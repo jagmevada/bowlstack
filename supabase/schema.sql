@@ -79,6 +79,7 @@ drop function if exists public.tg_devices_create_status() cascade;
 drop function if exists public.tg_meal_food_mapping_touch() cascade;
 drop function if exists public.in_service_window(timestamptz, text, text, interval) cascade;
 drop function if exists public.last_service_window_start(text, text, timestamptz) cascade;
+drop function if exists public.last_service_window_end(text, text, timestamptz) cascade;
 drop function if exists public.offline_after() cascade;
 drop function if exists public.meal_template_apply(text, date, date, boolean) cascade;
 drop function if exists public.current_meal_type(text, timestamptz) cascade;
@@ -424,6 +425,41 @@ create or replace function public.last_service_window_start(
      cross join generate_series(0, 1) n
   )
   select max(w_start) from candidates where w_end <= at_ts;
+$$;
+
+-- ...and when did it END? This is the anchor missed_last_service uses:
+-- "alive at the CLOSE of the last completed window". A healthy 20 s-heartbeat
+-- device is at most ~40 s stale when a window shuts, so subtracting
+-- offline_after() cannot flag it, and anything silent longer was already red
+-- in-window via `offline`. (An earlier cut anchored on the window START to
+-- tolerate early power-downs; field use showed a unit switched off mid-lunch
+-- then read healthy all afternoon -- the very false negative this flag exists
+-- to kill. A station legitimately shut early therefore flags until it next
+-- reports; if early shutdown becomes routine practice, soften this rule.)
+create or replace function public.last_service_window_end(
+  tz     text,
+  dev_id text        default null,
+  at_ts  timestamptz default now()
+) returns timestamptz language sql stable set search_path = '' as $$
+  with applicable as (
+    select w.starts_at, w.ends_at from public.service_windows w
+      where w.device_id = dev_id
+    union all
+    select w.starts_at, w.ends_at from public.service_windows w
+      where w.device_id is null
+        and not exists (select 1 from public.service_windows x
+                         where x.device_id = dev_id)
+  ),
+  local_day as (
+    select (at_ts at time zone coalesce(tz, 'UTC'))::date as d
+  ),
+  candidates as (
+    select ((ld.d - n) + a.ends_at) at time zone coalesce(tz, 'UTC') as w_end
+      from applicable a
+     cross join local_day ld
+     cross join generate_series(0, 1) n
+  )
+  select max(w_end) from candidates where w_end <= at_ts;
 $$;
 
 -- How long a device may be silent, while it is SUPPOSED to be reporting, before
@@ -902,11 +938,15 @@ revoke all on function public.current_meal_date(text, timestamptz) from public, 
 revoke all on function public.meal_mapping_preload(text, text, date) from public, anon;
 revoke all on function public.last_service_window_start(text, text, timestamptz)
   from public, anon;
+revoke all on function public.last_service_window_end(text, text, timestamptz)
+  from public, anon;
 revoke all on function public.meal_template_apply(text, date, date, boolean)
   from public, anon;
 grant execute on function public.in_service_window(timestamptz, text, text, interval)
   to authenticated;
 grant execute on function public.last_service_window_start(text, text, timestamptz)
+  to authenticated;
+grant execute on function public.last_service_window_end(text, text, timestamptz)
   to authenticated;
 grant execute on function public.offline_after() to authenticated;
 grant execute on function public.current_meal_type(text, timestamptz) to authenticated;
@@ -988,7 +1028,8 @@ select d.device_id,
                 and d.location in ('D','M','T')
                 and d.food_slot is not null
                 and s.updated_at <
-                    public.last_service_window_start(d.timezone, d.device_id),
+                    public.last_service_window_end(d.timezone, d.device_id)
+                      - public.offline_after(),
                 false) as missed_last_service
   from public.devices d
   left join public.device_status s using (device_id)
@@ -1047,7 +1088,8 @@ select d.location,
                and d.location in ('D','M','T')
                and d.food_slot is not null
                and s.updated_at <
-                   public.last_service_window_start(d.timezone, d.device_id),
+                   public.last_service_window_end(d.timezone, d.device_id)
+                     - public.offline_after(),
                false))                                         as any_missed_service
   from public.devices d
   left join public.device_status s using (device_id)

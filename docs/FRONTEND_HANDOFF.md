@@ -93,17 +93,19 @@ cries wolf.
 The two alarms are complementary. `offline` is gated on the service window, so
 outside meals it is false for every device — which is correct, but it made a
 unit dead for six days indistinguishable from a healthy unit between meals.
-`missed_last_service` closes that gap: anchored on the *start* of the last
-completed window (so staff powering a station down early never trips it), gated
-on deployment (a spare parked at `R` has no service to miss), and true until
-the device reports again. The dashboard treats either flag as "offline": the
+`missed_last_service` closes that gap: true when the device was not alive at
+the *close* of the last completed window (`updated_at` < window end −
+`offline_after()`), gated on deployment (a spare parked at `R` has no service
+to miss), and it stays true until the device reports again. A healthy device
+is at most ~40 s stale at close, so the threshold cannot flag a normal
+shutdown — but a station switched off mid-service *is* flagged, deliberately:
+field use showed a unit powered off mid-lunch reading healthy all afternoon. The dashboard treats either flag as "offline": the
 last value is kept on screen but rendered red, because blanking it would send
 someone to a station the screen just went silent about.
 
-Known, deliberate limits: a site holiday flags every deployed device until the
-next served meal, and a device that died *midway* through a window is unflagged
-from that window's close until the next one opens (it was red via `offline`
-while its window ran).
+Known, deliberate limit: a site holiday flags every deployed device until the
+next served meal — a closure looks exactly like a fleet outage, and during a
+trial arguably is one.
 
 **Do not compute your own staleness alarm from `updated_at`**: at 16 dark hours
 a day that would false-alarm on every healthy device and bury the one that
