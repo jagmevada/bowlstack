@@ -576,3 +576,41 @@ required keys without values.
 
 **Never put the `service_role` key in firmware.** It carries `BYPASSRLS` and
 makes every policy in the schema decorative.
+
+---
+
+## 7. Field-trial findings for the next firmware update
+
+Two findings from the 2026-08 field trial are recorded here so the next
+firmware pass picks them up. Neither is a dashboard or server bug; both need
+a device-side change.
+
+### The fleet simulator posts too slowly to look alive
+
+`esp32dev-fleet` (simulating `BWL-002`…`032` in the trial) posts roughly every
+**60 s per simulated node**. The server's `offline_after()` is **40 s** —
+sized for the real firmware's 20 s heartbeat ceiling plus one retry — so every
+simulated unit spends most of each minute flagged offline, then recovers on
+its next post, and flaps. During trial dinners the dashboard's "N stations
+need attention" was dominated by this: 13 of the 15 flagged stations were
+sims.
+
+Fix it in the simulator, not the server: each simulated node must honour the
+real **20 s heartbeat** (or at minimum keep its cadence below
+`offline_after()` minus one retry backoff). Do **not** raise `offline_after()`
+to quiet the sim — 40 s is correct for the hardware, and raising it slows real
+offline detection for the one genuine device in the trial.
+
+### A frozen sensor task still heartbeats
+
+Observed on hardware: the sensor task stalled while the network task kept
+PATCHing, so `updated_at` kept advancing and the station read healthy with a
+frozen count. The server cannot catch this — liveness is inferred from
+writes, and writes were arriving.
+
+The next firmware update should make the heartbeat carry proof of measurement
+progress: include the sensor loop's iteration counter in the payload (the
+server can then flag a station whose counter stops moving), or have the net
+task stop heartbeating when the measurement pipeline has stalled so the
+existing `offline` logic fires. A device that cannot measure must not sound
+healthy — the same principle the battery and presence logic already follow.

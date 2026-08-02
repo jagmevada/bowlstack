@@ -25,6 +25,14 @@ supabase/weekly_menu_and_offline.sql  -- missed_last_service flag, window-edge
                                       -- 2026-08-02; safe to re-run)
 ```
 
+The template is materialised into `meal_food_mapping` every morning by
+**pg_cron**: job `bowlstack-apply-template`, schedule `5 0 * * *`
+(00:05 UTC = 05:35 IST), running `meal_template_apply` per serving area for
+the current day — saved meals are skipped, past dates refused, so a manual
+edit always survives the cron. Created 2026-08-02 from the commented snippet
+at the end of `weekly_menu_and_offline.sql`; check firings in
+`cron.job_run_details`.
+
 Files outside the sequence:
 
 | | |
@@ -274,6 +282,12 @@ hours. It evaluates wall-clock windows in
 each installation's timezone. Adding any `service_windows` row for a device
 replaces the fleet defaults for that device entirely — list all three meals.
 
+> **Trial state (2026-08-02):** the live project temporarily runs debug
+> windows — breakfast 06:30–09:30, lunch 11:30–14:30, dinner **16:30**–21:30 —
+> so offline behaviour could be exercised in the afternoon. Restore the real
+> windows (06:00–09:00 / 11:30–14:00 / 18:30–21:00) before collecting clean
+> trial data.
+
 ---
 
 ## 5. Security
@@ -287,6 +301,16 @@ The device holds only the **anon key**. It gets:
 | `status_events` | `INSERT(payload columns)` |
 
 **No read path to any telemetry column, ever.**
+
+### The dashboard's read path — anonymous sign-in
+
+The dashboard ships the same anon *key* but never runs as the anon *role*: on
+load it calls `auth.signInAnonymously()`, and the minted session carries
+`authenticated` — where every read grant lives. **Authentication → Allow
+anonymous sign-ins** must stay ON (or an email account be configured in
+`config.js`) or the dashboard reads nothing, which on screen is
+indistinguishable from a dead fleet. Not one grant or policy special-cases
+this path.
 
 > **Grants and policies are independent gates and you need both.** Supabase
 > bootstraps every new public table with `ALTER DEFAULT PRIVILEGES ... GRANT ALL
@@ -330,3 +354,8 @@ at the end of `schema.sql`.
 
 `device_status` deliberately has **no index beyond its PK** — 32 rows always
 seq-scan, and a second index would break HOT under that update rate.
+
+Dashboard egress is service-hour shaped: the UI polls `device_overview` +
+`slot_overview` + `meal_menu_template` every 15 s during service, idles to one
+poll per 10 minutes outside meal windows (powered-off devices cannot change
+the rows), and does not poll at all while its tab is hidden.

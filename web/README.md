@@ -63,6 +63,10 @@ That mints a real `authenticated` JWT per browser with no prompt and no account.
 **Not one policy or grant changes** — it is a way of *getting* the authenticated
 role, not of going around it.
 
+A host with no generated `config.js` (Vercel, any plain file host) shows a
+one-time first-run screen instead; the pasted URL + anon key are stored in
+that browser and carry the same silent anonymous sign-in from then on.
+
 > **What this trades away.** With anonymous sign-ins on, anyone who has the site
 > URL can read the fleet — bowl counts, device health, menus — and edit the menu
 > and assignments. For a 2–3 day trial on a page nobody has been given the link
@@ -328,6 +332,25 @@ into both diagnostics copies, so a screenshot or a pasted JSON blob always
 identifies the build it came from. The service-worker cache name is keyed to
 it too, so a deploy cannot leave half an old shell behind.
 
+### Version history
+
+| | |
+| --- | --- |
+| 1.1 | polls patch the DOM in place — no more full-page blink; a device may be saved with no slot |
+| 1.2 | offline devices keep their last value, in red; weekly menu template + template-aware preload |
+| 1.3 | a session hiccup re-authenticates quietly instead of blanking the page; copy one area's template to the others |
+| 1.4 | OFFLINE said in words on Health; Stock's thin problem strip; header chips get true filters (fault ≠ degraded, not-deployed fixed); ≥-bounds corrected; one meaning per colour + the confidence meter |
+| 1.5 | Menu page becomes a capsule verification grid — areas multi-select, meal single-select |
+| 1.6 | weekly template goes multi-area; columns align |
+| 1.7 | "All areas" capsule — type a menu once, save everywhere |
+| 1.8 | an agreed blank deletes everywhere; coverage map header aligns |
+| 1.9 | a touched menu form is the user's — polls keep off it |
+| 1.10 | carry-forward bounded to the last 2 days (needs `weekly_menu_and_offline.sql` re-run on live) |
+| 1.11 | a hand-configured browser (Vercel-style host) never meets the login form — stored connections carry anonymous auto-login |
+| 1.12 | symbolic slot cards: per-stack glyph lines, 4-segment battery bars with charge bolt, page legend; light-theme contrast fixes from adversarial review |
+| 1.13 | fleet counts shown once — the strip carries a single deduplicated figure; chips and strip behave on a phone |
+| 1.14 | the poll idles at 10 min outside service windows; hidden tabs never poll |
+
 ### Tests
 
 ```powershell
@@ -336,7 +359,7 @@ npm install      # jsdom, only for the test — the app itself has no dependenci
 node smoke.mjs
 ```
 
-217 assertions. It loads the real `index.html`, stubs PostgREST with rows shaped
+221 assertions. It loads the real `index.html`, stubs PostgREST with rows shaped
 like `device_overview` / `slot_overview` / `status_events`, and drives every
 screen. It exists to protect the rules in the section above — each is one
 plausible edit away from breaking with nothing visibly wrong on screen.
@@ -346,7 +369,11 @@ plausible edit away from breaking with nothing visibly wrong on screen.
 - **No access control.** With anonymous sign-in on, anyone with the URL can read
   the fleet and edit menus and assignments. Deliberate for a trial; not a
   production posture.
-- **No realtime.** Worst-case staleness is one poll, 15 s.
+- **No realtime.** Worst-case staleness is one poll: 15 s during service.
+  Outside meal windows the poll idles to 10 minutes — the devices are powered
+  off, so the rows cannot change and a fast poll is pure egress — and a hidden
+  tab does not poll at all. Returning to the tab refreshes immediately, and
+  the freshness line says when the poll is idling.
 - **Session drops recover silently.** A token-refresh hiccup mid-session
   re-signs-in underneath the page: no gate, no redraw, nothing typed is lost.
   The full-screen connecting gate appears only on cold boot or when sign-in

@@ -68,6 +68,11 @@ Devices are powered **only during meal service** — breakfast 06:00–09:00, lu
 11:30–14:00, dinner 18:30–21:00 — and dark the other ~16 hours. Absence of data
 outside those windows is normal, and every liveness check is service-hour aware.
 
+> **Trial state:** the live project temporarily runs debug windows (dinner
+> preponed to 16:30 among others) so offline logic could be exercised in the
+> afternoon. Restore the real windows above before collecting clean trial data —
+> see [docs/supabase.md](docs/supabase.md) §4.
+
 ---
 
 ## Status
@@ -83,8 +88,8 @@ monitoring.
 | **3 — telemetry** | done. WiFi with captive-portal commissioning, Supabase uplink with offline buffering |
 | **4 — task fabric** | done. FreeRTOS split so measurement never stalls on the network |
 | **5 — indicators & power** | done. Five status LEDs, measured Li-ion SoC curve, charger sense |
-| **6 — fleet stress test** | next. Simulate 32 devices against Supabase |
-| **7 — front-end** | trial prototype in [web/](web/) — all five screens against the live schema. See [web/README.md](web/README.md) |
+| **6 — fleet stress test** | in progress. `esp32dev-fleet` simulates `BWL-002`…`032` against the live project. Known sim gap: its ~60 s post cadence exceeds the 40 s offline threshold, so simulated units flap offline on the dashboard — see [docs/firmware.md](docs/firmware.md) §7 |
+| **7 — front-end** | **live** — v1.14 on GitHub Pages: five screens, weekly-menu template with morning auto-apply, offline/fault surfacing, symbolic per-stack status with battery bars, service-hour-aware polling. 221-assertion smoke suite. See [web/README.md](web/README.md) |
 
 ### Verified on hardware
 
@@ -114,6 +119,12 @@ supabase/seed_meal_mapping.sql -- sample menus, for the front-end test bed
 supabase/reset_spares.sql      -- restores awaiting_deployment for the reserved 8
 supabase/smoke_test.sql        -- 20 assertions; expect ALL PASS
 ```
+
+On a database that is **already live**, never re-run `schema.sql`. Additive
+changes ship as their own idempotent file — currently
+`supabase/weekly_menu_and_offline.sql` (weekly menu template, the
+`missed_last_service` flag, service-window edge fix; applied 2026-08-02).
+See [docs/supabase.md](docs/supabase.md) §1.
 
 > `schema.sql` **drops the `devices` registry too**, so re-running it always
 > leaves the fleet unprovisioned. `register_devices.sql` is part of the same

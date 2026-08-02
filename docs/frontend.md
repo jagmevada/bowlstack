@@ -38,6 +38,16 @@ Design implications worth deciding early:
 - **Outside service hours the numbers are last-known, not live.** `data_is_stale`
   says so; the UI must, too, or a coordinator will act on a stale count.
 
+**As built (v1.14):** the count renders in ink, with red reserved for exactly
+one meaning — the figure is compromised (offline / fault / degraded somewhere
+in the position). A capsule meter under the number carries data confidence. Each
+stack is one symbolic line — state glyph (● ✕ ▲ ◐ ◌), id, count, and a
+4-segment battery glyph with a charge bolt — with a once-per-page legend; the
+words live in tooltips and on Health. Fleet counts are itemized once, in the
+header capsules; a one-line red strip carries a single deduplicated
+"N stations need attention" and routes to Health. Outside service windows the
+poll idles at 10 minutes to save egress.
+
 ### Health view
 
 Battery, charging, `sensors_online`, firmware, `offline`,
@@ -119,6 +129,12 @@ are the ones most likely to be got wrong by reasonable assumption.
 
 `device_id` is not updatable from the UI — it is the installation's identity and
 the key every history row hangs off.
+
+The dashboard itself signs in **anonymously** — Supabase **Authentication →
+Allow anonymous sign-ins** is ON, and an anonymous session carries the
+`authenticated` role. No staff accounts exist. Do not switch anonymous sign-ins
+off without configuring an account first, or every deployed dashboard reads
+nothing and renders like a dead fleet.
 
 Devices cannot read **any** telemetry column, including their own. That is
 enforced by column-level grants rather than policies, so it holds even for

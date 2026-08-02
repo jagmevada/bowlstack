@@ -35,6 +35,13 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
 > only for the devices, which have write-only access. If a query returns empty
 > where you expect rows, check the session first.
 
+The shipped dashboard gets its session with `auth.signInAnonymously()` —
+**Authentication → Sign In / Providers → Allow anonymous sign-ins** must stay
+ON in the project. An anonymous *session* carries the `authenticated` role
+(this is unrelated to the anon *key* the devices hold); there are no staff
+accounts. Email/password sign-in remains a supported fallback
+([../web/README.md](../web/README.md) §3).
+
 ---
 
 ## 3. The one thing to read: `device_overview`
@@ -53,7 +60,6 @@ const { data } = await supabase.from('device_overview').select('*')
 | `current_food` | text | what this slot is serving right now, or `null` outside service hours |
 | `current_meal` | text | `Breakfast` / `Lunch` / `Dinner`, or `null` |
 | `label` | text | free text you set |
-| `location` | text | free text you set |
 | `timezone` | text | IANA zone, drives service-hour logic |
 | `reported` | bool | has this device *ever* reported |
 | `updated_at` | timestamptz | last report |
@@ -249,7 +255,10 @@ supabase.channel('bowlstack')
 > **Realtime cannot detect `offline`.** Going offline is the *absence* of an
 > update, so no `postgres_changes` event ever fires for it — the flag is computed
 > from `now()` at query time. You must poll `device_overview` to see it. The trial
-> dashboard polls every 20 s for exactly this reason.
+> dashboard polls every 15 s for exactly this reason — during service. Outside
+> every meal window it idles to one poll per **10 minutes**: powered-off devices
+> cannot change the rows, so a fast poll there is pure egress. A hidden tab does
+> not poll at all; returning to it refreshes immediately.
 
 **How fast is offline?** `offline` goes true once a device that *should* be
 reporting has been silent for `public.offline_after()` — currently **40 s**. With
@@ -305,6 +314,10 @@ boot grace after opening** (power-on + WiFi join + first report) and a **sharp
 close**. The old ±10-minute margin alarmed the whole fleet at both edges of
 every meal — before opening (window "open", devices not yet booted) and after
 close (devices legitimately off, still "expected").
+
+> **Trial state:** the live project temporarily runs debug windows (breakfast
+> 06:30–09:30, lunch 11:30–14:30, dinner **16:30**–21:30). The table above is
+> the real schedule, to be restored before clean trial data.
 
 A stack is **0–4** bowls. A device replaced in the field keeps its `device_id`;
 only `mac` changes.
