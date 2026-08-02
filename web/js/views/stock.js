@@ -14,7 +14,8 @@
 import { h, badge, empty, banner } from '../ui.js';
 import {
   LOCATION_NAMES, SERVING_LOCATIONS, MAX_BOWLS, slotStock, deviceStack,
-  deviceOffline, slotOffline, fleetSummary, fmtClock, fmtRelative, serviceState,
+  deviceOffline, slotOffline, fleetSummary, weekdayOf, serviceDate,
+  fmtClock, fmtRelative, serviceState,
 } from '../domain.js';
 
 export function renderStock(state) {
@@ -85,14 +86,17 @@ export function renderStock(state) {
       h('span', { class: 'dim' }, `${totalTrusted} of ${totalCap} bowls across ${rows.length} positions`)));
 
     const grid = h('div', { class: 'slot-grid' });
-    for (const sl of rows) grid.append(slotCard(sl, byPosition.get(`${loc}|${sl.food_slot}`) || [], inService, tz));
+    for (const sl of rows) {
+      grid.append(slotCard(sl, byPosition.get(`${loc}|${sl.food_slot}`) || [],
+        inService, tz, state.template || []));
+    }
     frag.append(grid);
   }
 
   return frag;
 }
 
-function slotCard(sl, stacks, inService, tz) {
+function slotCard(sl, stacks, inService, tz, template) {
   const stock = slotStock(sl);
 
   // The server's flags are the authority; the per-device rows only quantify
@@ -110,10 +114,28 @@ function slotCard(sl, stacks, inService, tz) {
   card.append(h('div', { class: 'slot-top' },
     h('span', { class: 'slot-pos' }, `Slot ${sl.food_slot}`)));
 
+  // The dish comes ONLY from dated rows (sl.current_food) — the weekly
+  // template is never displayed as the menu, or a service could pass with a
+  // dish on screen and no record behind it. But when the template HAS a plan
+  // for this very slot and nobody has applied it, "No menu entered" is the
+  // wrong message: the menu exists, it just needs one press of Apply. Say
+  // that instead; the planned dish rides in the tooltip only.
+  const plan = !sl.current_food && inService && sl.current_meal
+    ? template.find(t => t.location === sl.location
+        && Number(t.food_slot) === Number(sl.food_slot)
+        && t.meal_type === sl.current_meal
+        && t.weekday === weekdayOf(serviceDate(tz)))
+    : null;
   card.append(sl.current_food
     ? h('div', { class: 'slot-food' }, sl.current_food)
-    : h('div', { class: 'slot-food unset' },
-        inService ? 'No menu entered' : 'No current dish'));
+    : plan
+      ? h('div', {
+          class: 'slot-food unset',
+          title: `The weekly template plans "${plan.food_name}" here, but it is not `
+            + 'recorded for today. Menu → Weekly template → Apply to dates.',
+        }, 'Menu not applied — see Menu › Apply')
+      : h('div', { class: 'slot-food unset' },
+          inService ? 'No menu entered' : 'No current dish'));
 
   // The headline. A discontiguous stack anywhere in this position means the
   // total is not a number to act on, so it is not rendered as one.

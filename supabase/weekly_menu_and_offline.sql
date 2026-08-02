@@ -645,3 +645,34 @@ select 99, '== VERDICT ==',
        case when bool_and(result = 'PASS') then 'ALL PASS' else 'FAILURES ABOVE' end
   from checks
 order by ord;
+
+-- ---------------------------------------------------------------------
+--  OPTIONAL: apply the template automatically every morning.
+--
+--  Without this, the template reaches the dashboard only when someone
+--  presses Apply (or Save in the daily editor) -- and a filled template
+--  with an empty Stock page reads as a bug. With it, today's menus
+--  materialise at 05:35 IST, before breakfast opens:
+--
+--    - same-day only, so a later template edit affects at most the current
+--      day's yet-unserved meals, never a pre-filled week;
+--    - the apply RPC still skips any meal someone has already entered, so
+--      manual per-date changes always win;
+--    - staff can still edit today's menus afterwards -- the rows exist, so
+--      the daily editor updates them in place.
+--
+--  Enable pg_cron first (Dashboard > Database > Extensions), then run:
+--
+-- select cron.schedule('bowlstack-apply-template', '5 0 * * *',  -- 00:05 UTC = 05:35 IST
+-- $$
+-- do $body$
+-- declare
+--   l text;
+--   d date := public.current_meal_date('Asia/Kolkata');
+-- begin
+--   foreach l in array array['D','M','T'] loop
+--     perform * from public.meal_template_apply(l, d, d);
+--   end loop;
+-- end $body$;
+-- $$);
+-- ---------------------------------------------------------------------

@@ -31,6 +31,7 @@ const POLL_MS = 15_000;
 const state = {
   devices: [],
   slots: [],
+  template: [],
   loadedAt: null,
   error: null,
   loading: false,
@@ -280,16 +281,25 @@ async function refresh(manual = false) {
   const slowHint = setTimeout(() => el.view.classList.add('is-refetching'), 1200);
 
   try {
-    const [devices, slots] = await Promise.all([
+    const [devices, slots, template] = await Promise.all([
       client.from('device_overview').select('*')
         .order('location', { nullsFirst: false }).order('food_slot', { nullsFirst: false })
         .then(unwrap),
       client.from('slot_overview').select('*')
         .order('location').order('food_slot')
         .then(unwrap),
+      // The weekly template, so Stock's empty state can say "the plan exists,
+      // apply it" instead of a bare "No menu entered". Display still comes
+      // ONLY from dated rows; this powers a hint, never a dish. Tolerates the
+      // table not existing (pre-migration database).
+      client.from('meal_menu_template')
+        .select('location, weekday, meal_type, food_slot, food_name')
+        .then(r => (r.error ? [] : r.data || []))
+        .catch(() => []),
     ]);
     state.devices = devices || [];
     state.slots = slots || [];
+    state.template = template || [];
     state.loadedAt = Date.now();
     state.error = null;
   } catch (err) {

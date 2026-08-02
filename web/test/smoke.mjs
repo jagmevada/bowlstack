@@ -171,13 +171,17 @@ const preload = [1, 2, 3, 4, 5].map(s => ({
   food_slot: s, food_name: MENU.D[s], source_date: '2026-07-26', is_saved: false,
 }));
 
-// Weekly template fixture: D has a full Lunch row set for every weekday.
+// Weekly template fixture: D has a full Lunch row set for every weekday,
+// and M slot 6 has a plan — the position whose dated menu is deliberately
+// missing, so the "menu not applied" hint has something to point at.
 const templateRows = [];
 for (let wd = 0; wd <= 6; wd++) {
   for (let slot = 1; slot <= 5; slot++) {
     templateRows.push({ location: 'D', weekday: wd, meal_type: 'Lunch',
                         food_slot: slot, food_name: `T-${MENU.D[slot]}` });
   }
+  templateRows.push({ location: 'M', weekday: wd, meal_type: 'Lunch',
+                      food_slot: 6, food_name: 'T-PlannedDish' });
 }
 
 // ---- fake PostgREST ---------------------------------------------------
@@ -192,12 +196,19 @@ function builder(table) {
     api[m] = (...args) => { rec.filters.push([m, ...args]); return api; };
   }
   api.then = (res, rej) => {
-    const data = table === 'device_overview' ? devices
+    let data = table === 'device_overview' ? devices
       : table === 'slot_overview' ? slots
       : table === 'status_events' ? events
       : table === 'meal_food_mapping' ? [{ meal_type: 'Lunch', food_slot: 1, food_name: 'Rice' }]
       : table === 'meal_menu_template' ? templateRows
       : [];
+    // Honour eq filters on the template table — the week editor queries per
+    // location, and handing it every location's rows corrupted its counts.
+    if (table === 'meal_menu_template') {
+      for (const f of rec.filters) {
+        if (f[0] === 'eq') data = data.filter(r => String(r[f[1]]) === String(f[2]));
+      }
+    }
     return Promise.resolve({ data, error: null }).then(res, rej);
   };
   return api;
@@ -392,6 +403,21 @@ console.log('\n[offline: last value kept, in red]');
   ok('clicking it opens Health filtered to problems',
     location.hash === '#/health?f=problems', location.hash);
   await go('#/stock');
+}
+
+console.log('\n[stock: template vs daily priority]');
+{
+  // The dish on a card comes ONLY from the dated daily menu. The template is
+  // a plan: when it covers a slot whose daily menu is missing, the card says
+  // "apply it" — it never shows the planned dish as if it were recorded.
+  const cards = [...view.querySelectorAll('.slot')];
+  const m6 = cards.find(c => /Menu not applied/.test(c.textContent));
+  ok('an unapplied plan says so instead of "No menu entered"', !!m6);
+  ok('the planned dish never renders as the menu', !m6?.textContent.includes('T-PlannedDish'));
+  ok('but the tooltip names it for the curious',
+    /T-PlannedDish/.test(m6?.querySelector('.slot-food')?.title || ''));
+  const dailyCard = cards.find(c => c.textContent.includes('Khichdi'));
+  ok('a recorded daily menu shows its dish, template or not', !!dailyCard);
 }
 
 console.log('\n[health]');
