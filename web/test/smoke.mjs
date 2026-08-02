@@ -437,6 +437,24 @@ ok('degraded filter shows exactly the degraded devices',
   ok('degraded chip routes to its own filter', location.hash === '#/health?f=degraded');
 }
 
+// The not-deployed chip routed to the UNFILTERED page, so "17 not deployed"
+// opened a list of everything — deployed and not.
+await go('#/stock');
+{
+  const chips = [...window.document.getElementById('fleet-chips').children];
+  const nd = chips.find(c => /not deployed/.test(c.textContent));
+  ok('not-deployed chip exists', !!nd);
+  nd.dispatchEvent(new window.Event('click'));
+  await new Promise(r => setTimeout(r, 150));
+  ok('it routes to its own filter', location.hash === '#/health?f=awaiting', location.hash);
+  const rows = [...view.querySelectorAll('.dev')];
+  ok('shows exactly the never-reported devices', rows.length === 9,
+    String(rows.length));
+  ok('every row is an awaiting one', rows.every(r => /Never reported|awaiting/.test(r.textContent)));
+  ok('no deployed device leaks in', !rows.some(r => r.textContent.includes('BWL-001')));
+  ok('the hidden-count banner stays truthful', /23 of 32 devices hidden/.test(text()));
+}
+
 console.log('\n[device]');
 await go('#/device/BWL-008?h=24');
 ok('queried status_events', calls.some(c => c.table === 'status_events'));

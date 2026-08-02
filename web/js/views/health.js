@@ -31,6 +31,10 @@ const FILTERS = {
   battery:  { label: 'Battery', test: d => d.battery_level === 'low' || d.battery_level === 'critical' },
   fault:    { label: 'Faults', test: d => d.stack_status === 'discontiguous' },
   degraded: { label: 'Degraded', test: d => d.stack_status === 'degraded' },
+  // Registered but never heard from. These live in their own section rather
+  // than the deployed list, so the filter's job is to show THAT section
+  // alone — see the render conditions below.
+  awaiting: { label: 'Not deployed', test: d => d.awaiting_deployment },
 };
 
 export function renderHealth(state, params) {
@@ -99,7 +103,8 @@ export function renderHealth(state, params) {
   // Say out loud when devices are being withheld. A pressed toolbar button is
   // too quiet: arriving here from a fleet chip lands on `?f=offline`, and a
   // healthy device then looks absent rather than filtered out.
-  const hiddenCount = devices.length - live.length - (searching || active === 'all' ? waiting.length : 0);
+  const waitingShown = searching || active === 'all' || active === 'awaiting';
+  const hiddenCount = devices.length - live.length - (waitingShown ? waiting.length : 0);
   if (searching) {
     frag.append(banner('info', '⌕',
       h('b', {}, `Showing ${live.length + waiting.length} matching “${query}”. `),
@@ -133,11 +138,11 @@ export function renderHealth(state, params) {
         h('h2', {}, searching ? 'Matches' : active === 'all' ? 'Deployed' : FILTERS[active].label),
         h('span', { class: 'count' }, `${live.length} device${live.length === 1 ? '' : 's'}`)),
       list));
-  } else if (active !== 'all' && !searching) {
+  } else if (active !== 'all' && active !== 'awaiting' && !searching) {
     frag.append(banner('info', '✓', 'Nothing in this category. '));
   }
 
-  if (waiting.length && (searching || active === 'all')) {
+  if (waiting.length && waitingShown) {
     const list = h('div', { class: 'dev-list' });
     for (const d of waiting) list.append(deviceRow(d, tz));
     frag.append(h('div', { class: 'section' },

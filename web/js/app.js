@@ -354,7 +354,10 @@ function renderChrome() {
     'A sensor itself is down — the bowl count is a lower bound.'));
   chips.push(chip('battery', s.batteryWarn, 'warning', 'battery',
     'Battery low or critical'));
-  if (s.awaiting) chips.push(chip('not deployed', s.awaiting, 'good', null));
+  if (s.awaiting) {
+    chips.push(chip('not deployed', s.awaiting, 'good', 'awaiting',
+      'Registered but never heard from — awaiting installation, not a fault'));
+  }
   chips.push(h('span', {
     class: 'chip', style: 'cursor:default',
     title: 'Deployed devices not currently flagged offline or missed-service. '
