@@ -205,27 +205,35 @@ the same class of failure as the floating pin that once read 6365 mV as
       corrupt-looking crash far from its cause
 - [ ] Compile `indicators` out under the board macro
 - [ ] Screens: stock, health, setup
-- [ ] **Image retention — a real risk for this product, not a curiosity.**
-      Observed 2026-08-17: a faint `2` from an earlier build remained visible in
-      its old position across several power cycles. It is not a stale buffer —
-      a framebuffer cannot survive a reboot and the ST7789's GRAM is fully
-      overwritten by `fillScreen()` at every boot. It is LCD image retention
-      from a high-contrast 48 px glyph parked in one spot for a long time, and
-      it fades once other content has been shown.
+- [x] ~~**Image retention**~~ — **PARKED, deliberately.** Implemented, verified
+      harmless, then switched off. Decided 2026-08-17.
 
-      That is exactly what this product does for a living: `README.md` says
-      units are powered ~8 h/day through meal service, and the stock view is a
-      near-static digit that changes a handful of times per service. Mitigations
-      worth choosing between:
+      A faint `2` from an earlier build did survive several power cycles, and it
+      was not a stale buffer (a framebuffer cannot survive a reboot, and the
+      ST7789's GRAM is overwritten by `fillScreen()` at every boot). But the
+      panel is **IPS-TFT, not OLED**, and that distinction decides the priority:
 
-      - **pixel shift** — nudge the whole layout 1–2 px on a slow cycle, the way
-        TVs and station clocks do. Cheap, invisible, and the standard answer.
-      - **dim or blank when idle** — also saves battery, but hides the number a
-        coordinator may be walking over to read.
-      - **lower average luminance** — already partly done: the background is now
-        pure black rather than near-black.
+      | | mechanism | permanent? |
+      | --- | --- | --- |
+      | OLED burn-in | organic emitters age differentially | **yes** |
+      | LCD image persistence | residual DC charge in the liquid crystal | **no** — self-recovers |
 
-      Pixel shift is the one to implement; the others are complements.
+      What was seen is the second, which is why it faded on its own. There is no
+      cumulative damage to defend against, so the ongoing complexity is not
+      worth it on this hardware.
+
+      The mechanism stays in the tree, off: `ui::pixelShiftTick()` is
+      implemented and the calls in `sim_main.cpp` and `bringup_display.cpp` are
+      commented out, one line each. Gallery **page 6** still demonstrates it at
+      1 Hz with a toggle.
+
+      Re-open this only if the panel is ever swapped for an OLED, where the same
+      pattern of use would cause real, permanent damage.
+
+      > Verified on hardware while it was live: whole-pixel shifting **softens
+      > nothing**. 1 px hairlines stayed crisp white at all 8 offsets, no
+      > greying. Integer `translate_x/y` relocates rendered values without
+      > resampling them — worth knowing if this is ever revived.
 - [ ] **Dadabhagwan Foundation logo as the boot splash.** The colour-bar test
       pattern is now off by default (`-DBRINGUP_COLOR_BARS=1` brings it back)
       and a plain "Bowlstack" text splash stands in its place. Draw the logo

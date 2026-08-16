@@ -68,10 +68,11 @@ int main(int, char **) {
   while (running) {
     lv_timer_handler();
 
-    // The SHIPPING cadence, 60 s, driving the stock view on page 5. Page 6
-    // runs the same ring at 1 Hz on its own content so the effect can actually
-    // be watched; this one is meant to be invisible.
-    ui::pixelShiftTick(SDL_GetTicks());
+    // Pixel shift is OFF -- see todo.md. This panel is IPS-TFT, so what was
+    // observed was image PERSISTENCE (temporary, self-recovering) rather than
+    // OLED burn-in (permanent). Not worth engineering for. Gallery page 6 still
+    // demonstrates the mechanism on demand.
+    // ui::pixelShiftTick(SDL_GetTicks());
 
     if (ui::demoTick(SDL_GetTicks())) {
       // demoTick advances AFTER rendering the current one, so the name of what
