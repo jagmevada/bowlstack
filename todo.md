@@ -5,6 +5,55 @@ Rationale for each is in [docs/waveshare_port.md](docs/waveshare_port.md).
 
 ---
 
+## Resume here
+
+**State as of 2026-08-17.** Bowlstack is being ported from the discrete ESP32
+board to a **Waveshare ESP32-S3-Touch-LCD-2** — 2" 240×320 IPS, CST816D touch,
+on-board Li-ion charging. The touchscreen **replaces** the five discrete status
+LEDs. Work is on branch `touch-ui`, off `main`; the discrete build on `main` is
+untouched and still the working prototype.
+
+**Done:** board pin map established from the schematic netlist, LVGL 9.5 +
+LovyanGFX 1.2 stack chosen and wired up, six-stage bring-up harness written and
+**building clean** (RAM 26.6%, flash 12.4%). Not yet run on hardware.
+
+**Hardware on hand: the bare board on USB. Nothing else.** No sensors, no mux,
+no header wiring. That is what makes the next step what it is.
+
+**Next step, agreed:** a **mock state source** producing `DeviceStatus` /
+`PlotFrame` values, so the UI can be built and demoed with no sensors attached.
+It is not a testing nicety — it is what makes UI work possible at all right now.
+It also fits the existing architecture: `Reading reading(uint8_t level)` and
+`tasks::snapshot()` are already the seams, so a mock sits behind them and the
+`ui` module cannot tell the difference. Same property that lets the mux drop in
+later without touching `bowl_logic`.
+
+Then, in order: `ui` module taking the `leds` task slot → stock screen →
+health screen.
+
+**First thing to try on hardware:**
+
+```
+pio run -e ws-s3-bringup -t upload --upload-port COMx
+```
+
+Console is over **native USB**, not UART — the port re-enumerates after
+flashing. Expected output and what each stage rules out is in
+[docs/waveshare_port.md](docs/waveshare_port.md) §5.
+
+> On this machine `pio` is not on PATH — use
+> `~/.platformio/penv/Scripts/pio.exe`. Builds take ~10 minutes, and **`pio`
+> exits 0 even when the build FAILED**, so read the status line, not the exit
+> code.
+
+**Do not re-derive the board pinout.** It is in
+[include/board_waveshare_s3.h](include/board_waveshare_s3.h), cited line by line
+to `ESP32-S3-Touch-LCD-2-SchDoc.pdf`. Waveshare's wiki returns 403 to automated
+fetches, and search engines will cheerfully echo back whatever pin numbers
+appear in the question — the netlist PDF was the only source trusted here.
+
+---
+
 ## In the lab — hardware not yet in hand
 
 ### 1. Charger-sense mod — one resistor
@@ -102,6 +151,12 @@ already fitted (`R4`, `R5`), idle unless a camera is plugged into `J1`.
       `esp32dev-debug` cannot build on this PC at all — `src/telemetry.cpp:10`
       and `src/net.cpp:7` both include it. Copy `include/secret.h.example` and
       fill it in. (`ws-s3-bringup` is unaffected; it links no networking.)
+
+> Both discrete environments were **verified to still build** with the port
+> changes in place — `esp32dev` and `esp32dev-debug` both SUCCESS — by injecting
+> a stub copy of `secret.h.example` from outside the tree with
+> `PLATFORMIO_BUILD_FLAGS="-I <stubdir>"`. So the missing header is the only
+> thing stopping them here; `build_src_filter` did not break them.
 
 ---
 
