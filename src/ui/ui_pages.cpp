@@ -74,8 +74,19 @@ void buildPages() {
   // area rather than the screen -- the status bar is deliberately still
   // reachable while a detail page is open.
   detail_ = lv_obj_create(scr);
-  lv_obj_set_width(detail_, LV_PCT(100));
-  lv_obj_set_height(detail_, LV_PCT(100));
+  // IGNORE_LAYOUT, and this is the fix for a real bug rather than a tidy-up.
+  //
+  // The screen is a flex COLUMN. Without this flag the detail panel is a flex
+  // ITEM, so it is placed after the status bar and the tileview rather than
+  // over them -- 100% height starting 26 px down, i.e. 26 px of it hanging off
+  // the bottom. On screen that presented as the last row of the keyboard being
+  // sliced, which looks like a keyboard sizing problem and is not.
+  //
+  // Taken out of the flow it needs explicit geometry, which is also the honest
+  // description of what it is: an overlay pinned below the status bar.
+  lv_obj_add_flag(detail_, LV_OBJ_FLAG_IGNORE_LAYOUT);
+  lv_obj_set_pos(detail_, 0, STATUS_H);
+  lv_obj_set_size(detail_, SCREEN_W, SCREEN_H - STATUS_H);
   lv_obj_set_style_pad_all(detail_, 0, LV_PART_MAIN);
   lv_obj_set_style_border_width(detail_, 0, LV_PART_MAIN);
   lv_obj_set_style_radius(detail_, 0, LV_PART_MAIN);

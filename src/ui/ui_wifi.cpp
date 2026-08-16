@@ -11,6 +11,8 @@ const uint32_t C_PANEL = 0x161B22;
 const uint32_t C_BORDER = 0x30363D;
 const uint32_t C_TEXT = 0xE6EDF3;
 const uint32_t C_MUTED = 0x8B949E;
+const uint32_t C_KEY = 0x21262D;
+const uint32_t C_KEY_ACT = 0x1F6F43;
 const uint32_t C_OK = 0x3FB950;
 const uint32_t C_FAULT = 0xF85149;
 
@@ -25,18 +27,107 @@ Network nets_[WIFI_MAX_NETWORKS];
 uint8_t netCount_ = 0;
 uint8_t selected_ = 0;
 
-lv_obj_t *root_ = nullptr;
 lv_obj_t *viewMain_ = nullptr;
 lv_obj_t *viewPass_ = nullptr;
-lv_obj_t *lblStatus_ = nullptr;
 lv_obj_t *lblPassSsid_ = nullptr;
 lv_obj_t *taPass_ = nullptr;
-lv_obj_t *list_ = nullptr;
+lv_obj_t *kb_ = nullptr;
+lv_obj_t *btnShift_ = nullptr;
 
 void (*onClose_)(void) = nullptr;
+void (*onJoin_)(const char *, const char *) = nullptr;
 
-// Same thresholds as the status bar, so a network showing three bars here and
-// three bars up there means the same thing.
+// --- the split keyboard ----------------------------------------------------
+// FIVE COLUMNS, NOT TEN. A full QWERTY row on a 240 px panel gives ~22 px keys,
+// which is roughly half a fingertip -- you cannot reliably hit the one you
+// aimed at, and for a passphrase every miss is invisible until the join fails.
+//
+// So the alphabet is split down the middle the way it already reads -- qwert |
+// yuiop -- and the arrow keys move between halves. Each key becomes ~46 px
+// wide, which is a real target. The cost is one extra tap when a character is
+// on the other half, which is cheap against mistyping.
+//
+// Case lives on a shift key in the HEADER rather than in the grid, so it does
+// not consume one of the twenty slots and cannot be hit by accident mid-word.
+bool upper_ = false;
+bool symbols_ = false;
+bool rightHalf_ = false;
+
+const char *KB_AL[] = {"q", "w", "e", "r", "t", "\n",
+                       "a", "s", "d", "f", "g", "\n",
+                       "z", "x", "c", "v", "b", "\n",
+                       "123", "space", LV_SYMBOL_BACKSPACE, LV_SYMBOL_RIGHT, ""};
+const char *KB_AU[] = {"Q", "W", "E", "R", "T", "\n",
+                       "A", "S", "D", "F", "G", "\n",
+                       "Z", "X", "C", "V", "B", "\n",
+                       "123", "space", LV_SYMBOL_BACKSPACE, LV_SYMBOL_RIGHT, ""};
+const char *KB_BL[] = {"y", "u", "i", "o", "p", "\n",
+                       "h", "j", "k", "l", "m", "\n",
+                       "n", ",", ".", "-", "_", "\n",
+                       "123", "space", LV_SYMBOL_BACKSPACE, LV_SYMBOL_LEFT, ""};
+const char *KB_BU[] = {"Y", "U", "I", "O", "P", "\n",
+                       "H", "J", "K", "L", "M", "\n",
+                       "N", ",", ".", "-", "_", "\n",
+                       "123", "space", LV_SYMBOL_BACKSPACE, LV_SYMBOL_LEFT, ""};
+// WPA passphrases are full of these, and a keyboard that cannot produce them is
+// one that cannot join half the networks it can see.
+const char *KB_SA[] = {"1", "2", "3", "4", "5", "\n",
+                       "6", "7", "8", "9", "0", "\n",
+                       "@", "#", "$", "%", "&", "\n",
+                       "abc", "space", LV_SYMBOL_BACKSPACE, LV_SYMBOL_RIGHT, ""};
+const char *KB_SB[] = {"!", "?", "+", "=", "/", "\n",
+                       ":", ";", "(", ")", "'", "\n",
+                       "*", "[", "]", "~", "^", "\n",
+                       "abc", "space", LV_SYMBOL_BACKSPACE, LV_SYMBOL_LEFT, ""};
+
+void refreshKb() {
+  const char **map;
+  if (symbols_) map = rightHalf_ ? KB_SB : KB_SA;
+  else if (upper_) map = rightHalf_ ? KB_BU : KB_AU;
+  else map = rightHalf_ ? KB_BL : KB_AL;
+  lv_buttonmatrix_set_map(kb_, map);
+
+  if (btnShift_) {
+    lv_obj_t *l = lv_obj_get_child(btnShift_, 0);
+    if (l) lv_label_set_text(l, upper_ ? "AB" : "ab");
+  }
+}
+
+void onKey(lv_event_t *e) {
+  lv_obj_t *bm = (lv_obj_t *)lv_event_get_target(e);
+  const char *txt = lv_buttonmatrix_get_button_text(bm, lv_buttonmatrix_get_selected_button(bm));
+  if (!txt || !taPass_) return;
+
+  if (strcmp(txt, LV_SYMBOL_RIGHT) == 0 || strcmp(txt, LV_SYMBOL_LEFT) == 0) {
+    rightHalf_ = !rightHalf_;
+    refreshKb();
+    return;
+  }
+  if (strcmp(txt, "123") == 0 || strcmp(txt, "abc") == 0) {
+    symbols_ = !symbols_;
+    rightHalf_ = false;
+    refreshKb();
+    return;
+  }
+  if (strcmp(txt, LV_SYMBOL_BACKSPACE) == 0) {
+    lv_textarea_delete_char(taPass_);
+    return;
+  }
+  if (strcmp(txt, "space") == 0) {
+    lv_textarea_add_text(taPass_, " ");
+    return;
+  }
+  lv_textarea_add_text(taPass_, txt);
+}
+
+void onShift(lv_event_t *) {
+  upper_ = !upper_;
+  symbols_ = false;
+  refreshKb();
+}
+
+// Same thresholds as the status bar, so three bars here and three bars up there
+// mean the same thing.
 uint8_t barsFor(int16_t rssi) {
   if (rssi >= -55) return 4;
   if (rssi >= -65) return 3;
@@ -58,47 +149,75 @@ void onNetworkClicked(lv_event_t *e) {
   const uint32_t idx = (uint32_t)(uintptr_t)lv_event_get_user_data(e);
   if (idx >= netCount_) return;
   selected_ = (uint8_t)idx;
-
-  lv_label_set_text_fmt(lblPassSsid_, "%s", nets_[selected_].ssid);
+  lv_label_set_text(lblPassSsid_, nets_[selected_].ssid);
   lv_textarea_set_text(taPass_, "");
+  upper_ = false;
+  symbols_ = false;
+  rightHalf_ = false;
+  refreshKb();
   showPassView(true);
 }
 
-void onPassBack(lv_event_t *) { showPassView(false); }
+void onJoin(lv_event_t *) {
+  if (!taPass_) return;
+  const char *pass = lv_textarea_get_text(taPass_);
+  // Handed to the platform rather than acted on here. ui_wifi draws and
+  // collects; it does not know what a radio is -- the same separation that lets
+  // this whole page compile and run in the desktop preview.
+  if (onJoin_) onJoin_(nets_[selected_].ssid, pass);
+  showPassView(false);
+}
 
+void onPassBack(lv_event_t *) { showPassView(false); }
 void onClose(lv_event_t *) {
   if (onClose_) onClose_();
+}
+
+lv_obj_t *iconButton(lv_obj_t *parent, const char *label, int16_t w, int16_t h,
+                     lv_event_cb_t cb) {
+  lv_obj_t *b = lv_button_create(parent);
+  lv_obj_set_size(b, w, h);
+  lv_obj_set_style_radius(b, 4, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(b, lv_color_hex(C_KEY), LV_PART_MAIN);
+  lv_obj_add_event_cb(b, cb, LV_EVENT_CLICKED, nullptr);
+  lv_obj_t *l = lv_label_create(b);
+  lv_obj_set_style_text_font(l, &lv_font_montserrat_16, LV_PART_MAIN);
+  lv_label_set_text(l, label);
+  lv_obj_center(l);
+  return b;
 }
 
 void addNetworkRow(lv_obj_t *parent, uint8_t idx) {
   lv_obj_t *row = lv_obj_create(parent);
   lv_obj_set_width(row, LV_PCT(100));
-  lv_obj_set_height(row, 38);
+  lv_obj_set_height(row, 30);
   lv_obj_set_style_bg_color(row, lv_color_hex(C_PANEL), LV_PART_MAIN);
   lv_obj_set_style_border_color(row, lv_color_hex(C_BORDER), LV_PART_MAIN);
   lv_obj_set_style_border_width(row, 1, LV_PART_MAIN);
   lv_obj_set_style_radius(row, 4, LV_PART_MAIN);
-  lv_obj_set_style_pad_all(row, 6, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(row, 5, LV_PART_MAIN);
   lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
   lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
                         LV_FLEX_ALIGN_CENTER);
-  lv_obj_add_event_cb(row, onNetworkClicked, LV_EVENT_CLICKED,
-                      (void *)(uintptr_t)idx);
+  lv_obj_add_event_cb(row, onNetworkClicked, LV_EVENT_CLICKED, (void *)(uintptr_t)idx);
 
   lv_obj_t *name = lv_label_create(row);
-  lv_obj_set_style_text_font(name, &lv_font_montserrat_18, LV_PART_MAIN);
+  // 16, below the 18 floor, and legitimately so. An SSID is INFORMATION read
+  // deliberately at arm's length while choosing from a list -- not a state
+  // glanced at during service -- which is the tier the scale puts at 14/16.
+  // It also fits two more networks on screen, which is the point.
+  lv_obj_set_style_text_font(name, &lv_font_montserrat_16, LV_PART_MAIN);
   lv_obj_set_style_text_color(name, lv_color_hex(C_TEXT), LV_PART_MAIN);
   lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
-  lv_obj_set_width(name, 150);
+  lv_obj_set_width(name, 155);
   lv_label_set_text(name, nets_[idx].ssid);
 
   lv_obj_t *meta = lv_label_create(row);
   lv_obj_set_style_text_font(meta, &lv_font_montserrat_14, LV_PART_MAIN);
   lv_obj_set_style_text_color(meta, lv_color_hex(C_MUTED), LV_PART_MAIN);
-  lv_label_set_text_fmt(meta, "%s%u/4", nets_[idx].secured ? LV_SYMBOL_EYE_CLOSE " " : "",
-                        barsFor(nets_[idx].rssi));
+  lv_label_set_text_fmt(meta, "%s%u/4", nets_[idx].secured ? "*" : "", barsFor(nets_[idx].rssi));
 }
 
 }  // namespace
@@ -120,9 +239,9 @@ void wifiSetConnected(const char *ssid, int16_t rssi, const char *ip) {
   connRssi_ = rssi;
 }
 void wifiOnClose(void (*cb)(void)) { onClose_ = cb; }
+void wifiOnJoin(void (*cb)(const char *, const char *)) { onJoin_ = cb; }
 
 void buildWifiPage(lv_obj_t *parent) {
-  root_ = parent;
   lv_obj_set_style_bg_color(parent, lv_color_hex(C_BG), LV_PART_MAIN);
   lv_obj_set_style_bg_opa(parent, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_set_style_pad_all(parent, 0, LV_PART_MAIN);
@@ -133,12 +252,17 @@ void buildWifiPage(lv_obj_t *parent) {
   lv_obj_set_size(viewMain_, LV_PCT(100), LV_PCT(100));
   lv_obj_set_style_bg_opa(viewMain_, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_border_width(viewMain_, 0, LV_PART_MAIN);
-  lv_obj_set_style_pad_all(viewMain_, 6, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(viewMain_, 5, LV_PART_MAIN);
   lv_obj_set_style_pad_row(viewMain_, 5, LV_PART_MAIN);
   lv_obj_set_flex_flow(viewMain_, LV_FLEX_FLOW_COLUMN);
 
+  // Header carries the title, the DIAGNOSTICS, and the close button on one
+  // line. Status and MAC used to be two full-width rows of their own, which
+  // cost ~40 px of height and pushed the network list off the bottom -- and
+  // they are short strings that were wasting most of that width. Stacked in the
+  // middle at 14 they occupy space that was empty anyway.
   lv_obj_t *hdr = lv_obj_create(viewMain_);
-  lv_obj_set_size(hdr, LV_PCT(100), 30);
+  lv_obj_set_size(hdr, LV_PCT(100), 34);
   lv_obj_set_style_bg_opa(hdr, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_border_width(hdr, 0, LV_PART_MAIN);
   lv_obj_set_style_pad_all(hdr, 0, LV_PART_MAIN);
@@ -147,49 +271,75 @@ void buildWifiPage(lv_obj_t *parent) {
   lv_obj_set_flex_align(hdr, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
                         LV_FLEX_ALIGN_CENTER);
 
-  lv_obj_t *title = lv_label_create(hdr);
-  lv_obj_set_style_text_font(title, &lv_font_montserrat_20, LV_PART_MAIN);
+  // Left column: the page name with the signal strength directly under it, so
+  // the number is read as "the WiFi is -44 dBm" without needing a word to say
+  // so. Two rows total across the whole header, which is what leaves the
+  // network list its height.
+  lv_obj_t *titleCol = lv_obj_create(hdr);
+  lv_obj_set_size(titleCol, 60, 34);
+  lv_obj_set_style_bg_opa(titleCol, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(titleCol, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(titleCol, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_row(titleCol, 0, LV_PART_MAIN);
+  lv_obj_remove_flag(titleCol, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(titleCol, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(titleCol, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START,
+                        LV_FLEX_ALIGN_START);
+
+  lv_obj_t *title = lv_label_create(titleCol);
+  lv_obj_set_style_text_font(title, &lv_font_montserrat_18, LV_PART_MAIN);
   lv_obj_set_style_text_color(title, lv_color_hex(C_TEXT), LV_PART_MAIN);
   lv_label_set_text(title, "WiFi");
 
-  lv_obj_t *back = lv_button_create(hdr);
-  lv_obj_set_size(back, 44, 28);
-  lv_obj_add_event_cb(back, onClose, LV_EVENT_CLICKED, nullptr);
-  lv_obj_t *bl = lv_label_create(back);
-  lv_label_set_text(bl, LV_SYMBOL_CLOSE);
-  lv_obj_center(bl);
+  lv_obj_t *lblRssi = lv_label_create(titleCol);
+  lv_obj_set_style_text_font(lblRssi, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_set_style_text_color(lblRssi, lv_color_hex(C_MUTED), LV_PART_MAIN);
+  // Blank rather than "0 dBm" when there is no link. An RSSI is a measurement
+  // of an association that does not exist, and printing a number for it would
+  // be the same mistake as reporting a missing cell as 0%.
+  if (connSsid_[0]) lv_label_set_text_fmt(lblRssi, "%d dBm", connRssi_);
+  else lv_label_set_text(lblRssi, "");
 
-  lblStatus_ = lv_label_create(viewMain_);
-  lv_obj_set_style_text_font(lblStatus_, &lv_font_montserrat_18, LV_PART_MAIN);
-  lv_obj_set_width(lblStatus_, LV_PCT(100));
-  lv_label_set_long_mode(lblStatus_, LV_LABEL_LONG_DOT);
+  lv_obj_t *info = lv_obj_create(hdr);
+  lv_obj_set_size(info, 124, 34);
+  lv_obj_set_style_bg_opa(info, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(info, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(info, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_row(info, 0, LV_PART_MAIN);
+  lv_obj_remove_flag(info, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(info, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(info, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_END);
+
+  lv_obj_t *lblConn = lv_label_create(info);
+  lv_obj_set_style_text_font(lblConn, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_label_set_long_mode(lblConn, LV_LABEL_LONG_DOT);
+  lv_obj_set_width(lblConn, 124);
+  lv_obj_set_style_text_align(lblConn, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
   if (connSsid_[0]) {
-    lv_obj_set_style_text_color(lblStatus_, lv_color_hex(C_OK), LV_PART_MAIN);
-    lv_label_set_text_fmt(lblStatus_, "%s  %d dBm", connSsid_, connRssi_);
+    lv_obj_set_style_text_color(lblConn, lv_color_hex(C_OK), LV_PART_MAIN);
+    lv_label_set_text(lblConn, connSsid_);
   } else {
-    lv_obj_set_style_text_color(lblStatus_, lv_color_hex(C_FAULT), LV_PART_MAIN);
-    lv_label_set_text(lblStatus_, "not connected");
+    lv_obj_set_style_text_color(lblConn, lv_color_hex(C_FAULT), LV_PART_MAIN);
+    lv_label_set_text(lblConn, "not connected");
   }
 
-  // MAC in the information tier, as asked -- it is read up close during
-  // diagnostics, never glanced at, and it is what identifies this board to a
-  // network admin. Paired with the IP because the two questions ("did it get on
-  // the network" / "which box is it") are always asked together.
-  lv_obj_t *lblMac = lv_label_create(viewMain_);
+  lv_obj_t *lblMac = lv_label_create(info);
   lv_obj_set_style_text_font(lblMac, &lv_font_montserrat_14, LV_PART_MAIN);
   lv_obj_set_style_text_color(lblMac, lv_color_hex(C_MUTED), LV_PART_MAIN);
-  lv_obj_set_width(lblMac, LV_PCT(100));
-  if (connIp_[0]) lv_label_set_text_fmt(lblMac, "mac %s\nip  %s", mac_, connIp_);
-  else lv_label_set_text_fmt(lblMac, "mac %s", mac_);
+  lv_obj_set_width(lblMac, 124);
+  lv_obj_set_style_text_align(lblMac, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+  lv_label_set_text(lblMac, mac_);
 
-  // --- the QR, which is the point of the page -----------------------------
+  iconButton(hdr, LV_SYMBOL_CLOSE, 38, 30, onClose);
+
+  // --- QR ------------------------------------------------------------------
   lv_obj_t *qrBox = lv_obj_create(viewMain_);
-  lv_obj_set_size(qrBox, LV_PCT(100), 118);
+  lv_obj_set_size(qrBox, LV_PCT(100), 112);
   lv_obj_set_style_bg_color(qrBox, lv_color_hex(C_PANEL), LV_PART_MAIN);
   lv_obj_set_style_border_color(qrBox, lv_color_hex(C_BORDER), LV_PART_MAIN);
   lv_obj_set_style_border_width(qrBox, 1, LV_PART_MAIN);
   lv_obj_set_style_radius(qrBox, 4, LV_PART_MAIN);
-  lv_obj_set_style_pad_all(qrBox, 5, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(qrBox, 4, LV_PART_MAIN);
   lv_obj_remove_flag(qrBox, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_flex_flow(qrBox, LV_FLEX_FLOW_ROW);
   lv_obj_set_flex_align(qrBox, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
@@ -197,16 +347,18 @@ void buildWifiPage(lv_obj_t *parent) {
   lv_obj_set_style_pad_column(qrBox, 8, LV_PART_MAIN);
 
   lv_obj_t *qr = lv_qrcode_create(qrBox);
+  // 104, and the payload below is kept SHORT, because both feed the same
+  // problem: lv_qrcode scales the symbol by an integer number of pixels per
+  // module, so whatever is left over between (size / modules) and the next
+  // whole pixel is emitted as blank margin. A long payload needs a higher QR
+  // version -- more modules -- which makes each module smaller and the leftover
+  // slack proportionally larger. That slack is what reads as a fat white bezel.
+  //
+  // Some white IS mandatory: the quiet zone is part of the spec and scanners
+  // fail without it. The aim is to leave only that, not that plus rounding.
   lv_qrcode_set_size(qr, 104);
-  // Light module on dark background is inverted from the usual, and scanners
-  // handle it -- but the QUIET ZONE is not optional, so the light square is
-  // drawn full-bleed behind the code by LVGL itself.
   lv_qrcode_set_dark_color(qr, lv_color_hex(0x000000));
   lv_qrcode_set_light_color(qr, lv_color_hex(0xFFFFFF));
-
-  // The standard join-this-network payload. Both iOS and Android camera apps
-  // recognise it with no app installed, which is the entire reason this beats
-  // any keyboard we could draw.
   char payload[128];
   snprintf(payload, sizeof(payload), "WIFI:T:WPA;S:%s;P:%s;;", apSsid_, apPass_);
   lv_qrcode_update(qr, payload, (uint32_t)strlen(payload));
@@ -214,24 +366,19 @@ void buildWifiPage(lv_obj_t *parent) {
   lv_obj_t *qrText = lv_label_create(qrBox);
   lv_obj_set_style_text_font(qrText, &lv_font_montserrat_14, LV_PART_MAIN);
   lv_obj_set_style_text_color(qrText, lv_color_hex(C_TEXT), LV_PART_MAIN);
-  lv_obj_set_width(qrText, 100);
+  lv_obj_set_width(qrText, 112);
   lv_label_set_long_mode(qrText, LV_LABEL_LONG_WRAP);
-  lv_label_set_text(qrText, "Scan to set up from your phone, then follow the page that opens.");
+  lv_label_set_text(qrText, "Scan to set up from your phone");
 
-  lv_obj_t *hint = lv_label_create(viewMain_);
-  lv_obj_set_style_text_font(hint, &lv_font_montserrat_14, LV_PART_MAIN);
-  lv_obj_set_style_text_color(hint, lv_color_hex(C_MUTED), LV_PART_MAIN);
-  lv_label_set_text(hint, "or pick a network to type here:");
-
-  list_ = lv_obj_create(viewMain_);
-  lv_obj_set_width(list_, LV_PCT(100));
-  lv_obj_set_flex_grow(list_, 1);
-  lv_obj_set_style_bg_opa(list_, LV_OPA_TRANSP, LV_PART_MAIN);
-  lv_obj_set_style_border_width(list_, 0, LV_PART_MAIN);
-  lv_obj_set_style_pad_all(list_, 0, LV_PART_MAIN);
-  lv_obj_set_style_pad_row(list_, 4, LV_PART_MAIN);
-  lv_obj_set_flex_flow(list_, LV_FLEX_FLOW_COLUMN);
-  for (uint8_t i = 0; i < netCount_; i++) addNetworkRow(list_, i);
+  lv_obj_t *list = lv_obj_create(viewMain_);
+  lv_obj_set_width(list, LV_PCT(100));
+  lv_obj_set_flex_grow(list, 1);
+  lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(list, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(list, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_row(list, 4, LV_PART_MAIN);
+  lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+  for (uint8_t i = 0; i < netCount_; i++) addNetworkRow(list, i);
 
   // --- password view -------------------------------------------------------
   viewPass_ = lv_obj_create(parent);
@@ -244,8 +391,11 @@ void buildWifiPage(lv_obj_t *parent) {
   lv_obj_remove_flag(viewPass_, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(viewPass_, LV_OBJ_FLAG_HIDDEN);
 
+  // SSID, shift, back -- all on one line, as asked. Shift belongs here rather
+  // than in the grid: it does not consume one of the twenty key slots, and it
+  // cannot be hit by accident mid-passphrase.
   lv_obj_t *phdr = lv_obj_create(viewPass_);
-  lv_obj_set_size(phdr, LV_PCT(100), 26);
+  lv_obj_set_size(phdr, LV_PCT(100), 28);
   lv_obj_set_style_bg_opa(phdr, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_border_width(phdr, 0, LV_PART_MAIN);
   lv_obj_set_style_pad_all(phdr, 0, LV_PART_MAIN);
@@ -257,37 +407,71 @@ void buildWifiPage(lv_obj_t *parent) {
   lblPassSsid_ = lv_label_create(phdr);
   lv_obj_set_style_text_font(lblPassSsid_, &lv_font_montserrat_18, LV_PART_MAIN);
   lv_obj_set_style_text_color(lblPassSsid_, lv_color_hex(C_TEXT), LV_PART_MAIN);
-  lv_obj_set_width(lblPassSsid_, 170);
+  lv_obj_set_width(lblPassSsid_, 140);
   lv_label_set_long_mode(lblPassSsid_, LV_LABEL_LONG_DOT);
   lv_label_set_text(lblPassSsid_, "-");
 
-  lv_obj_t *pback = lv_button_create(phdr);
-  lv_obj_set_size(pback, 44, 26);
-  lv_obj_add_event_cb(pback, onPassBack, LV_EVENT_CLICKED, nullptr);
-  lv_obj_t *pbl = lv_label_create(pback);
-  lv_label_set_text(pbl, LV_SYMBOL_LEFT);
-  lv_obj_center(pbl);
+  btnShift_ = iconButton(phdr, "ab", 40, 28, onShift);
+  iconButton(phdr, LV_SYMBOL_LEFT, 38, 28, onPassBack);
 
-  taPass_ = lv_textarea_create(viewPass_);
-  lv_obj_set_width(taPass_, LV_PCT(100));
+  // Password field and JOIN on one line. The OK key was lost in the split-
+  // keyboard rewrite -- you could type a passphrase and had no way to submit it
+  // -- and putting it back in the grid would have cost one of the twenty key
+  // slots. Beside the field it reads the way a search box with a Go button
+  // does, and the row is shorter than the field alone used to be.
+  lv_obj_t *entry = lv_obj_create(viewPass_);
+  lv_obj_set_size(entry, LV_PCT(100), 30);
+  lv_obj_set_style_bg_opa(entry, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(entry, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(entry, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_column(entry, 4, LV_PART_MAIN);
+  lv_obj_remove_flag(entry, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(entry, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(entry, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER);
+
+  taPass_ = lv_textarea_create(entry);
+  lv_obj_set_flex_grow(taPass_, 1);
+  lv_obj_set_height(taPass_, 30);
+  lv_obj_set_style_pad_all(taPass_, 3, LV_PART_MAIN);
   lv_textarea_set_one_line(taPass_, true);
   lv_textarea_set_placeholder_text(taPass_, "password");
-  // NOT password-masked, deliberately. A passphrase typed one character at a
-  // time on a small panel with no tactile feedback is mistyped constantly, and
-  // a masked field turns every mistake into "retype the whole thing". The
-  // threat model here is a kitchen, not a shared terminal.
-  lv_obj_set_style_text_font(taPass_, &lv_font_montserrat_18, LV_PART_MAIN);
+  // NOT masked, deliberately. A passphrase typed one character at a time on a
+  // small panel with no tactile feedback is mistyped constantly, and masking
+  // turns every mistake into "retype the whole thing". The threat model here is
+  // a kitchen, not a shared terminal.
+  lv_obj_set_style_text_font(taPass_, &lv_font_montserrat_16, LV_PART_MAIN);
 
-  lv_obj_t *kb = lv_keyboard_create(viewPass_);
-  lv_obj_set_width(kb, LV_PCT(100));
-  lv_obj_set_flex_grow(kb, 1);
-  lv_keyboard_set_textarea(kb, taPass_);
-  // POPOVERS are what make a ~22 px key usable: the pressed key is echoed in a
-  // magnified bubble above the finger, so you see what you actually hit rather
-  // than what you aimed at. It is the trick every phone keyboard uses, and for
-  // a random passphrase it beats any cleverer layout.
-  lv_keyboard_set_popovers(kb, true);
-  lv_obj_set_style_text_font(kb, &lv_font_montserrat_16, LV_PART_ITEMS);
+  lv_obj_t *btnJoin = lv_button_create(entry);
+  lv_obj_set_size(btnJoin, 46, 30);
+  lv_obj_set_style_radius(btnJoin, 4, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(btnJoin, lv_color_hex(C_KEY_ACT), LV_PART_MAIN);
+  lv_obj_add_event_cb(btnJoin, onJoin, LV_EVENT_CLICKED, nullptr);
+  lv_obj_t *jl = lv_label_create(btnJoin);
+  // "OK", not "Join". At 56 px next to the field, "Join" either wraps or gets
+  // ellipsised, and a truncated verb on a button is worse than a shorter one:
+  // the point of the key is that it is unmistakably the submit action, and OK
+  // carries that at any width.
+  lv_obj_set_style_text_font(jl, &lv_font_montserrat_16, LV_PART_MAIN);
+  lv_label_set_text(jl, "OK");
+  lv_obj_center(jl);
+
+  kb_ = lv_buttonmatrix_create(viewPass_);
+  lv_obj_set_width(kb_, LV_PCT(100));
+  lv_obj_set_flex_grow(kb_, 1);
+  lv_obj_set_style_bg_opa(kb_, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(kb_, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(kb_, 0, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(kb_, lv_color_hex(C_KEY), LV_PART_ITEMS);
+  lv_obj_set_style_bg_opa(kb_, LV_OPA_COVER, LV_PART_ITEMS);
+  lv_obj_set_style_text_color(kb_, lv_color_hex(C_TEXT), LV_PART_ITEMS);
+  lv_obj_set_style_text_font(kb_, &lv_font_montserrat_20, LV_PART_ITEMS);
+  lv_obj_set_style_radius(kb_, 4, LV_PART_ITEMS);
+  lv_obj_set_style_pad_all(kb_, 3, LV_PART_ITEMS);
+  lv_obj_set_style_bg_color(kb_, lv_color_hex(C_KEY_ACT),
+                            (lv_style_selector_t)(LV_PART_ITEMS | LV_STATE_PRESSED));
+  lv_obj_add_event_cb(kb_, onKey, LV_EVENT_VALUE_CHANGED, nullptr);
+  refreshKb();
 }
 
 }  // namespace ui

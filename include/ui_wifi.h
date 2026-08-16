@@ -48,4 +48,9 @@ void buildWifiPage(lv_obj_t *parent);
 // Registered by the owner so the back button can close the detail layer.
 void wifiOnClose(void (*cb)(void));
 
+// Called when Join is pressed. ui_wifi collects the passphrase and hands it
+// over; it does not know what a radio is, which is what lets this whole page
+// compile and run in the desktop preview.
+void wifiOnJoin(void (*cb)(const char *ssid, const char *pass));
+
 }  // namespace ui
