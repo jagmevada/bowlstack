@@ -28,6 +28,15 @@ volatile uint32_t frames_ = 0;
 uint32_t fpsWindowStart_ = 0;
 uint16_t fps_ = 0;
 uint32_t lastSampleMs_ = 0;
+bool visible_ = false;
+
+// The ring. Sampling writes here and nowhere else, so it costs a few
+// multiplications and no LVGL work at all -- which is what makes it safe to run
+// unconditionally no matter how many pages exist.
+int16_t ring_[LEVELS][SCOPE_POINTS];
+uint16_t ringHead_ = 0;
+uint16_t ringFill_ = 0;
+bool pendingRender_ = false;
 
 void onRefrReady(lv_event_t *) { frames_++; }
 
@@ -160,8 +169,7 @@ void buildScope(lv_obj_t *parent) {
                           nullptr);
 }
 
-void scopeTick(uint32_t nowMs) {
-  if (!chart_) return;
+void scopeSample(uint32_t nowMs) {
   if (!armed_) {
     armChannels(nowMs);
     fpsWindowStart_ = nowMs;
@@ -169,30 +177,64 @@ void scopeTick(uint32_t nowMs) {
   }
 
   // One sample per 20 ms, i.e. 50 Hz -- deliberately FASTER than the real
-  // sensors' 10 Hz. The point is to keep the chart permanently dirty so the
-  // FPS figure reports what the renderer can sustain, not how often the data
-  // happened to change. At 10 Hz the answer would mostly be "10".
-  if ((int32_t)(nowMs - lastSampleMs_) >= 20) {
-    lastSampleMs_ = nowMs;
-    int32_t v[LEVELS];
-    for (uint8_t i = 0; i < LEVELS; i++) {
-      v[i] = sampleChannel(i, nowMs);
-      lv_chart_set_next_value(chart_, series_[i], v[i]);
-    }
-    if (lblVals_) {
-      lv_label_set_text_fmt(lblVals_, "f1 %ld  f2 %ld  f3 %ld  f4 %ld mm", (long)v[0],
-                            (long)v[1], (long)v[2], (long)v[3]);
-    }
-  }
+  // sensors' 10 Hz. The point is to keep the chart permanently dirty while it
+  // is visible, so the FPS figure reports what the renderer can sustain rather
+  // than how often the data happened to change. At 10 Hz the answer would
+  // mostly have been "10".
+  if ((int32_t)(nowMs - lastSampleMs_) < 20) return;
+  lastSampleMs_ = nowMs;
 
+  for (uint8_t i = 0; i < LEVELS; i++) ring_[i][ringHead_] = (int16_t)sampleChannel(i, nowMs);
+  ringHead_ = (uint16_t)((ringHead_ + 1) % SCOPE_POINTS);
+  if (ringFill_ < SCOPE_POINTS) ringFill_++;
+  pendingRender_ = true;
+
+  // The FPS window advances whether or not anything is drawn, so a reading of
+  // zero while the page is hidden is a true statement about frames rendered
+  // rather than a stalled counter.
   if ((int32_t)(nowMs - fpsWindowStart_) >= 1000) {
     const uint32_t elapsed = nowMs - fpsWindowStart_;
     fps_ = (uint16_t)((frames_ * 1000UL) / (elapsed ? elapsed : 1));
     frames_ = 0;
     fpsWindowStart_ = nowMs;
-    if (lblFps_) {
+    if (visible_ && lblFps_) {
       lv_label_set_text_fmt(lblFps_, "%u fps   %lu ms/frame", fps_,
                             (unsigned long)(fps_ ? 1000UL / fps_ : 0));
+    }
+  }
+}
+
+void scopeRender() {
+  if (!chart_ || !visible_ || !pendingRender_) return;
+  pendingRender_ = false;
+
+  // Only the newest sample is pushed. The chart already holds the history --
+  // SHIFT mode scrolls it -- so re-pushing the whole ring every frame would
+  // multiply the work by SCOPE_POINTS for an identical picture.
+  const uint16_t newest = (uint16_t)((ringHead_ + SCOPE_POINTS - 1) % SCOPE_POINTS);
+  for (uint8_t i = 0; i < LEVELS; i++) {
+    lv_chart_set_next_value(chart_, series_[i], ring_[i][newest]);
+  }
+  if (lblVals_) {
+    lv_label_set_text_fmt(lblVals_, "f1 %d  f2 %d  f3 %d  f4 %d mm", ring_[0][newest],
+                          ring_[1][newest], ring_[2][newest], ring_[3][newest]);
+  }
+}
+
+void scopeSetVisible(bool visible) {
+  if (visible == visible_) return;
+  visible_ = visible;
+  if (!visible || !chart_) return;
+
+  // Repopulate from the ring in one pass, oldest first, so the trace picks up
+  // exactly where the data did rather than scrolling in from the right as
+  // though sampling had just started.
+  const uint16_t start =
+      (uint16_t)((ringHead_ + SCOPE_POINTS - ringFill_) % SCOPE_POINTS);
+  for (uint16_t n = 0; n < ringFill_; n++) {
+    const uint16_t idx = (uint16_t)((start + n) % SCOPE_POINTS);
+    for (uint8_t i = 0; i < LEVELS; i++) {
+      lv_chart_set_next_value(chart_, series_[i], ring_[i][idx]);
     }
   }
 }

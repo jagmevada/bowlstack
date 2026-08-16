@@ -60,6 +60,25 @@ struct State {
 
   bool wifiConnected;
 
+  // Signal strength in dBm, for the status bar's bars. 0 means "connected but
+  // strength not yet read", which is distinct from a genuinely weak -90.
+  int16_t wifiRssi;
+
+  // THE DEVICE HAS NO CLOCK. There is no RTC on this board -- the schematic
+  // carries a QMI8658 IMU and nothing else on that bus -- and docs/supabase.md
+  // already builds the whole telemetry design around the device having no
+  // reliable time: events are backdated from a millis() age and the SERVER
+  // clock is authoritative.
+  //
+  // So the status bar's time is genuinely unknown until something supplies it,
+  // and `timeKnown` exists to say so rather than let the UI display 00:00 and
+  // have it read as midnight. Consistent with the rest of this codebase: no
+  // cell detected reports null, not 0%; a sensor that has not concluded reports
+  // unknown, not "no bowl".
+  bool timeKnown;
+  uint8_t hh;
+  uint8_t mm;
+
   uint32_t uptimeSec;
   const char *deviceId;
   const char *firmware;

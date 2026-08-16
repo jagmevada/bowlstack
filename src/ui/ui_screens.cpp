@@ -100,10 +100,10 @@ void build(lv_obj_t *parent) {
   lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
   lv_obj_set_flex_flow(scr, LV_FLEX_FLOW_COLUMN);
-  // PAD_ALL 10, not 8. The shift moves content up to +/-2 px in each axis, so
-  // the margin has to absorb that or the outermost pixels of the layout would
-  // be clipped at one extreme of the cycle.
-  lv_obj_set_style_pad_all(scr, 10, LV_PART_MAIN);
+  // Back to 8 now that the pixel shift is parked (todo.md); the extra 2 px of
+  // margin existed only to absorb its excursion, and the status bar has since
+  // taken height off this page.
+  lv_obj_set_style_pad_all(scr, 8, LV_PART_MAIN);
   lv_obj_set_style_pad_row(scr, 6, LV_PART_MAIN);
 
   // --- header --------------------------------------------------------------

@@ -13,6 +13,12 @@ uint8_t idx_ = 0;
 uint32_t nextAt_ = 0;
 bool armed_ = false;
 
+// The latest fabricated state, held rather than pushed straight into widgets.
+// That separation is what lets a page stop RENDERING without the data going
+// stale underneath it -- see ui_pages.cpp.
+State latest_;
+bool haveLatest_ = false;
+
 State base() {
   State s = unknownState();
   for (uint8_t i = 0; i < LEVELS; i++) s.sensorOnline[i] = true;
@@ -22,6 +28,7 @@ State base() {
   s.batteryMv = 4102;
   s.chargingKnown = false;
   s.wifiConnected = true;
+  s.wifiRssi = -58;
   s.deviceId = "BWL-001";
   s.firmware = "0.3.0";
   return s;
@@ -75,6 +82,13 @@ State sCritical() {
   s.battery = Battery::Critical;
   s.batteryMv = 3312;
   s.wifiConnected = false;
+  s.wifiRssi = 0;
+  return s;
+}
+
+State sWeakSignal() {
+  State s = stacked(2);
+  s.wifiRssi = -82;  // associated but marginal: one bar
   return s;
 }
 
@@ -101,6 +115,7 @@ const Scenario SCENARIOS[] = {
     {"no cell", sNoCell},
     {"critical + offline", sCritical},
     {"charging", sCharging},
+    {"weak signal", sWeakSignal},
 };
 
 }  // namespace
@@ -121,10 +136,36 @@ bool demoTick(uint32_t nowMs) {
   if ((int32_t)(nowMs - nextAt_) < 0) return false;
 
   nextAt_ = nowMs + DWELL_MS;
-  const State s = demoState(idx_);
-  update(s);
+  latest_ = demoState(idx_);
+  haveLatest_ = true;
   idx_ = (uint8_t)((idx_ + 1) % demoCount());
   return true;
+}
+
+const State &demoLatest(uint32_t nowMs) {
+  if (!haveLatest_) {
+    latest_ = demoState(0);
+    haveLatest_ = true;
+  }
+
+  // A fabricated wall clock so the status bar can be seen working. It starts at
+  // 14:32 and runs a minute per real second, which is fast enough to watch and
+  // slow enough to read.
+  //
+  // Except when WiFi is down: the device has no RTC, so with no link there is
+  // nothing to have learned the time FROM. Leaving timeKnown false there is not
+  // a nicety -- it is the only state the real firmware can ever be in on a cold
+  // boot, and it is worth seeing on screen rather than discovering later.
+  if (latest_.wifiConnected) {
+    const uint32_t mins = (14 * 60 + 32) + (nowMs / 1000);
+    latest_.timeKnown = true;
+    latest_.hh = (uint8_t)((mins / 60) % 24);
+    latest_.mm = (uint8_t)(mins % 60);
+  } else {
+    latest_.timeKnown = false;
+  }
+  latest_.uptimeSec = nowMs / 1000;
+  return latest_;
 }
 
 }  // namespace ui

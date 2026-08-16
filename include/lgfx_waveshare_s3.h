@@ -30,6 +30,23 @@ class LGFX_WaveshareS3Touch2 : public lgfx::LGFX_Device {
       auto cfg = bus_.config();
       cfg.spi_host = SPI2_HOST;  // SPI3_HOST is left alone for anything later
       cfg.spi_mode = 0;
+      // 40 MHz, and 60 IS NOT AN OPTION -- not a preference, a divider.
+      //
+      // The S3's GPSPI runs from an 80 MHz source through an INTEGER divider,
+      // so the achievable set is 80 / n: 80, 40, 26.7, 20. Asking for 60 does
+      // not fail or warn; LovyanGFX picks the highest available frequency at or
+      // below the request, which is 40. The line would read "60000000" and the
+      // bus would run at exactly what it runs at now.
+      //
+      // That leaves 40 or 80, and 80 is ruled out. So this stays.
+      //
+      // On the battery question behind it: SPI clock is close to irrelevant
+      // here. Doubling it halves the transfer TIME for the same bytes, so the
+      // energy per frame barely moves -- and it is dwarfed by the backlight,
+      // which is a constant current sink through the SS8050 whenever the screen
+      // is on, and by the WiFi radio during a TLS post. If battery life becomes
+      // the problem, backlight brightness and screen-off policy are the levers
+      // worth an order of magnitude more than the bus clock.
       cfg.freq_write = 40000000;
       cfg.freq_read = 16000000;
       cfg.spi_3wire = false;

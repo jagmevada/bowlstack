@@ -37,4 +37,10 @@ bool demoTick(uint32_t nowMs);
 // Current index, for callers that want to name what is on screen.
 uint8_t demoIndex();
 
+// The current fabricated state, with the wall clock applied. Held here rather
+// than pushed into widgets by demoTick, so a page can stop rendering without
+// its data going stale -- which is the whole point of ui_pages' visibility
+// handling.
+const State &demoLatest(uint32_t nowMs);
+
 }  // namespace ui

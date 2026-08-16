@@ -31,10 +31,24 @@ static const uint16_t SCOPE_POINTS = 115;
 
 void buildScope(lv_obj_t *parent);
 
-// Pushes one sample per channel and lets the FPS counter run. Call as often as
-// the loop allows; it is the caller's rate, not a fixed one, that this page is
-// measuring.
-void scopeTick(uint32_t nowMs);
+// SAMPLING and RENDERING are separate on purpose, and this split is what keeps
+// the frame rate flat as pages are added.
+//
+// scopeSample() always runs: it writes into a plain ring buffer, touches no
+// LVGL object, and invalidates nothing. Data therefore stays current whether or
+// not anyone is looking, which was the requirement -- a scope that only
+// collects while visible would show a gap on return, and in the real firmware
+// the sensors do not stop ranging because someone swiped.
+//
+// scopeRender() only runs while the page is on screen. It is what costs, and it
+// is what stops costing the moment the page is swiped away.
+void scopeSample(uint32_t nowMs);
+void scopeRender();
+
+// Called on transition. Entering repopulates the whole chart from the ring in
+// one pass, so the trace is continuous across the gap instead of scrolling in
+// from the right edge as though the sensors had just been switched on.
+void scopeSetVisible(bool visible);
 
 // Last computed frames-per-second, for callers that want to log it.
 uint16_t scopeFps();
