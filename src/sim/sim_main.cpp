@@ -30,7 +30,8 @@
 #include <cstdio>
 
 #include "ui_demo.h"
-#include "ui_gallery.h"
+#include "ui_pages.h"
+#include "ui_scope.h"
 #include "ui_screens.h"
 
 int main(int, char **) {
@@ -53,12 +54,12 @@ int main(int, char **) {
   lv_sdl_mouse_create();
   lv_sdl_keyboard_create();
 
-  ui::buildGallery();
+  ui::buildPages();
 
   printf("Bowlstack UI preview\n");
   printf("  window   %d x %d, zoom 1 (one SDL pixel = one panel pixel)\n", ui::SCREEN_W,
          ui::SCREEN_H);
-  printf("  pages    drag horizontally: 3 type, widgets, stock view, pixel-shift test\n");
+  printf("  pages    drag horizontally: stock view | live scope + FPS\n");
   printf("  states   the stock view cycles %u scenarios every 3 s, same as the device\n",
          ui::demoCount());
   printf("  ESC      quit\n\n");
@@ -70,15 +71,19 @@ int main(int, char **) {
 
     // Pixel shift is OFF -- see todo.md. This panel is IPS-TFT, so what was
     // observed was image PERSISTENCE (temporary, self-recovering) rather than
-    // OLED burn-in (permanent). Not worth engineering for. Gallery page 6 still
-    // demonstrates the mechanism on demand.
+    // OLED burn-in (permanent). Not worth engineering for.
     // ui::pixelShiftTick(SDL_GetTicks());
 
-    if (ui::demoTick(SDL_GetTicks())) {
-      // demoTick advances AFTER rendering the current one, so the name of what
-      // is on screen is the previous index.
-      const uint8_t shown = (uint8_t)((ui::demoIndex() + ui::demoCount() - 1) % ui::demoCount());
-      printf("state: %s\n", ui::demoName(shown));
+    ui::pagesTick(SDL_GetTicks());
+
+    // THE DESKTOP FIGURE IS A CEILING, NOT A PREDICTION. This renders with SDL
+    // into system memory on a desktop CPU; the device renders on a 240 MHz core
+    // and then pushes every dirty pixel over a 40 MHz SPI bus. Read the two
+    // numbers side by side and the gap between them is what the panel costs.
+    static uint32_t nextFps = 0;
+    if (SDL_GetTicks() > nextFps) {
+      nextFps = SDL_GetTicks() + 2000;
+      printf("scope: %u fps (desktop ceiling)\n", ui::scopeFps());
       fflush(stdout);
     }
 

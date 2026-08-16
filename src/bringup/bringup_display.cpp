@@ -34,7 +34,8 @@
 #include "board_waveshare_s3.h"
 #include "lgfx_waveshare_s3.h"
 #include "ui_demo.h"
-#include "ui_gallery.h"
+#include "ui_pages.h"
+#include "ui_scope.h"
 #include "ui_screens.h"
 
 namespace {
@@ -273,12 +274,10 @@ void setup() {
   lv_indev_set_read_cb(indev, touchCb);
 
   // --- stage 5: the shared UI --------------------------------------------
-  ui::buildGallery();
-  Serial.printf("  showing src/ui/ gallery: swipe for 3 type pages, widgets, "
-                "then the stock view\n");
-  Serial.printf("  stock view cycles %u scenarios every 3 s -- identical to "
-                "`pio run -e sim`\n",
-                ui::demoCount());
+  ui::buildPages();
+  Serial.println("  2 pages, swipe horizontally -- identical to `pio run -e sim`:");
+  Serial.println("    1  stock view, cycling scenarios every 3 s");
+  Serial.println("    2  scope: 4 live traces 0-500 mm, with a frame-rate readout");
 
   // --- stage 6: battery ---------------------------------------------------
   analogSetPinAttenuation(board::PIN_BATTERY_ADC, ADC_11db);
@@ -293,21 +292,24 @@ void setup() {
 void loop() {
   lv_timer_handler();
 
-  // Pixel shift is OFF -- see todo.md. Gallery page 6 still demonstrates it.
+  // Pixel shift is OFF -- see todo.md.
   // ui::pixelShiftTick(millis());
 
-  // Same clock, same cadence, same scenarios as the desktop preview.
-  if (ui::demoTick(millis())) {
-    const uint8_t shown = (uint8_t)((ui::demoIndex() + ui::demoCount() - 1) % ui::demoCount());
-    Serial.printf("state: %s\n", ui::demoName(shown));
-  }
+  // Drives both pages, same clock and same cadence as the desktop preview.
+  ui::pagesTick(millis());
 
   static uint32_t nextConsole = 0;
   const uint32_t now = millis();
   if ((int32_t)(now - nextConsole) >= 0) {
     nextConsole = now + 5000;
     const uint16_t pinMv = readBatteryPinMv();
-    Serial.printf("battery: pin %u mV -> cell %u mV   heap %u\n", pinMv,
+    // The FPS figure is only meaningful WHILE THE SCOPE PAGE IS ON SCREEN.
+    // LVGL does not draw objects that are scrolled off the tileview, so with
+    // the stock view showing, the chart is invalidated but never rendered and
+    // this reads near zero. That is not a stall -- it is the renderer correctly
+    // declining to draw what nobody can see.
+    Serial.printf("scope %u fps%s | battery pin %u mV -> cell %u mV | heap %u\n",
+                  ui::scopeFps(), ui::scopeFps() ? "" : " (scope page not visible?)", pinMv,
                   (uint16_t)(pinMv * board::BATTERY_DIVIDER_NOMINAL), ESP.getFreeHeap());
   }
 

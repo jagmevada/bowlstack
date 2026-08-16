@@ -70,6 +70,16 @@
 #define LV_USE_OS LV_OS_NONE
 
 // --- timing ----------------------------------------------------------------
+// LVGL's default refresh period is 33 ms, i.e. a HARD 30 FPS CEILING that has
+// nothing to do with what the hardware can do. Measuring the scope page against
+// that default would have produced a confident "30 FPS" that was really just
+// this constant being read back.
+//
+// 10 ms puts the ceiling at 100 FPS, well above anything a 40 MHz SPI panel can
+// sustain, so the number on screen is the renderer's and the bus's limit rather
+// than the timer's. Nothing redraws when nothing is invalidated, so a static
+// screen still costs nothing.
+#define LV_DEF_REFR_PERIOD 10
 // LVGL 9 takes the tick source at RUNTIME via lv_tick_set_cb(millis), so there
 // is no LV_TICK_CUSTOM block here the way v8 needed one. Mentioned because its
 // absence looks like an omission when porting a v8 config.
