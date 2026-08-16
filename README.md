@@ -12,6 +12,7 @@ warning when a station is running short.
 | --- | --- |
 | [docs/sensor_logic.md](docs/sensor_logic.md) | how a distance reading becomes a bowl count — filtering, presence, contiguity, sensor health |
 | [docs/firmware.md](docs/firmware.md) | modules, FreeRTOS tasks, wiring, network behaviour, build |
+| [docs/waveshare_port.md](docs/waveshare_port.md) | port to the ESP32-S3 touch board — pin budget, LVGL stack, bring-up |
 | [docs/supabase.md](docs/supabase.md) | schema, write model, security, setup |
 | [docs/frontend.md](docs/frontend.md) | front-end planning and open design questions |
 | [docs/FRONTEND_HANDOFF.md](docs/FRONTEND_HANDOFF.md) | **self-contained** contract for building the UI against Supabase |
