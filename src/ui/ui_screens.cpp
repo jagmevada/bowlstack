@@ -116,25 +116,17 @@ void build(lv_obj_t *parent) {
   lv_obj_set_style_pad_all(scr, 8, LV_PART_MAIN);
   lv_obj_set_style_pad_row(scr, 6, LV_PART_MAIN);
 
-  // --- header --------------------------------------------------------------
-  lv_obj_t *header = lv_obj_create(scr);
-  styleFlat(header);
-  lv_obj_set_size(header, LV_PCT(100), 22);
-  lv_obj_set_flex_flow(header, LV_FLEX_FLOW_ROW);
-  lv_obj_set_flex_align(header, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
-                        LV_FLEX_ALIGN_CENTER);
-
-  lblDevice = lv_label_create(header);
-  // Information, not state: 16 per the type scale in lv_conf.h.
-  lv_obj_set_style_text_font(lblDevice, &lv_font_montserrat_16, LV_PART_MAIN);
-  lv_obj_set_style_text_color(lblDevice, lv_color_hex(C_MUTED), LV_PART_MAIN);
-  lv_label_set_text(lblDevice, "BWL-000");
-
-  lblWifi = lv_label_create(header);
-  // A state, so it stays at the 18 floor rather than shrinking to match the id.
-  lv_obj_set_style_text_font(lblWifi, &lv_font_montserrat_18, LV_PART_MAIN);
-  lv_obj_set_style_text_color(lblWifi, lv_color_hex(C_MUTED), LV_PART_MAIN);
-  lv_label_set_text(lblWifi, "wifi -");
+  // NO HEADER. The device id and the WiFi state used to sit here, and both are
+  // now in the permanent status bar directly above -- so this row was showing
+  // the same two facts twice, 22 px apart, and spending the height twice too.
+  //
+  // The labels themselves stay allocated but unparented to nothing: update()
+  // writes to them, and deleting them would mean threading null checks through
+  // every call site for no gain. They are simply never shown.
+  lblDevice = lv_label_create(scr);
+  lv_obj_add_flag(lblDevice, LV_OBJ_FLAG_HIDDEN);
+  lblWifi = lv_label_create(scr);
+  lv_obj_add_flag(lblWifi, LV_OBJ_FLAG_HIDDEN);
 
   // --- body: stack column | count panel -----------------------------------
   lv_obj_t *body = lv_obj_create(scr);

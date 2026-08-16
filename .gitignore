@@ -18,3 +18,6 @@ CAD/*
 # repo as a result. The wildcard covers any future variant; secret.h.example
 # does not match it (it ends in .example) and is committed on purpose.
 include/secret*.h
+
+# Generated from logo512x512.png; the committed artefact is include/logo128.h
+logo128.png

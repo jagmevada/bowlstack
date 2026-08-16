@@ -361,42 +361,53 @@ void buildWifiPage(lv_obj_t *parent) {
   lv_label_set_text(sep, "or set up from your phone:");
 
   lv_obj_t *qrBox = lv_obj_create(body);
-  lv_obj_set_size(qrBox, LV_PCT(100), 210);
   lv_obj_set_style_bg_color(qrBox, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
   lv_obj_set_style_border_width(qrBox, 0, LV_PART_MAIN);
   lv_obj_set_style_radius(qrBox, 4, LV_PART_MAIN);
-  lv_obj_set_style_pad_all(qrBox, 6, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(qrBox, 0, LV_PART_MAIN);
   lv_obj_remove_flag(qrBox, LV_OBJ_FLAG_SCROLLABLE);
 
   char payload[128];
   snprintf(payload, sizeof(payload), "WIFI:T:WPA;S:%s;P:%s;;", apSsid_, apPass_);
   const uint32_t plen = (uint32_t)strlen(payload);
 
-  // THE BEZEL IS ROUNDING, AND IT IS COMPUTABLE AWAY.
+  // THE BEZEL, from reading lv_qrcode.c rather than guessing at it. Two causes,
+  // and my first two attempts fixed neither.
   //
-  // lv_qrcode draws each module as a whole number of pixels: scale =
-  // size / modules, integer division. Whatever is left over -- up to
-  // modules-1 pixels in each axis -- is emitted as blank border. Asking for
-  // "as big as fits" therefore guarantees a fat white frame, because a round
-  // number like 194 is almost never a multiple of 29 or 33.
+  // 1. lv_qrcode draws each module as a whole number of pixels -- scale =
+  //    obj_w / qr_size, integer division -- and centres the result, so up to
+  //    modules-1 pixels become blank border. Snapping the size to an exact
+  //    multiple removes that.
   //
-  // So the module count is derived from the payload and the size is snapped
-  // DOWN to an exact multiple. 194 / 29 = 6.69 -> 6 px modules, 174 px of code
-  // inside a 194 px box: 20 px of slack. 29 * 6 = 174 exactly: none.
+  // 2. LVGL encodes at qrcodegen_Ecc_MEDIUM, NOT low. That is the one that
+  //    caught me: MEDIUM byte-mode capacities are 14/26/42/62/84/106, so a
+  //    44-byte payload is version 4 (33 modules), where the LOW table I had
+  //    used says version 3 (29). Snapping to a multiple of the wrong number
+  //    leaves exactly the margin it was supposed to remove.
   //
-  // Capacities are ECC LOW, byte mode -- the boundaries at which qrcodegen
-  // steps up a version, and with it the module count.
-  uint16_t modules = 21;                  // v1
+  // Version -> modules is 4v + 17, from qrcodegen_version2size().
+  uint16_t modules = 21;                  // v1, <= 14 bytes
   if (plen > 106) modules = 41;           // v6
-  else if (plen > 78) modules = 37;       // v5
-  else if (plen > 53) modules = 33;       // v4
-  else if (plen > 32) modules = 29;       // v3
-  else if (plen > 17) modules = 25;       // v2
+  else if (plen > 84) modules = 37;       // v5
+  else if (plen > 62) modules = 33;       // v4
+  else if (plen > 42) modules = 33;       // v4
+  else if (plen > 26) modules = 29;       // v3
+  else if (plen > 14) modules = 25;       // v2
 
-  // The largest exact multiple that fits the panel's width less padding.
+  // Widest exact multiple that fits, then the BOX is sized to hug it. The
+  // previous version left the box at 100% width with a 174 px code centred in
+  // it -- 27 px of white on each side that had nothing to do with the symbol,
+  // which is most of what was actually visible as a bezel.
   const uint16_t budget = 200;
   const uint16_t scale = budget / modules;
   const uint16_t qrPx = (uint16_t)(modules * scale);
+
+  // Two modules of quiet zone. The spec asks for four; at this scale that would
+  // be 48 px and the box would not fit the panel. Phone cameras read two
+  // reliably, and the alternative is a symbol small enough that scan distance
+  // suffers more than the margin helps.
+  const uint16_t quiet = (uint16_t)(scale * 2);
+  lv_obj_set_size(qrBox, qrPx + quiet * 2, qrPx + quiet * 2);
 
   lv_obj_t *qr = lv_qrcode_create(qrBox);
   lv_qrcode_set_size(qr, qrPx);

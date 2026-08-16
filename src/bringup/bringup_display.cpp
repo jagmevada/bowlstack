@@ -36,6 +36,7 @@
 #include "battery_soc.h"
 #include "board_waveshare_s3.h"
 #include "lgfx_waveshare_s3.h"
+#include "logo128.h"
 #include "version.h"
 #include "ui_demo.h"
 #include "ui_pages.h"
@@ -190,16 +191,22 @@ void panelSelfTest() {
   gfx.printf("%dx%d", gfx.width(), gfx.height());
   delay(1500);
 #else
-  // Placeholder for the Dadabhagwan Foundation logo (todo.md). Drawn with raw
-  // LovyanGFX rather than as an LVGL screen so that when the logo replaces it,
-  // it still appears BEFORE LVGL initialises and the boot has no dark gap.
+  // The Dadabhagwan Foundation logo, drawn with raw LovyanGFX rather than as an
+  // LVGL screen -- deliberately, so it appears BEFORE LVGL initialises and the
+  // boot has no dark gap while the widget tree is built.
+  //
+  // drawPng decodes straight from flash; no framebuffer-sized RAM is needed for
+  // a 128x128 image, and 9.9 KB of PNG beats 32 KB of raw RGB565 for something
+  // shown once per boot.
   gfx.fillScreen(TFT_BLACK);
+  gfx.drawPng(LOGO128_PNG, LOGO128_PNG_LEN, (gfx.width() - LOGO128_W) / 2,
+              (gfx.height() - LOGO128_H) / 2 - 12);
   gfx.setTextColor(TFT_WHITE, TFT_BLACK);
-  gfx.setTextSize(2);
+  gfx.setTextSize(1);
   gfx.setTextDatum(middle_center);
-  gfx.drawString("Bowlstack", gfx.width() / 2, gfx.height() / 2);
+  gfx.drawString("Bowlstack", gfx.width() / 2, (gfx.height() + LOGO128_H) / 2 + 4);
   gfx.setTextDatum(top_left);
-  delay(600);
+  delay(1200);
 #endif
 }
 

@@ -149,6 +149,10 @@ void buildStatus(lv_obj_t *parent) {
   lv_obj_remove_flag(wifiBtn_, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(wifiBtn_, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_event_cb(wifiBtn_, wifiClicked, LV_EVENT_CLICKED, nullptr);
+  // Extends the HIT TEST past the object's bounds without changing its layout
+  // or what is drawn. The icons stay exactly the size they are; only the region
+  // that counts as a press grows.
+  lv_obj_set_ext_click_area(wifiBtn_, 8);
 
   // Bars share a common BASELINE, so they grow upward like a signal meter
   // rather than being centred, which would read as a bar chart of nothing.
@@ -169,6 +173,15 @@ void buildStatus(lv_obj_t *parent) {
   lv_obj_remove_flag(battBtn_, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(battBtn_, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_event_cb(battBtn_, battClicked, LV_EVENT_CLICKED, nullptr);
+  // 14 px on every side, so a 32x24 icon becomes a 60x52 target -- comfortably
+  // past the ~9 mm that reads as reliable at this pixel density. The battery
+  // was the one that "hardly registers", and it sits at the screen edge where
+  // a finger lands least precisely.
+  //
+  // ext_click_area rather than a bigger box: the box would push the layout
+  // around and shrink the space left for the clock, and the ask was explicitly
+  // to keep the symbol the size it is.
+  lv_obj_set_ext_click_area(battBtn_, 14);
 
   // Battery: body, nub, fill. Phone-shaped because that is the one icon every
   // person already reads correctly without a legend.
