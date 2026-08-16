@@ -132,6 +132,38 @@ already fitted (`R4`, `R5`), idle unless a camera is plugged into `J1`.
 - [ ] Re-tune `PRESENT_BELOW_MM` / `ABSENT_ABOVE_MM` against real bowls
 - [ ] Verify `OFFSET_MM[]` per part
 
+### 3b. "No battery" reads as a FULL battery on this board
+
+Observed on hardware, 2026-08-17, with **no cell connected** and the board on
+USB alone:
+
+```
+battery: pin 1392 mV -> cell 4176 mV
+```
+
+That is not a measurement error — with no cell present the ETA6098 regulates the
+`BAT` node to its charge voltage, and the divider faithfully reports it. But
+4176 mV lands squarely in the `good` band, and **neither existing guard catches
+it**: it is far above `BATTERY_ABSENT_BELOW_MV` (2500) and below
+`BATTERY_IMPLAUSIBLE_ABOVE_MV` (4400).
+
+So on this board, "no battery fitted" currently publishes as "battery good" —
+the same class of failure as the floating pin that once read 6365 mV as
+"100% (good)", and precisely what `FRONTEND_HANDOFF.md` promises cannot happen
+("`null` means **no cell detected**").
+
+- [ ] Decide the detection strategy. A resting voltage alone cannot distinguish
+      a full cell from a charger holding an empty socket — they are the same
+      node at the same voltage.
+- [ ] Options worth weighing: read charge state once the §1 mod exists (charging
+      + pinned at 4.2 V + no droop under load ⇒ no cell); or watch for the
+      total absence of the millivolt-scale wander a real cell always shows; or
+      accept it and document that `battery_level` is meaningful only on
+      battery power.
+
+> Worth settling **before** the fleet ships, because the failure is silent and
+> in the reassuring direction.
+
 ### 4. Battery calibration
 
 - [ ] Read the `pin` figure from the bring-up console

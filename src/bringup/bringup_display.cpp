@@ -44,11 +44,26 @@ LGFX_WaveshareS3Touch2 gfx;
 // They stay in INTERNAL RAM. PSRAM would work, but SPI DMA out of PSRAM on the
 // S3 goes through the cache and is measurably slower than out of SRAM, which
 // is the wrong trade for the one buffer that is touched every single frame.
-const uint32_t LV_BUF_LINES = 32;
+// Bytes per pixel is stated explicitly and NOT taken from sizeof(lv_color_t).
+//
+// In LVGL 9 `lv_color_t` is a 3-byte {blue, green, red} struct REGARDLESS of
+// LV_COLOR_DEPTH -- it is the API's colour type, not the draw buffer's pixel
+// format. At LV_COLOR_DEPTH 16 the buffer holds 2-byte pixels (`lv_color16_t`),
+// which is also why the flush callback casts to lgfx::rgb565_t.
+//
+// Sizing a buffer with sizeof(lv_color_t) therefore over-allocates by 50% and,
+// worse, makes the line count a lie: `240 * 32 * sizeof(lv_color_t)` is 23040
+// bytes, which LVGL divides by 2 and uses as 48 lines, not 32. It is not
+// unsafe -- allocation and declared size agree -- but every number in the
+// comment around it is wrong, which is how a later "optimisation" turns a
+// harmless discrepancy into a real overflow.
+const uint32_t LV_BUF_BPP = 2;  // LV_COLOR_DEPTH 16
+const uint32_t LV_BUF_LINES = 48;
 const uint32_t LV_BUF_PX = board::LCD_W * LV_BUF_LINES;
+const uint32_t LV_BUF_BYTES = LV_BUF_PX * LV_BUF_BPP;
 
-lv_color_t *buf1 = nullptr;
-lv_color_t *buf2 = nullptr;
+uint8_t *buf1 = nullptr;
+uint8_t *buf2 = nullptr;
 
 lv_obj_t *lblBattery = nullptr;
 lv_obj_t *lblTouch = nullptr;
@@ -297,19 +312,18 @@ void setup() {
   // presents as a screen that draws once and then never updates.
   lv_tick_set_cb(reinterpret_cast<lv_tick_get_cb_t>(millis));
 
-  buf1 = (lv_color_t *)heap_caps_malloc(LV_BUF_PX * sizeof(lv_color_t), MALLOC_CAP_DMA);
-  buf2 = (lv_color_t *)heap_caps_malloc(LV_BUF_PX * sizeof(lv_color_t), MALLOC_CAP_DMA);
+  buf1 = (uint8_t *)heap_caps_malloc(LV_BUF_BYTES, MALLOC_CAP_DMA);
+  buf2 = (uint8_t *)heap_caps_malloc(LV_BUF_BYTES, MALLOC_CAP_DMA);
   if (!buf1 || !buf2) {
     Serial.println("  FATAL: draw buffer allocation failed");
     return;
   }
-  Serial.printf("  draw buffers 2 x %u bytes (DMA-capable)\n",
-                (unsigned)(LV_BUF_PX * sizeof(lv_color_t)));
+  Serial.printf("  draw buffers 2 x %u bytes = %u lines (DMA-capable)\n",
+                (unsigned)LV_BUF_BYTES, (unsigned)LV_BUF_LINES);
 
   lv_display_t *disp = lv_display_create(board::LCD_W, board::LCD_H);
   lv_display_set_flush_cb(disp, flushCb);
-  lv_display_set_buffers(disp, buf1, buf2, LV_BUF_PX * sizeof(lv_color_t),
-                         LV_DISPLAY_RENDER_MODE_PARTIAL);
+  lv_display_set_buffers(disp, buf1, buf2, LV_BUF_BYTES, LV_DISPLAY_RENDER_MODE_PARTIAL);
 
   lv_indev_t *indev = lv_indev_create();
   lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
