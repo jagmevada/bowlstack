@@ -6,6 +6,7 @@
 #include "ui_scope.h"
 #include "ui_screens.h"
 #include "ui_status.h"
+#include "ui_wifi.h"
 
 namespace ui {
 namespace {
@@ -16,6 +17,25 @@ lv_obj_t *tv_ = nullptr;
 lv_obj_t *tileStock_ = nullptr;
 lv_obj_t *tileScope_ = nullptr;
 lv_obj_t *lastActive_ = nullptr;
+
+// The detail layer: a full-height panel over the PAGE AREA only, so the status
+// bar stays visible and the thing you tapped to get here remains on screen.
+// Hidden rather than destroyed, because rebuilding a QR code and a keyboard on
+// every open would be visibly slow for a screen people bounce in and out of.
+lv_obj_t *detail_ = nullptr;
+bool detailOpen_ = false;
+
+void closeDetail() {
+  if (!detail_) return;
+  lv_obj_add_flag(detail_, LV_OBJ_FLAG_HIDDEN);
+  detailOpen_ = false;
+}
+
+void openWifi() {
+  if (!detail_) return;
+  lv_obj_remove_flag(detail_, LV_OBJ_FLAG_HIDDEN);
+  detailOpen_ = true;
+}
 
 }  // namespace
 
@@ -50,6 +70,22 @@ void buildPages() {
   tileScope_ = lv_tileview_add_tile(tv_, 1, 0, LV_DIR_LEFT);
   buildScope(tileScope_);
 
+  // Created AFTER the tileview so it stacks above it, and sized to the page
+  // area rather than the screen -- the status bar is deliberately still
+  // reachable while a detail page is open.
+  detail_ = lv_obj_create(scr);
+  lv_obj_set_width(detail_, LV_PCT(100));
+  lv_obj_set_height(detail_, LV_PCT(100));
+  lv_obj_set_style_pad_all(detail_, 0, LV_PART_MAIN);
+  lv_obj_set_style_border_width(detail_, 0, LV_PART_MAIN);
+  lv_obj_set_style_radius(detail_, 0, LV_PART_MAIN);
+  lv_obj_remove_flag(detail_, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(detail_, LV_OBJ_FLAG_HIDDEN);
+  buildWifiPage(detail_);
+  wifiOnClose(closeDetail);
+
+  statusOnWifiTap(openWifi);
+
   lastActive_ = nullptr;
 }
 
@@ -70,6 +106,11 @@ void pagesTick(uint32_t nowMs) {
   // early-outs on unchanged values, so a steady state costs comparisons rather
   // than a redraw.
   updateStatus(s);
+
+  // A detail page covers the tileview entirely, so nothing underneath is worth
+  // rendering. Data collection above still runs -- that is the point of the
+  // split -- so the scope's history is intact when the panel closes.
+  if (detailOpen_) return;
 
   // --- rendering: only the page a person is actually looking at ------------
   // THIS IS WHAT KEEPS THE FRAME RATE FLAT AS PAGES ARE ADDED. Cost scales with

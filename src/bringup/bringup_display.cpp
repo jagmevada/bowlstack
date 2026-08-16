@@ -31,12 +31,26 @@
 #include <Wire.h>
 #include <lvgl.h>
 
+#include <esp_mac.h>
+
 #include "board_waveshare_s3.h"
 #include "lgfx_waveshare_s3.h"
+#include "version.h"
 #include "ui_demo.h"
 #include "ui_pages.h"
 #include "ui_scope.h"
 #include "ui_screens.h"
+#include "ui_wifi.h"
+
+namespace {
+// Fabricated scan results. Real ones arrive when net.cpp joins this image; the
+// UI never calls WiFi itself, for the same reason ui_state.h exists.
+const ui::Network MOCK_NETS[] = {
+    {"Kitchen-2G", -47, true},   {"Mandir_Guest", -61, true},
+    {"BSNL-AP-04", -72, true},   {"Seva-Office", -78, true},
+    {"OpenServe", -83, false},
+};
+}  // namespace
 
 namespace {
 
@@ -274,6 +288,24 @@ void setup() {
   lv_indev_set_read_cb(indev, touchCb);
 
   // --- stage 5: the shared UI --------------------------------------------
+  // The REAL MAC, read from the eFuse. It needs no WiFi stack, which matters
+  // here: this harness links no networking at all, and the MAC is precisely
+  // what someone diagnosing a join failure asks for first.
+  {
+    uint8_t m[6];
+    esp_read_mac(m, ESP_MAC_WIFI_STA);
+    static char macStr[18];
+    snprintf(macStr, sizeof(macStr), "%02x:%02x:%02x:%02x:%02x:%02x", m[0], m[1], m[2],
+             m[3], m[4], m[5]);
+    ui::wifiSetMac(macStr);
+    static char apSsid[33];
+    snprintf(apSsid, sizeof(apSsid), "Bowlstack-%s", BOWLSTACK_DEVICE_ID);
+    ui::wifiSetSetupAp(apSsid, "bowlstack");
+    Serial.printf("  mac %s\n", macStr);
+  }
+  ui::wifiSetNetworks(MOCK_NETS, sizeof(MOCK_NETS) / sizeof(MOCK_NETS[0]));
+  ui::wifiSetConnected(nullptr, 0, nullptr);
+
   ui::buildPages();
   Serial.println("  2 pages, swipe horizontally -- identical to `pio run -e sim`:");
   Serial.println("    1  stock view, cycling scenarios every 3 s");

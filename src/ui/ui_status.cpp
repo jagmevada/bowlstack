@@ -25,6 +25,12 @@ lv_obj_t *lblTime_;
 lv_obj_t *battBody_;
 lv_obj_t *battFill_;
 lv_obj_t *battBolt_;
+lv_obj_t *wifiBtn_;
+void (*onWifiTap_)(void) = nullptr;
+
+void wifiClicked(lv_event_t *) {
+  if (onWifiTap_) onWifiTap_();
+}
 
 // Cached, so a steady state does no work and invalidates nothing. Without this
 // the bar would repaint every frame behind a scope running at full tilt, for a
@@ -126,11 +132,24 @@ void buildStatus(lv_obj_t *parent) {
   lv_obj_set_style_pad_all(right, 0, LV_PART_MAIN);
   lv_obj_remove_flag(right, LV_OBJ_FLAG_SCROLLABLE);
 
+  // The bars get their own container so the whole cluster is one TOUCH TARGET.
+  // Four 3 px rectangles are not tappable; an 26x24 box around them is. The box
+  // is transparent, so it costs nothing visually and everything in usability.
+  wifiBtn_ = lv_obj_create(right);
+  lv_obj_set_size(wifiBtn_, 26, STATUS_H - 2);
+  lv_obj_set_pos(wifiBtn_, 0, 0);
+  lv_obj_set_style_bg_opa(wifiBtn_, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(wifiBtn_, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(wifiBtn_, 0, LV_PART_MAIN);
+  lv_obj_remove_flag(wifiBtn_, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(wifiBtn_, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(wifiBtn_, wifiClicked, LV_EVENT_CLICKED, nullptr);
+
   // Bars share a common BASELINE, so they grow upward like a signal meter
   // rather than being centred, which would read as a bar chart of nothing.
   const int16_t baseY = 19;
   for (uint8_t i = 0; i < WIFI_BARS; i++) {
-    bars_[i] = rect(right, WIFI_BAR_W, WIFI_BAR_H[i], C_DIM);
+    bars_[i] = rect(wifiBtn_, WIFI_BAR_W, WIFI_BAR_H[i], C_DIM);
     lv_obj_set_pos(bars_[i], i * (WIFI_BAR_W + WIFI_BAR_GAP), baseY - WIFI_BAR_H[i]);
   }
 
@@ -162,6 +181,8 @@ void buildStatus(lv_obj_t *parent) {
   lv_obj_set_pos(battBolt_, 38, 5);
   lv_obj_add_flag(battBolt_, LV_OBJ_FLAG_HIDDEN);
 }
+
+void statusOnWifiTap(void (*cb)(void)) { onWifiTap_ = cb; }
 
 void updateStatus(const State &s) {
   if (s.deviceId != lastId_) {

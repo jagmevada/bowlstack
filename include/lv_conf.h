@@ -156,6 +156,16 @@
 #define LV_LOG_LEVEL LV_LOG_LEVEL_WARN
 #define LV_LOG_PRINTF 0
 
+// --- QR codes --------------------------------------------------------------
+// For WiFi commissioning. The device renders a QR encoding its OWN setup access
+// point in the standard WIFI:T:WPA;S:ssid;P:pass;; form that both iOS and
+// Android camera apps join natively -- so the person scans, their phone joins
+// the device, the captive portal opens, and they type the real password on a
+// full-size keyboard they already know how to use.
+//
+// This is why the on-device keyboard is a FALLBACK rather than the main path.
+#define LV_USE_QRCODE 1
+
 // --- diagnostics -----------------------------------------------------------
 // Both off. Turn LV_USE_PERF_MONITOR on while tuning the flush path -- it
 // overlays FPS and CPU in a corner, which is the fastest way to find out
