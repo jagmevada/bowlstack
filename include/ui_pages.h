@@ -22,4 +22,16 @@ void buildPages();
 // Drives whichever page needs a clock. Call every loop iteration.
 void pagesTick(uint32_t nowMs);
 
+// Returns to the stock page and closes any detail overlay. Called by the idle
+// timeout, and available to anything else that needs to get home.
+void pagesGoHome();
+
+// How long without a touch before the UI returns to the stock page.
+//
+// A device left on the WiFi page is a device whose primary readout -- the bowl
+// count someone walked over to see -- is not on screen. It also stops the more
+// expensive pages rendering unattended, which matters on a board that has
+// sensors to poll and a network to hold up.
+static const uint32_t IDLE_HOME_MS = 60000;
+
 }  // namespace ui

@@ -40,6 +40,7 @@
 #include "version.h"
 #include "ui_demo.h"
 #include "ui_pages.h"
+#include "ui_perf.h"
 #include "ui_scope.h"
 #include "ui_screens.h"
 #include "ui_wifi.h"
@@ -303,6 +304,7 @@ void setup() {
   }
   ui::demoInstallWifiMocks();
 
+  ui::perfBegin();
   ui::buildPages();
   Serial.println("  2 pages, swipe horizontally -- identical to `pio run -e sim`:");
   Serial.println("    1  stock view, cycling scenarios every 3 s");
@@ -319,7 +321,12 @@ void setup() {
 }
 
 void loop() {
+  // Bracketed so busy% is measured rather than guessed. That figure -- share of
+  // wall clock spent inside LVGL -- is the one that decides whether this board
+  // has anything left for four VL53L0X, a WiFi link and a Supabase POST.
+  ui::perfFrameStart(millis());
   lv_timer_handler();
+  ui::perfFrameEnd(millis());
 
   // Pixel shift is OFF -- see todo.md.
   // ui::pixelShiftTick(millis());
@@ -368,8 +375,9 @@ void loop() {
     // the stock view showing, the chart is invalidated but never rendered and
     // this reads near zero. That is not a stall -- it is the renderer correctly
     // declining to draw what nobody can see.
-    Serial.printf("scope %u fps%s | battery pin %u mV -> cell %u mV | heap %u\n",
-                  ui::scopeFps(), ui::scopeFps() ? "" : " (scope page not visible?)", pinMv,
+    char perf[96];
+    ui::perfFormat(perf, sizeof(perf));
+    Serial.printf("%s | batt %u mV | esp-heap %u\n", perf,
                   (uint16_t)(pinMv * board::BATTERY_DIVIDER_NOMINAL), ESP.getFreeHeap());
   }
 

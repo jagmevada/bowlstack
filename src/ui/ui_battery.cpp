@@ -176,6 +176,20 @@ void buildBatteryPage(lv_obj_t *parent) {
 void updateBatteryPage(const State &s) {
   if (!lblVolts_) return;
 
+  // Guarded for the same reason ui_screens::update() is: this runs on every
+  // frame the page is open, and every write below either reallocates a label
+  // buffer or marks an object dirty. A voltage that moves once a second was
+  // repainting the panel at whatever rate the loop managed.
+  static State prev;
+  static bool have = false;
+  if (have && prev.batteryMv == s.batteryMv && prev.batteryPinMv == s.batteryPinMv &&
+      prev.batteryPercent == s.batteryPercent && prev.battery == s.battery &&
+      prev.charging == s.charging && prev.chargingKnown == s.chargingKnown) {
+    return;
+  }
+  prev = s;
+  have = true;
+
   if (s.battery == Battery::Unknown || s.batteryMv == 0) {
     lv_label_set_text(lblVolts_, "no cell");
     lv_obj_set_style_text_color(lblVolts_, lv_color_hex(C_FAULT), LV_PART_MAIN);

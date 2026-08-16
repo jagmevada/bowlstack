@@ -5,6 +5,7 @@
 #include "ui_demo.h"
 #include "ui_scope.h"
 #include "ui_screens.h"
+#include "ui_perf.h"
 #include "ui_status.h"
 #include "ui_battery.h"
 #include "ui_wifi.h"
@@ -108,7 +109,48 @@ void buildPages() {
   lastActive_ = nullptr;
 }
 
+// Measurement aid, off in any normal build. With -DUI_AUTO_CYCLE_MS=8000 the
+// pages advance on their own, so both can be profiled without a finger on the
+// glass -- which is the only way to get an honest reading of a page nobody is
+// there to swipe to. It also suppresses the idle timeout, which would otherwise
+// drag the measurement back to the stock page every minute.
+#ifndef UI_AUTO_CYCLE_MS
+#define UI_AUTO_CYCLE_MS 0
+#endif
+
+void pagesGoHome() {
+  closeDetail();
+  if (tv_ && tileStock_) lv_tileview_set_tile(tv_, tileStock_, LV_ANIM_OFF);
+}
+
 void pagesTick(uint32_t nowMs) {
+  // --- idle timeout --------------------------------------------------------
+  // lv_display_get_inactive_time() is LVGL's own count of milliseconds since
+  // any input device reported activity, so this needs no touch plumbing of its
+  // own and cannot disagree with what the indev actually saw.
+  //
+  // Guarded on already-being-home, because lv_tileview_set_tile on the current
+  // tile still invalidates it, and firing that every frame once idle would be a
+  // permanent redraw for no change -- the exact waste this work is about.
+#if UI_AUTO_CYCLE_MS
+  {
+    static uint32_t nextSwap = 0;
+    static bool onScope = false;
+    if ((int32_t)(nowMs - nextSwap) >= 0) {
+      nextSwap = nowMs + UI_AUTO_CYCLE_MS;
+      onScope = !onScope;
+      closeDetail();
+      if (tv_) lv_tileview_set_tile(tv_, onScope ? tileScope_ : tileStock_, LV_ANIM_OFF);
+    }
+  }
+#else
+  if (lv_display_get_inactive_time(NULL) > IDLE_HOME_MS) {
+    const bool home = (detailOpen_ == nullptr) &&
+                      (!tv_ || lv_tileview_get_tile_active(tv_) == tileStock_);
+    if (!home) pagesGoHome();
+  }
+#endif
+
   // --- data: always, for every page, visible or not ------------------------
   // This is the requirement, and it is why sampling and rendering are separate
   // calls. In the shipping firmware the sensors do not stop ranging because
@@ -156,7 +198,15 @@ void pagesTick(uint32_t nowMs) {
     update(s);
   } else if (active == tileScope_) {
     scopeRender();
+    // Once a second, not per frame: the readout is a line of text, and
+    // rewriting it at frame rate would be its own measurable cost inside the
+    // thing it is measuring.
+    if (perfTick(nowMs)) scopeShowPerf();
   }
+
+  // perfTick still has to run when the scope is not the visible page, or the
+  // window never closes and the console figures go stale.
+  if (active != tileScope_) perfTick(nowMs);
 }
 
 }  // namespace ui

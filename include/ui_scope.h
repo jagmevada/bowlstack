@@ -53,4 +53,7 @@ void scopeSetVisible(bool visible);
 // Last computed frames-per-second, for callers that want to log it.
 uint16_t scopeFps();
 
+// Pushes the shared perf figures into the on-screen readout. Once a second.
+void scopeShowPerf();
+
 }  // namespace ui

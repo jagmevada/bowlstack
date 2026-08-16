@@ -219,14 +219,46 @@ void build(lv_obj_t *parent) {
   lv_obj_add_flag(barBattery, LV_OBJ_FLAG_HIDDEN);
 }
 
+// EVERY WRITE BELOW IS GUARDED, and that is the difference between a UI that
+// costs nothing and one that repaints the whole panel eight times a second.
+//
+// LVGL's setters do not compare before acting: lv_label_set_text() reallocates
+// its buffer and lv_obj_set_style_bg_color() marks the object dirty, whether or
+// not the value changed. This function runs every loop iteration, so writing
+// unconditionally invalidated all four cells, the count and the status chip on
+// every pass -- a full-screen redraw, ~125 ms of render and SPI, for a screen
+// whose content changes every three seconds.
+//
+// The per-frame reallocation is also the likeliest cause of the desktop preview
+// slowing and eventually hanging after a while: label buffers churned fifty
+// times a second fragment the LVGL pool, and lv_mem_monitor's frag figure in
+// the perf line is there to confirm or refute that.
+namespace {
+State prev_;
+bool havePrev_ = false;
+
+bool levelChanged(const State &s, uint8_t i) {
+  return !havePrev_ || prev_.levels[i] != s.levels[i] ||
+         prev_.sensorOnline[i] != s.sensorOnline[i];
+}
+}  // namespace
+
 void update(const State &s) {
-  lv_label_set_text(lblDevice, s.deviceId ? s.deviceId : "BWL-000");
-  lv_label_set_text(lblWifi, s.wifiConnected ? "wifi ok" : "wifi down");
-  lv_obj_set_style_text_color(lblWifi, lv_color_hex(s.wifiConnected ? C_MUTED : C_FAULT),
-                              LV_PART_MAIN);
+  const bool first = !havePrev_;
+
+  if (first || prev_.deviceId != s.deviceId) {
+    lv_label_set_text(lblDevice, s.deviceId ? s.deviceId : "BWL-000");
+  }
+  if (first || prev_.wifiConnected != s.wifiConnected) {
+    lv_label_set_text(lblWifi, s.wifiConnected ? "wifi ok" : "wifi down");
+    lv_obj_set_style_text_color(lblWifi,
+                                lv_color_hex(s.wifiConnected ? C_MUTED : C_FAULT),
+                                LV_PART_MAIN);
+  }
 
   static const char *levelText[] = {"unknown", "absent", "present"};
   for (uint8_t i = 0; i < LEVELS; i++) {
+    if (!levelChanged(s, i)) continue;
     const Level lv = s.levels[i];
     // Three states, three fills: occupied, empty, faulty. Colour carries this
     // now that the level tags are gone, so it has to be unambiguous at a glance
@@ -252,6 +284,7 @@ void update(const State &s) {
   // discontiguous means a bowl was seen ABOVE an empty level, which is
   // physically impossible, so there is no trustworthy count to show. Rendering
   // "2 bowls" there would be worse than rendering an error.
+  if (first || prev_.stack != s.stack || prev_.stackCount != s.stackCount) {
   if (s.stack == Stack::Discontiguous) {
     lv_label_set_text(lblCount, "!");
     lv_obj_set_style_text_color(lblCount, lv_color_hex(C_FAULT), LV_PART_MAIN);
@@ -273,6 +306,7 @@ void update(const State &s) {
       lv_obj_add_flag(lblStatus, LV_OBJ_FLAG_HIDDEN);
     }
   }
+  }
 
   static const char *battText[] = {"no cell", "critical", "low", "medium", "good"};
   const uint32_t battColor[] = {C_MUTED, C_FAULT, C_FAULT, C_WARN, C_PRESENT};
@@ -281,14 +315,20 @@ void update(const State &s) {
   // "no cell" carries no millivolts on purpose. Unknown means the measurement
   // is not trustworthy, and printing a number beside that word would invite
   // exactly the confidence the word exists to withhold.
-  if (s.battery == Battery::Unknown) {
-    lv_label_set_text(lblBattery, "battery  no cell");
-  } else if (s.chargingKnown && s.charging) {
-    lv_label_set_text_fmt(lblBattery, "chg  %u mV  %s", s.batteryMv, battText[bi]);
-  } else {
-    lv_label_set_text_fmt(lblBattery, "batt  %u mV  %s", s.batteryMv, battText[bi]);
+  if (first || prev_.battery != s.battery || prev_.batteryMv != s.batteryMv ||
+      prev_.charging != s.charging || prev_.chargingKnown != s.chargingKnown) {
+    if (s.battery == Battery::Unknown) {
+      lv_label_set_text(lblBattery, "battery  no cell");
+    } else if (s.chargingKnown && s.charging) {
+      lv_label_set_text_fmt(lblBattery, "chg  %u mV  %s", s.batteryMv, battText[bi]);
+    } else {
+      lv_label_set_text_fmt(lblBattery, "batt  %u mV  %s", s.batteryMv, battText[bi]);
+    }
+    lv_obj_set_style_bg_color(barBattery, lv_color_hex(battColor[bi]), LV_PART_MAIN);
   }
-  lv_obj_set_style_bg_color(barBattery, lv_color_hex(battColor[bi]), LV_PART_MAIN);
+
+  prev_ = s;
+  havePrev_ = true;
 }
 
 // --- image-retention pixel shift -------------------------------------------

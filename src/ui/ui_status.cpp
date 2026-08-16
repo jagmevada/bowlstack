@@ -21,7 +21,7 @@ const uint32_t C_RULE = 0x21262D;
 //
 // Set to 0 once the sizes are settled.
 #ifndef UI_TOUCH_DEBUG
-#define UI_TOUCH_DEBUG 1
+#define UI_TOUCH_DEBUG 0
 #endif
 
 void debugOutline(lv_obj_t *o) {

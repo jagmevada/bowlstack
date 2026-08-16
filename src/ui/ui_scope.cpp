@@ -1,5 +1,6 @@
 #include "ui_scope.h"
 
+#include "ui_perf.h"
 #include "ui_state.h"
 
 namespace ui {
@@ -19,14 +20,9 @@ lv_chart_series_t *series_[LEVELS] = {nullptr, nullptr, nullptr, nullptr};
 lv_obj_t *lblFps_ = nullptr;
 lv_obj_t *lblVals_ = nullptr;
 
-// --- frame counting --------------------------------------------------------
-// Counted from the display's REFR_READY event, which fires once per completed
-// refresh. The flush callback would be the wrong hook: it runs once per
-// invalidated AREA, so with partial rendering a single frame can call it three
-// or four times and the "FPS" would be a multiple of the truth.
-volatile uint32_t frames_ = 0;
-uint32_t fpsWindowStart_ = 0;
-uint16_t fps_ = 0;
+// Frame counting moved to ui_perf, which both targets and every page share.
+// Two REFR_READY handlers counting the same event into two variables was
+// duplicated work for one number.
 uint32_t lastSampleMs_ = 0;
 bool visible_ = false;
 
@@ -37,8 +33,6 @@ int16_t ring_[LEVELS][SCOPE_POINTS];
 uint16_t ringHead_ = 0;
 uint16_t ringFill_ = 0;
 bool pendingRender_ = false;
-
-void onRefrReady(lv_event_t *) { frames_++; }
 
 // --- fabricated sensor data ------------------------------------------------
 // A deterministic LCG rather than rand(): the sim and the device must produce
@@ -165,14 +159,11 @@ void buildScope(lv_obj_t *parent) {
     lv_label_set_text_fmt(l, "f%u", i + 1);
   }
 
-  lv_display_add_event_cb(lv_display_get_default(), onRefrReady, LV_EVENT_REFR_READY,
-                          nullptr);
 }
 
 void scopeSample(uint32_t nowMs) {
   if (!armed_) {
     armChannels(nowMs);
-    fpsWindowStart_ = nowMs;
     lastSampleMs_ = nowMs;
   }
 
@@ -189,19 +180,6 @@ void scopeSample(uint32_t nowMs) {
   if (ringFill_ < SCOPE_POINTS) ringFill_++;
   pendingRender_ = true;
 
-  // The FPS window advances whether or not anything is drawn, so a reading of
-  // zero while the page is hidden is a true statement about frames rendered
-  // rather than a stalled counter.
-  if ((int32_t)(nowMs - fpsWindowStart_) >= 1000) {
-    const uint32_t elapsed = nowMs - fpsWindowStart_;
-    fps_ = (uint16_t)((frames_ * 1000UL) / (elapsed ? elapsed : 1));
-    frames_ = 0;
-    fpsWindowStart_ = nowMs;
-    if (visible_ && lblFps_) {
-      lv_label_set_text_fmt(lblFps_, "%u fps   %lu ms/frame", fps_,
-                            (unsigned long)(fps_ ? 1000UL / fps_ : 0));
-    }
-  }
 }
 
 void scopeRender() {
@@ -239,6 +217,15 @@ void scopeSetVisible(bool visible) {
   }
 }
 
-uint16_t scopeFps() { return fps_; }
+uint16_t scopeFps() { return perfFps(); }
+
+// Refreshes the on-screen readout. Separate from sampling so it happens once a
+// second rather than fifty times, and only while the page is being looked at.
+void scopeShowPerf() {
+  if (!visible_ || !lblFps_) return;
+  char buf[96];
+  perfFormat(buf, sizeof(buf));
+  lv_label_set_text(lblFps_, buf);
+}
 
 }  // namespace ui
