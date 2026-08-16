@@ -205,6 +205,27 @@ the same class of failure as the floating pin that once read 6365 mV as
       corrupt-looking crash far from its cause
 - [ ] Compile `indicators` out under the board macro
 - [ ] Screens: stock, health, setup
+- [ ] **Image retention — a real risk for this product, not a curiosity.**
+      Observed 2026-08-17: a faint `2` from an earlier build remained visible in
+      its old position across several power cycles. It is not a stale buffer —
+      a framebuffer cannot survive a reboot and the ST7789's GRAM is fully
+      overwritten by `fillScreen()` at every boot. It is LCD image retention
+      from a high-contrast 48 px glyph parked in one spot for a long time, and
+      it fades once other content has been shown.
+
+      That is exactly what this product does for a living: `README.md` says
+      units are powered ~8 h/day through meal service, and the stock view is a
+      near-static digit that changes a handful of times per service. Mitigations
+      worth choosing between:
+
+      - **pixel shift** — nudge the whole layout 1–2 px on a slow cycle, the way
+        TVs and station clocks do. Cheap, invisible, and the standard answer.
+      - **dim or blank when idle** — also saves battery, but hides the number a
+        coordinator may be walking over to read.
+      - **lower average luminance** — already partly done: the background is now
+        pure black rather than near-black.
+
+      Pixel shift is the one to implement; the others are complements.
 - [ ] **Dadabhagwan Foundation logo as the boot splash.** The colour-bar test
       pattern is now off by default (`-DBRINGUP_COLOR_BARS=1` brings it back)
       and a plain "Bowlstack" text splash stands in its place. Draw the logo
@@ -228,3 +249,11 @@ the same class of failure as the floating pin that once read 6365 mV as
   text-entry widget.
 - Enclosure and viewing angle. A 2" panel replaces LEDs that were readable
   across a kitchen; a screen you have to approach is a different affordance.
+- **The enclosure has an electrical job too, not just a mechanical one.**
+  Observed 2026-08-17: holding the bare board by the edge of the panel makes the
+  display flicker — body capacitance coupling into an ungrounded panel edge.
+  It is a handling artefact of a bare board, but a kitchen is exactly where
+  someone grabs a device by its screen, and the units run on a floating battery
+  with no earth reference. Worth designing for: a bezel that stops fingers
+  reaching the panel edge, and a ground plane or shield tied to the board's GND
+  behind it.

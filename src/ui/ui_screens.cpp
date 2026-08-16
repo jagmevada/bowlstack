@@ -1,0 +1,302 @@
+// Stock view -- the primary screen.
+//
+// LAID OUT WITH FLEX CONTAINERS, NOT COORDINATES. The first version positioned
+// everything with hand-computed offsets against two different anchors, and the
+// result on real hardware was exactly what that method produces: the battery
+// line ran off the right edge, the touch line was sliced in half by the button,
+// and the right-hand column sat mostly empty while the left one was cramped.
+//
+// Arithmetic like `48 + i * 50` cannot express "these must not overlap" -- it
+// can only happen to satisfy it, and only for one font, one string length and
+// one screen size. Flex states the intent instead, so a longer battery string
+// or a bigger font reflows rather than collides.
+
+#include "ui_screens.h"
+
+#include <lvgl.h>
+#include <stdio.h>
+
+namespace ui {
+namespace {
+
+// Dark palette. Values are the same family the web UI uses, so a person moving
+// between the station and the dashboard sees one product.
+//
+// C_BG is pure black, not the near-black 0x0D1117 it started as.
+//
+// The panel renders it as dark GREY and the monitor renders it as black, and
+// that gap is not something code can close: an IPS LCD lights every pixel from
+// behind, so its black is backlight leaking through a closed shutter. Both are
+// being sent the identical value. Going to 0x000000 does not equalise them --
+// nothing will -- but it does give the panel the deepest black it has, which is
+// the most contrast the level cells and the count can get.
+//
+// It also lowers average luminance, which is the cheapest of the image-retention
+// mitigations (see todo.md).
+const uint32_t C_BG = 0x000000;
+const uint32_t C_PANEL = 0x161B22;
+const uint32_t C_BORDER = 0x30363D;
+const uint32_t C_TEXT = 0xE6EDF3;
+const uint32_t C_MUTED = 0x8B949E;
+const uint32_t C_PRESENT = 0x1F6F43;
+const uint32_t C_WARN = 0x9E6A03;
+const uint32_t C_FAULT = 0xB62324;
+
+lv_obj_t *lblDevice;
+lv_obj_t *lblWifi;
+lv_obj_t *lblCount;
+lv_obj_t *lblCountCap;
+lv_obj_t *lblStatus;
+lv_obj_t *cells[LEVELS];
+lv_obj_t *cellLabels[LEVELS];
+lv_obj_t *lblBattery;
+lv_obj_t *barBattery;
+
+void styleFlat(lv_obj_t *o) {
+  lv_obj_set_style_bg_opa(o, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(o, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(o, 0, LV_PART_MAIN);
+  lv_obj_set_style_radius(o, 0, LV_PART_MAIN);
+  lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE);
+}
+
+}  // namespace
+
+void build(lv_obj_t *parent) {
+  lv_obj_t *scr = parent ? parent : lv_screen_active();
+  lv_obj_set_style_bg_color(scr, lv_color_hex(C_BG), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_text_color(scr, lv_color_hex(C_TEXT), LV_PART_MAIN);
+
+  // An LVGL screen is scrollable by default, and this one has no business
+  // being. It is a fixed readout: there is nothing below the fold to reach, so
+  // a drag can only displace a correct layout into an incorrect one, and a
+  // person prodding at a bowl count has no reason to expect it to move.
+  //
+  // (This was originally added chasing a flicker that turned out to be
+  // capacitive coupling from a hand on the panel edge -- a hardware and
+  // handling matter, not a rendering one. The change is kept because it is
+  // right on its own terms, not because it fixed that.)
+  lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+
+  lv_obj_set_flex_flow(scr, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_all(scr, 8, LV_PART_MAIN);
+  lv_obj_set_style_pad_row(scr, 6, LV_PART_MAIN);
+
+  // --- header --------------------------------------------------------------
+  lv_obj_t *header = lv_obj_create(scr);
+  styleFlat(header);
+  lv_obj_set_size(header, LV_PCT(100), 22);
+  lv_obj_set_flex_flow(header, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(header, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER);
+
+  lblDevice = lv_label_create(header);
+  // Information, not state: 16 per the type scale in lv_conf.h.
+  lv_obj_set_style_text_font(lblDevice, &lv_font_montserrat_16, LV_PART_MAIN);
+  lv_obj_set_style_text_color(lblDevice, lv_color_hex(C_MUTED), LV_PART_MAIN);
+  lv_label_set_text(lblDevice, "BWL-000");
+
+  lblWifi = lv_label_create(header);
+  // A state, so it stays at the 18 floor rather than shrinking to match the id.
+  lv_obj_set_style_text_font(lblWifi, &lv_font_montserrat_18, LV_PART_MAIN);
+  lv_obj_set_style_text_color(lblWifi, lv_color_hex(C_MUTED), LV_PART_MAIN);
+  lv_label_set_text(lblWifi, "wifi -");
+
+  // --- body: stack column | count panel -----------------------------------
+  lv_obj_t *body = lv_obj_create(scr);
+  styleFlat(body);
+  lv_obj_set_width(body, LV_PCT(100));
+  lv_obj_set_flex_grow(body, 1);
+  lv_obj_set_flex_flow(body, LV_FLEX_FLOW_ROW);
+  lv_obj_set_style_pad_column(body, 8, LV_PART_MAIN);
+
+  lv_obj_t *column = lv_obj_create(body);
+  styleFlat(column);
+  lv_obj_set_height(column, LV_PCT(100));
+  lv_obj_set_flex_grow(column, 3);
+  lv_obj_set_flex_flow(column, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(column, 5, LV_PART_MAIN);
+
+  // Built top-down as f4..f1 so the array index still means what it says: the
+  // widget for levels[0] is created last and sits at the bottom, matching the
+  // pipe. Reversing the array instead would put f1 at index 3 everywhere else.
+  for (int8_t i = LEVELS - 1; i >= 0; i--) {
+    lv_obj_t *cell = lv_obj_create(column);
+    lv_obj_set_width(cell, LV_PCT(100));
+    lv_obj_set_flex_grow(cell, 1);
+    lv_obj_set_style_radius(cell, 6, LV_PART_MAIN);
+    lv_obj_set_style_border_width(cell, 1, LV_PART_MAIN);
+    lv_obj_set_style_border_color(cell, lv_color_hex(C_BORDER), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(cell, lv_color_hex(C_PANEL), LV_PART_MAIN);
+    lv_obj_set_style_pad_all(cell, 4, LV_PART_MAIN);
+    lv_obj_remove_flag(cell, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Row, not a centred string. "f1" gets 24 px because the level identity is
+    // what a person scans for; the state word gets 20, above the 18 floor for
+    // states. Packing both into one centred label forced a single size, and the
+    // size that made the whole string fit was one that could not be read.
+    lv_obj_set_flex_flow(cell, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(cell, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    lv_obj_t *tag = lv_label_create(cell);
+    lv_obj_set_style_text_font(tag, &lv_font_montserrat_24, LV_PART_MAIN);
+    lv_label_set_text_fmt(tag, "f%u", i + 1);
+
+    lv_obj_t *l = lv_label_create(cell);
+    // The most-read state on the screen, so above the 18 floor.
+    lv_obj_set_style_text_font(l, &lv_font_montserrat_20, LV_PART_MAIN);
+    lv_label_set_text(l, "--");
+
+    cells[i] = cell;
+    cellLabels[i] = l;
+  }
+
+  lv_obj_t *panel = lv_obj_create(body);
+  styleFlat(panel);
+  lv_obj_set_height(panel, LV_PCT(100));
+  lv_obj_set_flex_grow(panel, 2);
+  lv_obj_set_flex_flow(panel, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(panel, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER);
+
+  lblCount = lv_label_create(panel);
+  lv_obj_set_style_text_font(lblCount, &lv_font_montserrat_48, LV_PART_MAIN);
+  lv_label_set_text(lblCount, "-");
+
+  lblCountCap = lv_label_create(panel);
+  lv_obj_set_style_text_font(lblCountCap, &lv_font_montserrat_18, LV_PART_MAIN);
+  lv_obj_set_style_text_color(lblCountCap, lv_color_hex(C_MUTED), LV_PART_MAIN);
+  lv_label_set_text(lblCountCap, "bowls");
+
+  // Status chip. Hidden when everything is fine -- a permanent "OK" badge
+  // teaches people to stop reading the area, which is the opposite of what a
+  // fault indicator is for.
+  lblStatus = lv_label_create(panel);
+  lv_obj_set_style_text_font(lblStatus, &lv_font_montserrat_18, LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(lblStatus, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(lblStatus, lv_color_hex(C_WARN), LV_PART_MAIN);
+  lv_obj_set_style_radius(lblStatus, 4, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(lblStatus, 3, LV_PART_MAIN);
+  lv_obj_set_style_margin_top(lblStatus, 6, LV_PART_MAIN);
+  lv_label_set_text(lblStatus, "");
+  lv_obj_add_flag(lblStatus, LV_OBJ_FLAG_HIDDEN);
+
+  // --- footer --------------------------------------------------------------
+  lv_obj_t *footer = lv_obj_create(scr);
+  styleFlat(footer);
+  lv_obj_set_size(footer, LV_PCT(100), 26);
+  lv_obj_set_flex_flow(footer, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(footer, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER);
+
+  // The ADC PIN voltage is deliberately absent. It is a calibration aid, it
+  // belongs on the console next to the cell voltage, and it was half of what
+  // made the old footer string 30 characters wide on a 240 px panel -- i.e.
+  // clipped, which is worse than absent because it looks like data.
+  lblBattery = lv_label_create(footer);
+  // Information rather than state -- read when someone is diagnosing, not at a
+  // glance during service -- so 16.
+  lv_obj_set_style_text_font(lblBattery, &lv_font_montserrat_16, LV_PART_MAIN);
+  lv_obj_set_style_text_color(lblBattery, lv_color_hex(C_MUTED), LV_PART_MAIN);
+  lv_label_set_text(lblBattery, "battery --");
+
+  barBattery = lv_obj_create(footer);
+  lv_obj_set_size(barBattery, 34, 12);
+  lv_obj_set_style_radius(barBattery, 3, LV_PART_MAIN);
+  lv_obj_set_style_border_width(barBattery, 1, LV_PART_MAIN);
+  lv_obj_set_style_border_color(barBattery, lv_color_hex(C_BORDER), LV_PART_MAIN);
+  lv_obj_set_style_bg_color(barBattery, lv_color_hex(C_PANEL), LV_PART_MAIN);
+  lv_obj_remove_flag(barBattery, LV_OBJ_FLAG_SCROLLABLE);
+}
+
+void update(const State &s) {
+  lv_label_set_text(lblDevice, s.deviceId ? s.deviceId : "BWL-000");
+  lv_label_set_text(lblWifi, s.wifiConnected ? "wifi ok" : "wifi down");
+  lv_obj_set_style_text_color(lblWifi, lv_color_hex(s.wifiConnected ? C_MUTED : C_FAULT),
+                              LV_PART_MAIN);
+
+  static const char *levelText[] = {"unknown", "absent", "present"};
+  for (uint8_t i = 0; i < LEVELS; i++) {
+    const Level lv = s.levels[i];
+    uint32_t bg = C_PANEL;
+    if (lv == Level::Present) bg = C_PRESENT;
+    lv_obj_set_style_bg_color(cells[i], lv_color_hex(bg), LV_PART_MAIN);
+
+    // A dead sensor is called out on the cell it belongs to, rather than only
+    // in an aggregate count, because "which one" is the actionable part. The
+    // level tag stays put; only the state word changes.
+    if (!s.sensorOnline[i]) {
+      lv_obj_set_style_border_color(cells[i], lv_color_hex(C_FAULT), LV_PART_MAIN);
+      lv_label_set_text(cellLabels[i], "offline");
+    } else {
+      lv_obj_set_style_border_color(cells[i], lv_color_hex(C_BORDER), LV_PART_MAIN);
+      lv_label_set_text(cellLabels[i], levelText[(uint8_t)lv]);
+    }
+  }
+
+  // FRONTEND_HANDOFF.md is explicit and the local UI must not contradict it:
+  // discontiguous means a bowl was seen ABOVE an empty level, which is
+  // physically impossible, so there is no trustworthy count to show. Rendering
+  // "2 bowls" there would be worse than rendering an error.
+  if (s.stack == Stack::Discontiguous) {
+    lv_label_set_text(lblCount, "!");
+    lv_obj_set_style_text_color(lblCount, lv_color_hex(C_FAULT), LV_PART_MAIN);
+    lv_label_set_text(lblCountCap, "fault");
+    lv_obj_set_style_bg_color(lblStatus, lv_color_hex(C_FAULT), LV_PART_MAIN);
+    lv_label_set_text(lblStatus, "impossible stack");
+    lv_obj_remove_flag(lblStatus, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_label_set_text_fmt(lblCount, "%u", s.stackCount);
+    lv_obj_set_style_text_color(lblCount, lv_color_hex(C_TEXT), LV_PART_MAIN);
+    lv_label_set_text(lblCountCap, "bowls");
+    if (s.stack == Stack::Degraded) {
+      // Shown WITH the number, not instead of it: a degraded count is a lower
+      // bound, which is still useful, unlike a discontiguous one.
+      lv_obj_set_style_bg_color(lblStatus, lv_color_hex(C_WARN), LV_PART_MAIN);
+      lv_label_set_text(lblStatus, "at least");
+      lv_obj_remove_flag(lblStatus, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_add_flag(lblStatus, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
+
+  static const char *battText[] = {"no cell", "critical", "low", "medium", "good"};
+  const uint32_t battColor[] = {C_MUTED, C_FAULT, C_FAULT, C_WARN, C_PRESENT};
+  const uint8_t bi = (uint8_t)s.battery;
+
+  // "no cell" carries no millivolts on purpose. Unknown means the measurement
+  // is not trustworthy, and printing a number beside that word would invite
+  // exactly the confidence the word exists to withhold.
+  if (s.battery == Battery::Unknown) {
+    lv_label_set_text(lblBattery, "battery  no cell");
+  } else if (s.chargingKnown && s.charging) {
+    lv_label_set_text_fmt(lblBattery, "chg  %u mV  %s", s.batteryMv, battText[bi]);
+  } else {
+    lv_label_set_text_fmt(lblBattery, "batt  %u mV  %s", s.batteryMv, battText[bi]);
+  }
+  lv_obj_set_style_bg_color(barBattery, lv_color_hex(battColor[bi]), LV_PART_MAIN);
+}
+
+State unknownState() {
+  State s{};
+  for (uint8_t i = 0; i < LEVELS; i++) {
+    s.levels[i] = Level::Unknown;
+    s.sensorOnline[i] = false;
+  }
+  s.stackCount = 0;
+  s.stack = Stack::Degraded;
+  s.sensorsOnline = 0;
+  s.battery = Battery::Unknown;
+  s.batteryMv = 0;
+  s.chargingKnown = false;
+  s.charging = false;
+  s.wifiConnected = false;
+  s.uptimeSec = 0;
+  s.deviceId = "BWL-000";
+  s.firmware = "0.0.0";
+  return s;
+}
+
+}  // namespace ui

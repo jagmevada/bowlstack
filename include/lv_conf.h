@@ -75,13 +75,67 @@
 // absence looks like an omission when porting a v8 config.
 
 // --- fonts -----------------------------------------------------------------
-// The bowl count is the number a person reads from across a kitchen, so it
-// gets a genuinely large face; everything else is labels and chips.
+// A range, not a minimal set, because the specimen page compares them side by
+// side on the real panel. Each costs roughly 2-9 KB of flash and this image
+// uses 12% of 6.5 MB, so the trade is not close.
+//
+// ON "THE FONT LOOKS LIKE DOTS". These ARE antialiased -- LVGL renders the
+// built-in Montserrat at 4 bpp, giving 16 levels of coverage per pixel. The
+// roughness at small sizes is not a missing feature; it is that this panel is
+// ~200 DPI and a 14 px glyph stem is barely one pixel wide, so there is almost
+// nothing for antialiasing to grade. Going UP in size is what fixes it, which
+// is why the range now reaches well past what the layout currently uses.
+//
+// A different TYPEFACE is the other lever, and LVGL does not ship one: only
+// Montserrat is built in for Latin. Any other face -- and any Devanagari or
+// Gujarati for foundation branding -- has to be converted from a TTF to a C
+// array with LVGL's font converter and committed as source.
+#define LV_FONT_MONTSERRAT_12 1
 #define LV_FONT_MONTSERRAT_14 1
+#define LV_FONT_MONTSERRAT_16 1
+#define LV_FONT_MONTSERRAT_18 1
 #define LV_FONT_MONTSERRAT_20 1
+#define LV_FONT_MONTSERRAT_22 1
+#define LV_FONT_MONTSERRAT_24 1
 #define LV_FONT_MONTSERRAT_28 1
+#define LV_FONT_MONTSERRAT_32 1
+#define LV_FONT_MONTSERRAT_36 1
+#define LV_FONT_MONTSERRAT_40 1
 #define LV_FONT_MONTSERRAT_48 1
-#define LV_FONT_DEFAULT &lv_font_montserrat_14
+
+// Kept as the deliberate counter-example on the specimen page: unscii is a
+// genuine 1 bpp pixel font with no antialiasing at all. Seeing it beside
+// Montserrat is the quickest way to confirm that what the UI is doing is not
+// "no antialiasing" but "not enough pixels".
+#define LV_FONT_UNSCII_8 1
+#define LV_FONT_UNSCII_16 1
+
+// 18, not 14, and the jump is evidence-based rather than taste. On the real
+// panel the 20 px title read as clean while the 14 px body read as "dots" --
+// same typeface, same 4 bpp antialiasing, only the size differing. That is the
+// signature of too few pixels per glyph, not of a bad font.
+//
+// THE TYPE SCALE, and it is a rule rather than a preference:
+//
+//   14 / 16   messages, information, errors -- read deliberately, up close
+//   18 min    labels, states, major widgets -- read at a glance
+//   24 / 48   the level tag and the bowl count -- read across the room
+//
+// The default is 18 because that is the floor for anything glanceable, which is
+// most of this UI. Anything wanting 14 or 16 asks for it explicitly, so the
+// smaller sizes are always a deliberate choice and never something a widget
+// inherited by accident.
+//
+// The evidence behind the floor: on the real panel the 20 px title read as
+// clean and the 14 px body read as "dots" -- same typeface, same 4 bpp
+// antialiasing, only the size differing. That is too few pixels per glyph, not
+// a bad font.
+//
+// It is a layout constraint as much as a style one. At these sizes there is no
+// room for dense text, so density comes down instead -- which docs/frontend.md
+// argues for on its own terms: an operational display watched during a busy
+// service, where glanceability beats completeness.
+#define LV_FONT_DEFAULT &lv_font_montserrat_18
 
 // --- logging ---------------------------------------------------------------
 // On, at WARN. An embedded GUI that fails silently fails invisibly: a bad

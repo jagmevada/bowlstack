@@ -3,23 +3,28 @@
 //
 // THIS IS NOT BOWLSTACK. It links no sensor, no WiFi and no telemetry, and it
 // is not part of any shipping image -- build_src_filter keeps it out of every
-// other environment. Its whole job is to answer, in order, the questions that
-// make integration debuggable:
+// other environment. Its job is to answer, in order, the questions that make
+// integration debuggable:
 //
 //   1. is the touch/IMU I2C bus alive?          (expect CST816D + QMI8658)
 //   2. is the camera SCCB bus usable as our     (expect a silent but
 //      second I2C bus?                           acknowledging bus)
 //   3. does the panel light up, in the right    (raw LovyanGFX, no LVGL)
-//      orientation, with the right polarity?
+//      orientation and polarity?
 //   4. does LVGL flush to it correctly?
 //   5. does touch reach an LVGL widget?
 //   6. does the on-board battery divider read
 //      a plausible cell voltage on GPIO5?
 //
 // Each is separated deliberately. Bringing a display and a GUI toolkit up in
-// one step means a blank screen has a dozen possible causes; bringing the
-// panel up with raw LovyanGFX FIRST means that by the time LVGL is involved,
-// "the screen works" is already established fact.
+// one step means a blank screen has a dozen possible causes; bringing the panel
+// up with raw LovyanGFX FIRST means that by the time LVGL is involved, "the
+// screen works" is already established fact.
+//
+// From stage 4 on it shows src/ui/ -- the same gallery and the same stock view,
+// driven by the same ui_demo scenarios, as `pio run -e sim`. Not a lookalike:
+// the same source files. That is what makes the desktop preview evidence about
+// this device rather than a picture that resembles it.
 // ---------------------------------------------------------------------------
 
 #include <Arduino.h>
@@ -28,35 +33,27 @@
 
 #include "board_waveshare_s3.h"
 #include "lgfx_waveshare_s3.h"
+#include "ui_demo.h"
+#include "ui_gallery.h"
+#include "ui_screens.h"
 
 namespace {
 
 LGFX_WaveshareS3Touch2 gfx;
 
-// Partial-render buffers. A tenth of the panel each, double buffered: LVGL
-// renders into one while the other is in flight over SPI DMA.
-//
-// Full-frame buffering was the alternative and is rejected -- 240x320x2 is
-// 150 KB, and two of those would be 300 KB of the S3's 512 KB internal SRAM
-// spent on a screen that changes a digit every few seconds. Partial mode costs
-// only extra flush calls, and this UI redraws small regions.
-//
-// They stay in INTERNAL RAM. PSRAM would work, but SPI DMA out of PSRAM on the
-// S3 goes through the cache and is measurably slower than out of SRAM, which
-// is the wrong trade for the one buffer that is touched every single frame.
 // Bytes per pixel is stated explicitly and NOT taken from sizeof(lv_color_t).
 //
 // In LVGL 9 `lv_color_t` is a 3-byte {blue, green, red} struct REGARDLESS of
 // LV_COLOR_DEPTH -- it is the API's colour type, not the draw buffer's pixel
-// format. At LV_COLOR_DEPTH 16 the buffer holds 2-byte pixels (`lv_color16_t`),
-// which is also why the flush callback casts to lgfx::rgb565_t.
+// format. At LV_COLOR_DEPTH 16 the buffer holds 2-byte pixels, which is also
+// why the flush callback casts to lgfx::rgb565_t.
 //
-// Sizing a buffer with sizeof(lv_color_t) therefore over-allocates by 50% and,
-// worse, makes the line count a lie: `240 * 32 * sizeof(lv_color_t)` is 23040
-// bytes, which LVGL divides by 2 and uses as 48 lines, not 32. It is not
-// unsafe -- allocation and declared size agree -- but every number in the
-// comment around it is wrong, which is how a later "optimisation" turns a
-// harmless discrepancy into a real overflow.
+// 48 lines, a little under a sixth of the panel. Briefly raised to 80 to chase
+// a flicker that turned out to be capacitive coupling from a hand on the panel
+// edge -- a handling matter, not a rendering one -- so the extra 30 KB bought
+// nothing and is given back. It will be wanted later: WiFi and TLS have yet to
+// move into this image, and telemetry alone took ~5 KB of stack the first time
+// it ran on the discrete board.
 const uint32_t LV_BUF_BPP = 2;  // LV_COLOR_DEPTH 16
 const uint32_t LV_BUF_LINES = 48;
 const uint32_t LV_BUF_PX = board::LCD_W * LV_BUF_LINES;
@@ -64,11 +61,6 @@ const uint32_t LV_BUF_BYTES = LV_BUF_PX * LV_BUF_BPP;
 
 uint8_t *buf1 = nullptr;
 uint8_t *buf2 = nullptr;
-
-lv_obj_t *lblBattery = nullptr;
-lv_obj_t *lblTouch = nullptr;
-lv_obj_t *lblTaps = nullptr;
-uint32_t tapCount = 0;
 
 // --- battery ---------------------------------------------------------------
 // Same 16-sample mean the discrete build uses. A single ESP32 conversion
@@ -82,10 +74,10 @@ uint16_t readBatteryPinMv() {
 }
 
 // --- I2C probing -----------------------------------------------------------
-// Reports what acknowledges, and just as importantly reports the difference
-// between "nothing is there" and "the bus is stuck". A pair of lines held low
-// by a wiring fault looks identical to an empty bus through a scan alone, so
-// the idle levels are read directly first.
+// Reports what acknowledges, and just as importantly separates "nothing is
+// there" from "the bus is stuck". A pair of lines held low by a wiring fault
+// looks identical to an empty bus through a scan alone, so the idle levels are
+// read directly first.
 void scanBus(TwoWire &bus, const char *name, int sda, int scl, uint32_t hz) {
   Serial.printf("\n  %s  (SDA=%d SCL=%d)\n", name, sda, scl);
 
@@ -141,49 +133,29 @@ void flushCb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
 //
 // The CST816D hands over a touch event and clears its data register in the same
 // transaction, so a second reader does not observe the same event -- it steals
-// it. With the status line below polling getTouch() on its own 500 ms cadence,
-// roughly one press in four was consumed before LVGL's indev ever saw it, and
-// LVGL was left inferring press/release transitions from a stream with holes in
-// it. That is a drag gesture as far as LVGL is concerned.
-//
-// Last coordinates are latched here for the status label to read, which is why
-// the label is a consumer of this callback rather than a second poller.
-lv_point_t lastTouch = {0, 0};
-bool everTouched = false;
-
+// it, leaving LVGL to infer press/release from a stream with holes in it, which
+// presents as a spurious drag.
 void touchCb(lv_indev_t *, lv_indev_data_t *data) {
   uint16_t x, y;
   if (gfx.getTouch(&x, &y)) {
     data->point.x = x;
     data->point.y = y;
     data->state = LV_INDEV_STATE_PRESSED;
-    lastTouch.x = x;
-    lastTouch.y = y;
-    everTouched = true;
   } else {
     data->state = LV_INDEV_STATE_RELEASED;
   }
 }
 
-void onTap(lv_event_t *) {
-  tapCount++;
-  lv_label_set_text_fmt(lblTaps, "taps: %u", tapCount);
-  Serial.printf("bringup: tap %u\n", tapCount);
-}
-
 // --- stage 3: the panel, before LVGL exists --------------------------------
-// Kept as its own stage because if the panel is wrong, LVGL cannot fix it and
-// adding LVGL only obscures it.
-//
-// The colour bars are now OFF by default. They were a one-time question --
+// The colour bars are OFF by default. They answered a one-time question --
 // is invert right, is rgb_order right, are rows lost to a bad offset -- and it
-// has been answered on this hardware. Leaving a full-screen test pattern in the
-// boot path of a device someone watches every day is noise, not diagnostics.
+// is answered on this hardware. A full-screen test pattern in the boot path of
+// a device someone watches every day is noise, not diagnostics.
 //
-// They are retained rather than deleted because the question comes back the
-// moment the panel, the FPC or the LGFX config changes:
+// Retained rather than deleted because the question returns the moment the
+// panel, the FPC or the LGFX config changes:
 //
-//     pio run -e ws-s3-bringup -t upload  (with -DBRINGUP_COLOR_BARS=1)
+//     pio run -e ws-s3-bringup -t upload   (with -DBRINGUP_COLOR_BARS=1)
 //
 // | symptom                        | fix, in lgfx_waveshare_s3.h |
 // | black-on-white where inverted  | cfg.invert                  |
@@ -206,18 +178,15 @@ void panelSelfTest() {
     gfx.setCursor(8, i * bandH + 8);
     gfx.print(bars[i].name);
   }
-
-  // Corner ticks prove no rows or columns are lost to a wrong offset.
   gfx.drawRect(0, 0, gfx.width(), gfx.height(), TFT_BLACK);
   gfx.setTextColor(TFT_BLACK);
   gfx.setCursor(8, gfx.height() - 24);
   gfx.printf("%dx%d", gfx.width(), gfx.height());
   delay(1500);
 #else
-  // Placeholder for the Dadabhagwan Foundation logo (todo.md). Text on black
-  // for now -- deliberately drawn with raw LovyanGFX rather than as an LVGL
-  // screen, so that when the logo replaces it, it still appears BEFORE LVGL
-  // initialises and the boot has no dark gap.
+  // Placeholder for the Dadabhagwan Foundation logo (todo.md). Drawn with raw
+  // LovyanGFX rather than as an LVGL screen so that when the logo replaces it,
+  // it still appears BEFORE LVGL initialises and the boot has no dark gap.
   gfx.fillScreen(TFT_BLACK);
   gfx.setTextColor(TFT_WHITE, TFT_BLACK);
   gfx.setTextSize(2);
@@ -228,99 +197,13 @@ void panelSelfTest() {
 #endif
 }
 
-// --- stage 4/5: the LVGL screen -------------------------------------------
-// Laid out roughly the way the real stock view will be, so this doubles as a
-// first look at the eventual UI rather than being throwaway scaffolding.
-void buildScreen() {
-  lv_obj_t *scr = lv_screen_active();
-  lv_obj_set_style_bg_color(scr, lv_color_hex(0x101418), LV_PART_MAIN);
-
-  // THIS IS THE FLICKER FIX. An LVGL screen is SCROLLABLE BY DEFAULT, and this
-  // layout is a few pixels taller than 320, so it had somewhere to scroll to.
-  //
-  // Any touch that moved even one pixel therefore started a drag. The content
-  // shifted, sprang back under LV_OBJ_FLAG_SCROLL_ELASTIC, and every frame of
-  // that bounce was a full-screen redraw. With no TE/vsync signal wired on this
-  // board -- the panel's TE pin does not reach a GPIO -- those redraws tear
-  // against the panel's own scan. That reads as flicker, and it stops when the
-  // scroll animation settles, which is exactly the reported symptom: flickers
-  // on touch, then goes stable.
-  //
-  // Nothing here is meant to scroll, so the fix is to say so rather than to
-  // chase the tearing.
-  lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
-
-  lv_obj_t *title = lv_label_create(scr);
-  lv_label_set_text(title, "Bowlstack  bring-up");
-  lv_obj_set_style_text_color(title, lv_color_hex(0xE6EDF3), LV_PART_MAIN);
-  lv_obj_set_style_text_font(title, &lv_font_montserrat_20, LV_PART_MAIN);
-  lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
-
-  // A mock stack column, bottom-up, f1 at the bottom -- the same orientation
-  // the handoff doc specifies for the web UI, and the same one the physical
-  // pipe has. Getting this the right way up in the mock is cheap; discovering
-  // it upside down after the logic is wired is not.
-  const char *levels[] = {"f4", "f3", "f2", "f1"};
-  const bool present[] = {false, false, true, true};
-  for (uint8_t i = 0; i < 4; i++) {
-    lv_obj_t *cell = lv_obj_create(scr);
-    lv_obj_set_size(cell, 120, 44);
-    lv_obj_align(cell, LV_ALIGN_TOP_LEFT, 14, 48 + i * 50);
-    lv_obj_set_style_radius(cell, 6, LV_PART_MAIN);
-    lv_obj_set_style_border_width(cell, 1, LV_PART_MAIN);
-    lv_obj_set_style_border_color(cell, lv_color_hex(0x30363D), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(
-        cell, present[i] ? lv_color_hex(0x1F6F43) : lv_color_hex(0x1C2128), LV_PART_MAIN);
-    lv_obj_remove_flag(cell, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t *l = lv_label_create(cell);
-    lv_label_set_text_fmt(l, "%s  %s", levels[i], present[i] ? "present" : "absent");
-    lv_obj_set_style_text_color(l, lv_color_hex(0xE6EDF3), LV_PART_MAIN);
-    lv_obj_center(l);
-  }
-
-  lv_obj_t *count = lv_label_create(scr);
-  lv_label_set_text(count, "2");
-  lv_obj_set_style_text_font(count, &lv_font_montserrat_48, LV_PART_MAIN);
-  lv_obj_set_style_text_color(count, lv_color_hex(0xE6EDF3), LV_PART_MAIN);
-  lv_obj_align(count, LV_ALIGN_TOP_RIGHT, -40, 90);
-
-  lv_obj_t *countCap = lv_label_create(scr);
-  lv_label_set_text(countCap, "bowls");
-  lv_obj_set_style_text_color(countCap, lv_color_hex(0x8B949E), LV_PART_MAIN);
-  lv_obj_align(countCap, LV_ALIGN_TOP_RIGHT, -38, 150);
-
-  lblBattery = lv_label_create(scr);
-  lv_obj_set_style_text_color(lblBattery, lv_color_hex(0x8B949E), LV_PART_MAIN);
-  lv_obj_align(lblBattery, LV_ALIGN_BOTTOM_LEFT, 14, -64);
-  lv_label_set_text(lblBattery, "battery: ...");
-
-  lblTouch = lv_label_create(scr);
-  lv_obj_set_style_text_color(lblTouch, lv_color_hex(0x8B949E), LV_PART_MAIN);
-  lv_obj_align(lblTouch, LV_ALIGN_BOTTOM_LEFT, 14, -46);
-  lv_label_set_text(lblTouch, "touch: -");
-
-  // The tap counter is the end-to-end input proof. Raw coordinates printing on
-  // the console only shows the driver works; a widget reacting shows that
-  // LVGL's indev is registered, the coordinates land in the right space, and
-  // hit-testing agrees with what is drawn.
-  lv_obj_t *btn = lv_button_create(scr);
-  lv_obj_set_size(btn, 130, 40);
-  lv_obj_align(btn, LV_ALIGN_BOTTOM_RIGHT, -14, -12);
-  lv_obj_add_event_cb(btn, onTap, LV_EVENT_CLICKED, nullptr);
-
-  lblTaps = lv_label_create(btn);
-  lv_label_set_text(lblTaps, "taps: 0");
-  lv_obj_center(lblTaps);
-}
-
 }  // namespace
 
 void setup() {
   Serial.begin(115200);
   // USB-CDC enumerates only when a host opens the port, so the first lines are
-  // lost without this. It is a bounded wait, not a spin: a unit powered from a
-  // battery has no host and must still boot.
+  // lost without this. Bounded, not a spin: a unit on battery has no host and
+  // must still boot.
   const uint32_t deadline = millis() + 2000;
   while (!Serial && (int32_t)(millis() - deadline) < 0) delay(10);
 
@@ -332,9 +215,6 @@ void setup() {
   Serial.printf("  heap        %u bytes free\n", ESP.getFreeHeap());
 
   if (ESP.getPsramSize() == 0) {
-    // Not a warning worth burying. An ESP32-S3R8 reporting no PSRAM means the
-    // build did not declare octal PSRAM, and the failure it eventually causes
-    // is a runtime allocation error far from this cause.
     Serial.println("  !! PSRAM NOT DETECTED -- expected 8 MB on an ESP32-S3R8.");
     Serial.println("  !! Check board_build.arduino.memory_type = qio_opi");
   }
@@ -355,8 +235,8 @@ void setup() {
   // --- stage 3: the panel, raw -------------------------------------------
   Serial.println("\n--- display ---");
   gfx.init();
-  gfx.setRotation(0);          // 0 = portrait 240x320, connector at the bottom
-  gfx.setBrightness(0);        // ramp up rather than flashing white at boot
+  gfx.setRotation(0);   // 0 = portrait 240x320, connector at the bottom
+  gfx.setBrightness(0); // ramp up rather than flashing white at boot
   gfx.fillScreen(TFT_BLACK);
   for (uint8_t b = 0; b <= 200; b += 5) {
     gfx.setBrightness(b);
@@ -371,8 +251,8 @@ void setup() {
   lv_init();
   lv_log_register_print_cb(lvglLog);
   // LVGL 9 takes its tick source at runtime. Without this every animation,
-  // timer and the input-device read period stall at zero elapsed time, which
-  // presents as a screen that draws once and then never updates.
+  // timer and input read period sees zero elapsed time, which presents as a
+  // screen that draws once and never updates.
   lv_tick_set_cb(reinterpret_cast<lv_tick_get_cb_t>(millis));
 
   buf1 = (uint8_t *)heap_caps_malloc(LV_BUF_BYTES, MALLOC_CAP_DMA);
@@ -392,7 +272,13 @@ void setup() {
   lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
   lv_indev_set_read_cb(indev, touchCb);
 
-  buildScreen();
+  // --- stage 5: the shared UI --------------------------------------------
+  ui::buildGallery();
+  Serial.printf("  showing src/ui/ gallery: swipe for 3 type pages, widgets, "
+                "then the stock view\n");
+  Serial.printf("  stock view cycles %u scenarios every 3 s -- identical to "
+                "`pio run -e sim`\n",
+                ui::demoCount());
 
   // --- stage 6: battery ---------------------------------------------------
   analogSetPinAttenuation(board::PIN_BATTERY_ADC, ADC_11db);
@@ -407,28 +293,19 @@ void setup() {
 void loop() {
   lv_timer_handler();
 
-  static uint32_t nextSlow = 0;
+  // Same clock, same cadence, same scenarios as the desktop preview.
+  if (ui::demoTick(millis())) {
+    const uint8_t shown = (uint8_t)((ui::demoIndex() + ui::demoCount() - 1) % ui::demoCount());
+    Serial.printf("state: %s\n", ui::demoName(shown));
+  }
+
+  static uint32_t nextConsole = 0;
   const uint32_t now = millis();
-  if ((int32_t)(now - nextSlow) >= 0) {
-    nextSlow = now + 500;
-
+  if ((int32_t)(now - nextConsole) >= 0) {
+    nextConsole = now + 5000;
     const uint16_t pinMv = readBatteryPinMv();
-    const uint16_t cellMv = (uint16_t)(pinMv * board::BATTERY_DIVIDER_NOMINAL);
-    if (lblBattery) lv_label_set_text_fmt(lblBattery, "batt  pin %u mV -> cell %u mV", pinMv, cellMv);
-
-    // Reads the coordinates LATCHED BY touchCb rather than polling the
-    // controller again -- see the comment there. A second getTouch() here is
-    // what made touches erratic.
-    if (lblTouch && everTouched) {
-      lv_label_set_text_fmt(lblTouch, "touch  x=%d y=%d", (int)lastTouch.x, (int)lastTouch.y);
-    }
-
-    static uint32_t nextConsole = 0;
-    if ((int32_t)(now - nextConsole) >= 0) {
-      nextConsole = now + 5000;
-      Serial.printf("battery: pin %u mV -> cell %u mV   heap %u  lvgl-taps %u\n", pinMv, cellMv,
-                    ESP.getFreeHeap(), tapCount);
-    }
+    Serial.printf("battery: pin %u mV -> cell %u mV   heap %u\n", pinMv,
+                  (uint16_t)(pinMv * board::BATTERY_DIVIDER_NOMINAL), ESP.getFreeHeap());
   }
 
   delay(5);
