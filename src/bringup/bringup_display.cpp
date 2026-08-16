@@ -133,6 +133,8 @@ void flushCb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
   gfx.writePixels(reinterpret_cast<lgfx::rgb565_t *>(px_map), w * h);
   gfx.endWrite();
 
+  ui::perfFlush((uint32_t)(w * h));
+
   lv_display_flush_ready(disp);
 }
 
@@ -305,6 +307,21 @@ void setup() {
   ui::demoInstallWifiMocks();
 
   ui::perfBegin();
+
+  // The scope's canvas lives in PSRAM. ~88 KB has no business in LVGL's 64 KB
+  // pool or in the internal SRAM that WiFi and TLS will want; and because the
+  // sweep invalidates one column per sample, LVGL reads only that column back
+  // out per frame, so PSRAM's slower access never lands on the hot path.
+  {
+    void *scopeBuf = heap_caps_malloc(ui::SCOPE_BUF_BYTES, MALLOC_CAP_SPIRAM);
+    if (!scopeBuf) {
+      Serial.println("  !! scope canvas alloc FAILED - page will say so");
+    } else {
+      Serial.printf("  scope canvas %u bytes in PSRAM\n", (unsigned)ui::SCOPE_BUF_BYTES);
+    }
+    ui::scopeSetBuffer(scopeBuf);
+  }
+
   ui::buildPages();
   Serial.println("  2 pages, swipe horizontally -- identical to `pio run -e sim`:");
   Serial.println("    1  stock view, cycling scenarios every 3 s");

@@ -1,15 +1,30 @@
 // Real-time scope: four ToF traces, 0-500 mm, plus a frame-rate readout.
 //
-// The question it exists to answer is a capacity one -- can this board render
-// four live sensor traces fast enough to be worth showing a person -- so the
-// FPS figure is the output, not decoration. Everything else on the page is
-// there to make that number honest.
+// A SWEEPING CURSOR, NOT A SCROLLING CHART, and that is the whole design.
 //
-// The data is fabricated for now. It is shaped like real VL53L0X output rather
-// than like a sine wave: a baseline that steps when a bowl appears or goes,
-// plus a few millimetres of ranging noise. A smooth synthetic signal would
-// redraw a very different set of pixels from real data and would flatter the
-// measurement.
+// The first version used lv_chart in SHIFT mode. Measured on hardware it cost
+// 49,000 pixels and ~56 ms per frame -- 19 ms of SPI and ~37 ms of software
+// rendering -- for 79% of a core at 14 fps. The reason is structural rather
+// than a tuning problem: scrolling moves every sample left, so every pixel of
+// the plot changes on every new reading, and lv_chart_set_next_value()
+// invalidates the whole object. Narrower lines and fewer points were tried and
+// changed nothing measurable, because the cost is AREA, not segments.
+//
+// A hardware oscilloscope does not scroll. It sweeps a cursor across a
+// persistent trace, overwriting the oldest column with the newest. Only that
+// column changes, so the invalidated area per sample drops from the whole plot
+// to a single column -- around 200 pixels instead of 49,000.
+//
+// The trade is that the trace is no longer strictly left-to-right in time: the
+// newest data sits at the cursor and the oldest just ahead of it. Anyone who
+// has used a scope reads that immediately, and a blanked gap ahead of the
+// cursor makes the wrap position obvious.
+//
+// THE BUFFER COMES FROM THE PLATFORM. A 232x190 RGB565 canvas is ~88 KB, which
+// belongs in the ESP32-S3's 8 MB of PSRAM rather than in LVGL's 64 KB pool or
+// the internal SRAM that WiFi and TLS will want. The desktop preview passes
+// plain heap. That is a genuine platform difference in the CLAUDE.md sense --
+// one machine has PSRAM and the other does not -- not a divergence in fixtures.
 
 #pragma once
 
@@ -19,41 +34,39 @@
 namespace ui {
 
 // Full scale. The stack sits well inside this: PRESENT_BELOW_MM is 100 and
-// ABSENT_ABOVE_MM is 400, so 500 shows both thresholds with headroom, and
-// clipping there costs nothing real. A live sensor with no target reports
-// ~8190 mm, which would otherwise flatten every trace against the floor.
+// ABSENT_ABOVE_MM is 400, so 500 shows both thresholds with headroom. A live
+// sensor with no target reports ~8190 mm, which would otherwise flatten every
+// trace against the floor.
 static const int32_t SCOPE_MAX_MM = 500;
 
-// Samples held across the plot. 115 over ~230 px is two pixels per sample --
-// enough that a step is visibly a step, few enough that a redraw is not
-// pushing 240 columns of chart through the bus every frame.
-static const uint16_t SCOPE_POINTS = 115;
+// Plot size in pixels. One sample per column, so this is also the history
+// depth: 232 columns at 10 Hz is about 23 seconds of trace on screen.
+static const uint16_t SCOPE_W = 232;
+static const uint16_t SCOPE_H = 190;
+
+// What the caller must allocate. RGB565, two bytes per pixel.
+static const uint32_t SCOPE_BUF_BYTES = (uint32_t)SCOPE_W * SCOPE_H * 2;
+
+// Hand the canvas its backing store before buildScope(). Passing nullptr leaves
+// the scope disabled rather than crashing -- a failed allocation must not take
+// the rest of the UI down with it.
+void scopeSetBuffer(void *buf);
 
 void buildScope(lv_obj_t *parent);
 
-// SAMPLING and RENDERING are separate on purpose, and this split is what keeps
-// the frame rate flat as pages are added.
-//
-// scopeSample() always runs: it writes into a plain ring buffer, touches no
-// LVGL object, and invalidates nothing. Data therefore stays current whether or
-// not anyone is looking, which was the requirement -- a scope that only
-// collects while visible would show a gap on return, and in the real firmware
-// the sensors do not stop ranging because someone swiped.
-//
-// scopeRender() only runs while the page is on screen. It is what costs, and it
-// is what stops costing the moment the page is swiped away.
+// SAMPLING and RENDERING are separate, which is what keeps the frame rate flat
+// as pages are added. scopeSample() always runs: it writes to a ring buffer,
+// touches no LVGL object and invalidates nothing, so data stays current whether
+// or not anyone is looking. In the shipping firmware the sensors do not stop
+// ranging because someone swiped.
 void scopeSample(uint32_t nowMs);
 void scopeRender();
 
-// Called on transition. Entering repopulates the whole chart from the ring in
-// one pass, so the trace is continuous across the gap instead of scrolling in
-// from the right edge as though the sensors had just been switched on.
+// Entering repaints the whole trace from the ring in one pass, so the history
+// is there rather than sweeping in from nothing.
 void scopeSetVisible(bool visible);
 
-// Last computed frames-per-second, for callers that want to log it.
 uint16_t scopeFps();
-
-// Pushes the shared perf figures into the on-screen readout. Once a second.
 void scopeShowPerf();
 
 }  // namespace ui

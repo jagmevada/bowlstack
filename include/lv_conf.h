@@ -53,7 +53,27 @@
 // mysteriously slower under load. Framebuffers are the thing worth moving out,
 // and those are allocated explicitly in ui/display code, not from this pool.
 #define LV_USE_STDLIB_MALLOC LV_STDLIB_BUILTIN
+
+// Overridable per environment, because the two targets put very different
+// things in this pool.
+//
+// The device allocates its LVGL draw buffers itself, from DMA-capable internal
+// RAM, and the scope canvas from PSRAM -- so only widget metadata lands here,
+// measured at 34k of 59k.
+//
+// The SDL backend does NOT: lv_sdl_window_create() takes its draw buffers from
+// this pool, and the desktop preview was measured at 51k of 55k with 11%
+// fragmentation -- 93% full, which is the state where the next allocation of
+// any size fails. That is the likeliest explanation for the preview slowing and
+// hanging after a while, and it is a property of the SDL backend rather than of
+// anything the UI does.
+//
+// So the simulator asks for more (see platformio.ini) and the device keeps the
+// smaller pool, which leaves its internal SRAM for the WiFi and TLS stacks that
+// still have to move into this image.
+#ifndef LV_MEM_SIZE
 #define LV_MEM_SIZE (64U * 1024U)
+#endif
 
 // --- OS integration --------------------------------------------------------
 // LV_OS_NONE, and that is a design decision rather than a default left alone.

@@ -7,6 +7,10 @@ namespace ui {
 namespace {
 
 volatile uint32_t frames_ = 0;
+volatile uint32_t flushPx_ = 0;
+volatile uint32_t flushes_ = 0;
+uint32_t pxPerFrame_ = 0;
+uint16_t flushPerFrame_ = 0;
 uint32_t windowStart_ = 0;
 uint32_t busyAccum_ = 0;
 uint32_t frameEnter_ = 0;
@@ -27,6 +31,11 @@ void onRefrReady(lv_event_t *) { frames_++; }
 void perfBegin() {
   lv_display_t *d = lv_display_get_default();
   if (d) lv_display_add_event_cb(d, onRefrReady, LV_EVENT_REFR_READY, nullptr);
+}
+
+void perfFlush(uint32_t px) {
+  flushPx_ += px;
+  flushes_++;
 }
 
 void perfFrameStart(uint32_t nowMs) { frameEnter_ = nowMs; }
@@ -51,6 +60,11 @@ bool perfTick(uint32_t nowMs) {
   if (busyPct_ > 100) busyPct_ = 100;
   worstReported_ = worstMs_;
 
+  pxPerFrame_ = frames_ ? (flushPx_ / frames_) : flushPx_;
+  flushPerFrame_ = (uint16_t)(frames_ ? (flushes_ / frames_) : flushes_);
+  flushPx_ = 0;
+  flushes_ = 0;
+
   frames_ = 0;
   busyAccum_ = 0;
   worstMs_ = 0;
@@ -67,10 +81,18 @@ bool perfTick(uint32_t nowMs) {
 uint16_t perfFps() { return fps_; }
 uint8_t perfBusyPct() { return busyPct_; }
 uint16_t perfWorstMs() { return worstReported_; }
+uint32_t perfPxPerFrame() { return pxPerFrame_; }
+uint16_t perfFlushesPerFrame() { return flushPerFrame_; }
 
 void perfFormat(char *buf, uint32_t len) {
-  snprintf(buf, len, "fps %u  busy %u%%  worst %ums  lvgl %luk/%luk frag %u%%", fps_,
-           busyPct_, worstReported_, (unsigned long)(memUsed_ / 1024),
+  // SPI time is derivable from the pixel count: 2 bytes per pixel, 8 bits per
+  // byte, 40 MHz. Printing it beside the frame time says immediately whether a
+  // slow frame is the bus or the renderer.
+  const uint32_t spiUs = (pxPerFrame_ * 2UL * 8UL) / 40UL;
+  snprintf(buf, len,
+           "fps %u busy %u%% worst %ums | %lupx/f %uflush spi~%lums | lvgl %luk/%luk frag %u%%",
+           fps_, busyPct_, worstReported_, (unsigned long)pxPerFrame_, flushPerFrame_,
+           (unsigned long)(spiUs / 1000), (unsigned long)(memUsed_ / 1024),
            (unsigned long)(memTotal_ / 1024), memFrag_);
 }
 

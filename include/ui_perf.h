@@ -33,6 +33,15 @@ namespace ui {
 void perfBegin();
 
 // Bracket every lv_timer_handler() call.
+// Called from the flush callback with the pixel count of each transfer.
+//
+// Separates the two halves of a frame's cost, which behave completely
+// differently: pixels pushed is SPI time and scales with INVALIDATED AREA,
+// while the remainder is software rendering and scales with how many draw
+// operations cover that area. Optimising the wrong one is free effort wasted,
+// and from the outside they are indistinguishable.
+void perfFlush(uint32_t px);
+
 void perfFrameStart(uint32_t nowMs);
 void perfFrameEnd(uint32_t nowMs);
 
@@ -42,6 +51,10 @@ bool perfTick(uint32_t nowMs);
 uint16_t perfFps();
 uint8_t perfBusyPct();
 uint16_t perfWorstMs();
+
+// Pixels pushed per refresh, averaged over the window, and flushes per refresh.
+uint32_t perfPxPerFrame();
+uint16_t perfFlushesPerFrame();
 
 // Writes "fps 14  busy 22%  worst 41ms  lvgl 38k/64k frag 12%" into buf.
 void perfFormat(char *buf, uint32_t len);

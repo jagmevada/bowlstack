@@ -28,9 +28,11 @@
 #include <lvgl.h>
 
 #include <cstdio>
+#include <cstdlib>
 
 #include "ui_demo.h"
 #include "ui_pages.h"
+#include "ui_perf.h"
 #include "ui_scope.h"
 #include "ui_screens.h"
 #include "ui_wifi.h"
@@ -59,6 +61,10 @@ int main(int, char **) {
   ui::wifiSetSetupAp("Bowlstack-BWL-001", "bowlstack");
   ui::demoInstallWifiMocks();
 
+  ui::perfBegin();
+  // Plain heap: the desktop has no PSRAM, which is a difference in the machine
+  // rather than in the fixtures.
+  ui::scopeSetBuffer(malloc(ui::SCOPE_BUF_BYTES));
   ui::buildPages();
 
   printf("Bowlstack UI preview\n");
@@ -72,7 +78,9 @@ int main(int, char **) {
 
   bool running = true;
   while (running) {
+    ui::perfFrameStart(SDL_GetTicks());
     lv_timer_handler();
+    ui::perfFrameEnd(SDL_GetTicks());
 
     // Pixel shift is OFF -- see todo.md. This panel is IPS-TFT, so what was
     // observed was image PERSISTENCE (temporary, self-recovering) rather than
@@ -88,7 +96,9 @@ int main(int, char **) {
     static uint32_t nextFps = 0;
     if (SDL_GetTicks() > nextFps) {
       nextFps = SDL_GetTicks() + 2000;
-      printf("scope: %u fps (desktop ceiling)\n", ui::scopeFps());
+      char perf[128];
+      ui::perfFormat(perf, sizeof(perf));
+      printf("%s\n", perf);
       fflush(stdout);
     }
 
