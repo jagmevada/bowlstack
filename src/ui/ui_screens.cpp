@@ -52,6 +52,13 @@ lv_obj_t *cellLabels[LEVELS];
 lv_obj_t *lblBattery;
 lv_obj_t *barBattery;
 
+// Everything the UI draws lives inside this, so that image-retention shifting
+// can move the whole layout with one translate. Applying the offset to the
+// screen object itself would not work: the screen is the thing the shift is
+// meant to move content ACROSS, and it is also what paints the background,
+// which must stay put.
+lv_obj_t *root;
+
 void styleFlat(lv_obj_t *o) {
   lv_obj_set_style_bg_opa(o, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_border_width(o, 0, LV_PART_MAIN);
@@ -63,9 +70,22 @@ void styleFlat(lv_obj_t *o) {
 }  // namespace
 
 void build(lv_obj_t *parent) {
-  lv_obj_t *scr = parent ? parent : lv_screen_active();
-  lv_obj_set_style_bg_color(scr, lv_color_hex(C_BG), LV_PART_MAIN);
-  lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_t *outer = parent ? parent : lv_screen_active();
+  lv_obj_set_style_bg_color(outer, lv_color_hex(C_BG), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(outer, LV_OPA_COVER, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(outer, 0, LV_PART_MAIN);
+  lv_obj_remove_flag(outer, LV_OBJ_FLAG_SCROLLABLE);
+
+  // The shiftable root. Transparent, so the background stays with `outer` and
+  // does not travel with the content -- otherwise the shift would drag a black
+  // rectangle across a black screen and leave an uncovered edge.
+  root = lv_obj_create(outer);
+  lv_obj_set_size(root, LV_PCT(100), LV_PCT(100));
+  lv_obj_set_style_bg_opa(root, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(root, 0, LV_PART_MAIN);
+  lv_obj_set_style_radius(root, 0, LV_PART_MAIN);
+
+  lv_obj_t *scr = root;
   lv_obj_set_style_text_color(scr, lv_color_hex(C_TEXT), LV_PART_MAIN);
 
   // An LVGL screen is scrollable by default, and this one has no business
@@ -80,7 +100,10 @@ void build(lv_obj_t *parent) {
   lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
   lv_obj_set_flex_flow(scr, LV_FLEX_FLOW_COLUMN);
-  lv_obj_set_style_pad_all(scr, 8, LV_PART_MAIN);
+  // PAD_ALL 10, not 8. The shift moves content up to +/-2 px in each axis, so
+  // the margin has to absorb that or the outermost pixels of the layout would
+  // be clipped at one extreme of the cycle.
+  lv_obj_set_style_pad_all(scr, 10, LV_PART_MAIN);
   lv_obj_set_style_pad_row(scr, 6, LV_PART_MAIN);
 
   // --- header --------------------------------------------------------------
@@ -277,6 +300,58 @@ void update(const State &s) {
     lv_label_set_text_fmt(lblBattery, "batt  %u mV  %s", s.batteryMv, battText[bi]);
   }
   lv_obj_set_style_bg_color(barBattery, lv_color_hex(battColor[bi]), LV_PART_MAIN);
+}
+
+// --- image-retention pixel shift -------------------------------------------
+// Nudges the whole layout around a small ring so no pixel holds the same
+// high-contrast value indefinitely. This is what televisions and station clocks
+// do, and this device has the same problem for the same reason: README.md has
+// units powered ~8 h/day showing a near-static digit.
+//
+// INTEGER offsets only. A sub-pixel shift would resample the glyphs and soften
+// every edge -- trading a retention problem for a legibility one on a panel
+// that has already shown it has no legibility to spare. Whole pixels move the
+// image without touching a single rendered value.
+//
+// A RING rather than a random walk: every position is visited equally often, so
+// the time-averaged luminance of each pixel converges, which is the whole
+// mechanism. A random walk can dwell.
+namespace {
+const int8_t SHIFT_RING_X[] = {0, 1, 2, 2, 2, 1, 0, 0};
+const int8_t SHIFT_RING_Y[] = {0, 0, 0, 1, 2, 2, 2, 1};
+const uint8_t SHIFT_STEPS = 8;
+
+uint8_t shiftIdx_ = 0;
+uint32_t shiftNextAt_ = 0;
+bool shiftArmed_ = false;
+}  // namespace
+
+void applyPixelShift(int8_t dx, int8_t dy) {
+  if (!root) return;
+  // translate_x/y move the object at DRAW time without re-running the flex
+  // layout, so a shift costs a redraw and not a relayout of every child.
+  lv_obj_set_style_translate_x(root, dx, LV_PART_MAIN);
+  lv_obj_set_style_translate_y(root, dy, LV_PART_MAIN);
+}
+
+bool pixelShiftTick(uint32_t nowMs, uint32_t periodMs) {
+  if (!shiftArmed_) {
+    shiftArmed_ = true;
+    shiftNextAt_ = nowMs;
+  }
+  if ((int32_t)(nowMs - shiftNextAt_) < 0) return false;
+  shiftNextAt_ = nowMs + periodMs;
+
+  applyPixelShift(SHIFT_RING_X[shiftIdx_], SHIFT_RING_Y[shiftIdx_]);
+  shiftIdx_ = (uint8_t)((shiftIdx_ + 1) % SHIFT_STEPS);
+  return true;
+}
+
+uint8_t pixelShiftIndex() { return shiftIdx_; }
+void pixelShiftOffset(int8_t *dx, int8_t *dy) {
+  const uint8_t i = (uint8_t)((shiftIdx_ + SHIFT_STEPS - 1) % SHIFT_STEPS);
+  *dx = SHIFT_RING_X[i];
+  *dy = SHIFT_RING_Y[i];
 }
 
 State unknownState() {

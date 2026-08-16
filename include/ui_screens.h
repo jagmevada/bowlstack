@@ -30,4 +30,31 @@ void build(lv_obj_t *parent = nullptr);
 // invalidate the whole screen each time, when the usual change is one digit.
 void update(const State &s);
 
+// --- image-retention pixel shift -------------------------------------------
+// Moves the whole layout around a small ring so no pixel holds the same
+// high-contrast value indefinitely. Televisions and station clocks do this, and
+// this device has the same problem for the same reason: units are powered ~8 h
+// a day showing a digit that changes a handful of times per service, and a
+// ghost of an earlier build was observed surviving several power cycles.
+//
+// The excursion is 2 px. Small enough that nobody watching notices, large
+// enough that a glyph edge -- the part that retains, because it is where the
+// contrast is -- never sits over one pixel for long.
+static const int8_t SHIFT_MAX_PX = 2;
+
+// A full cycle takes 8 * periodMs. The default suits the shipping UI: slow
+// enough to be imperceptible, fast enough that a service never ends with the
+// layout parked. The gallery's test page drives it far faster on purpose, so a
+// person can actually watch what it does.
+static const uint32_t SHIFT_PERIOD_MS = 60000;
+
+// Returns true on the ticks where the offset actually changed.
+bool pixelShiftTick(uint32_t nowMs, uint32_t periodMs = SHIFT_PERIOD_MS);
+
+// Force a specific offset, for the test page and for parking at 0,0.
+void applyPixelShift(int8_t dx, int8_t dy);
+
+// The offset currently applied.
+void pixelShiftOffset(int8_t *dx, int8_t *dy);
+
 }  // namespace ui

@@ -293,6 +293,11 @@ void setup() {
 void loop() {
   lv_timer_handler();
 
+  // Image-retention shift at the SHIPPING cadence, driving the stock view.
+  // Page 6 of the gallery runs the same ring at 1 Hz on its own content, for
+  // watching; this one is meant to be invisible.
+  ui::pixelShiftTick(millis());
+
   // Same clock, same cadence, same scenarios as the desktop preview.
   if (ui::demoTick(millis())) {
     const uint8_t shown = (uint8_t)((ui::demoIndex() + ui::demoCount() - 1) % ui::demoCount());

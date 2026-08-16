@@ -58,7 +58,7 @@ int main(int, char **) {
   printf("Bowlstack UI preview\n");
   printf("  window   %d x %d, zoom 1 (one SDL pixel = one panel pixel)\n", ui::SCREEN_W,
          ui::SCREEN_H);
-  printf("  pages    drag horizontally: 3 type pages, widgets, then the stock view\n");
+  printf("  pages    drag horizontally: 3 type, widgets, stock view, pixel-shift test\n");
   printf("  states   the stock view cycles %u scenarios every 3 s, same as the device\n",
          ui::demoCount());
   printf("  ESC      quit\n\n");
@@ -67,6 +67,11 @@ int main(int, char **) {
   bool running = true;
   while (running) {
     lv_timer_handler();
+
+    // The SHIPPING cadence, 60 s, driving the stock view on page 5. Page 6
+    // runs the same ring at 1 Hz on its own content so the effect can actually
+    // be watched; this one is meant to be invisible.
+    ui::pixelShiftTick(SDL_GetTicks());
 
     if (ui::demoTick(SDL_GetTicks())) {
       // demoTick advances AFTER rendering the current one, so the name of what

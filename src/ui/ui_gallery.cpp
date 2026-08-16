@@ -75,6 +75,36 @@ void addFontRows(lv_obj_t *tile, const FontSample *rows, uint8_t n) {
   }
 }
 
+// --- pixel-shift test page state -------------------------------------------
+lv_obj_t *shiftBox = nullptr;
+lv_obj_t *shiftLabel = nullptr;
+lv_obj_t *shiftSwitch = nullptr;
+uint8_t shiftStep = 0;
+
+// Same ring the shipping shift uses, kept in step deliberately: a test page
+// that exercised a different pattern from the real one would be measuring
+// something nobody ships.
+const int8_t RING_X[] = {0, 1, 2, 2, 2, 1, 0, 0};
+const int8_t RING_Y[] = {0, 0, 0, 1, 2, 2, 2, 1};
+
+void shiftTimerCb(lv_timer_t *) {
+  if (!shiftBox) return;
+  const bool on = shiftSwitch && lv_obj_has_state(shiftSwitch, LV_STATE_CHECKED);
+
+  const int8_t dx = on ? RING_X[shiftStep] : 0;
+  const int8_t dy = on ? RING_Y[shiftStep] : 0;
+
+  // translate_x/y, not set_pos: the offset is applied at draw time, so nothing
+  // relayouts and the hairlines keep their exact 1 px geometry. That is the
+  // property under test -- a relayout could round differently at each offset
+  // and would soften edges for reasons unrelated to the shift itself.
+  lv_obj_set_style_translate_x(shiftBox, dx, LV_PART_MAIN);
+  lv_obj_set_style_translate_y(shiftBox, dy, LV_PART_MAIN);
+
+  if (shiftLabel) lv_label_set_text_fmt(shiftLabel, "%s  %d,%d", on ? "on" : "off", dx, dy);
+  if (on) shiftStep = (uint8_t)((shiftStep + 1) % 8);
+}
+
 }  // namespace
 
 void buildGallery() {
@@ -90,7 +120,7 @@ void buildGallery() {
   // --- page 1: small sizes -------------------------------------------------
   {
     lv_obj_t *t = makeTile(tv, 0, 0, LV_DIR_RIGHT);
-    pageHeader(t, "Type  1/5", "body sizes - swipe left for more");
+    pageHeader(t, "Type  1/6", "body sizes - swipe left for more");
     static const FontSample rows[] = {
         {&lv_font_montserrat_12, "Montserrat 12"}, {&lv_font_montserrat_14, "Montserrat 14"},
         {&lv_font_montserrat_16, "Montserrat 16"}, {&lv_font_montserrat_18, "Montserrat 18"},
@@ -102,7 +132,7 @@ void buildGallery() {
   // --- page 2: display sizes ----------------------------------------------
   {
     lv_obj_t *t = makeTile(tv, 1, 0, (lv_dir_t)(LV_DIR_LEFT | LV_DIR_RIGHT));
-    pageHeader(t, "Type  2/5", "display sizes - the bowl count");
+    pageHeader(t, "Type  2/6", "display sizes - the bowl count");
     static const FontSample rows[] = {
         {&lv_font_montserrat_22, "Montserrat 22"}, {&lv_font_montserrat_24, "Montserrat 24"},
         {&lv_font_montserrat_28, "Montserrat 28"}, {&lv_font_montserrat_32, "Montserrat 32"},
@@ -118,7 +148,7 @@ void buildGallery() {
   // --- page 3: the antialiasing control -----------------------------------
   {
     lv_obj_t *t = makeTile(tv, 2, 0, (lv_dir_t)(LV_DIR_LEFT | LV_DIR_RIGHT));
-    pageHeader(t, "Type  3/5", "unscii is 1bpp - the real 'dots' look");
+    pageHeader(t, "Type  3/6", "unscii is 1bpp - the real 'dots' look");
 
     // The comparison that answers the question directly. unscii has NO
     // antialiasing whatsoever; Montserrat has 16 coverage levels per pixel. If
@@ -146,7 +176,7 @@ void buildGallery() {
   // --- page 4: widgets -----------------------------------------------------
   {
     lv_obj_t *t = makeTile(tv, 3, 0, (lv_dir_t)(LV_DIR_LEFT | LV_DIR_RIGHT));
-    pageHeader(t, "Widgets  4/5", "touch targets at this DPI");
+    pageHeader(t, "Widgets  4/6", "touch targets at this DPI");
 
     lv_obj_t *btn = lv_button_create(t);
     lv_obj_set_size(btn, LV_PCT(100), 40);
@@ -197,9 +227,98 @@ void buildGallery() {
   // device uses. Not a mock-up of it -- the same function, the same widgets,
   // the same fonts. ui_demo then cycles it through the states worth seeing.
   {
-    lv_obj_t *t = lv_tileview_add_tile(tv, 4, 0, LV_DIR_LEFT);
+    lv_obj_t *t = lv_tileview_add_tile(tv, 4, 0, (lv_dir_t)(LV_DIR_LEFT | LV_DIR_RIGHT));
     lv_obj_set_style_pad_all(t, 0, LV_PART_MAIN);
     build(t);
+  }
+
+  // --- page 6: pixel-shift test -------------------------------------------
+  // Runs the shift at 1 Hz instead of the shipping 60 s, because the question
+  // is whether whole-pixel movement SOFTENS anything, and that cannot be
+  // answered by a change that happens once a minute.
+  //
+  // The content is chosen to be the worst case for both failure modes at once:
+  //   - a 48 px glyph, which is what actually retained on this panel
+  //   - 1 px hairlines, which are the first thing any resampling destroys
+  //   - a hard-edged box, where softening shows as a grey fringe
+  // If edges soften, the hairlines go grey or disappear at some offsets. If
+  // they stay crisp at every offset, the shift is doing what it should.
+  {
+    lv_obj_t *t = makeTile(tv, 5, 0, LV_DIR_LEFT);
+    pageHeader(t, "Pixel shift  6/6", "1 Hz here, 60 s in the real UI");
+
+    lv_obj_t *ctl = lv_obj_create(t);
+    lv_obj_set_size(ctl, LV_PCT(100), 36);
+    lv_obj_set_style_bg_opa(ctl, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(ctl, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(ctl, 0, LV_PART_MAIN);
+    lv_obj_remove_flag(ctl, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(ctl, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(ctl, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    shiftLabel = lv_label_create(ctl);
+    lv_obj_set_style_text_font(shiftLabel, &lv_font_montserrat_16, LV_PART_MAIN);
+    lv_obj_set_style_text_color(shiftLabel, lv_color_hex(C_MUTED), LV_PART_MAIN);
+    lv_label_set_text(shiftLabel, "off  0,0");
+
+    shiftSwitch = lv_switch_create(ctl);
+    lv_obj_add_state(shiftSwitch, LV_STATE_CHECKED);
+
+    // The shiftable group. Everything that must move sits inside it; the tile
+    // around it stays still, which is what gives the eye a fixed reference to
+    // judge the movement against.
+    shiftBox = lv_obj_create(t);
+    lv_obj_set_width(shiftBox, LV_PCT(100));
+    lv_obj_set_flex_grow(shiftBox, 1);
+    lv_obj_set_style_bg_opa(shiftBox, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_width(shiftBox, 0, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(shiftBox, 4, LV_PART_MAIN);
+    lv_obj_remove_flag(shiftBox, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *glyph = lv_label_create(shiftBox);
+    lv_obj_set_style_text_font(glyph, &lv_font_montserrat_48, LV_PART_MAIN);
+    lv_obj_set_style_text_color(glyph, lv_color_hex(C_TEXT), LV_PART_MAIN);
+    lv_label_set_text(glyph, "2");
+    lv_obj_align(glyph, LV_ALIGN_TOP_LEFT, 0, 0);
+
+    // Hard-edged box: softening would show as a grey fringe on its border.
+    lv_obj_t *box = lv_obj_create(shiftBox);
+    lv_obj_set_size(box, 56, 56);
+    lv_obj_align(box, LV_ALIGN_TOP_RIGHT, 0, 0);
+    lv_obj_set_style_radius(box, 0, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(box, lv_color_hex(C_TEXT), LV_PART_MAIN);
+    lv_obj_set_style_border_width(box, 0, LV_PART_MAIN);
+    lv_obj_remove_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+
+    // 1 px hairlines, horizontal and vertical. These are the sensitive test:
+    // any resampling turns a 1 px white line into two grey ones.
+    for (uint8_t i = 0; i < 4; i++) {
+      lv_obj_t *hl = lv_obj_create(shiftBox);
+      lv_obj_set_size(hl, LV_PCT(90), 1);
+      lv_obj_align(hl, LV_ALIGN_TOP_LEFT, 0, 70 + i * 6);
+      lv_obj_set_style_bg_color(hl, lv_color_hex(C_TEXT), LV_PART_MAIN);
+      lv_obj_set_style_border_width(hl, 0, LV_PART_MAIN);
+      lv_obj_set_style_radius(hl, 0, LV_PART_MAIN);
+      lv_obj_remove_flag(hl, LV_OBJ_FLAG_SCROLLABLE);
+    }
+    for (uint8_t i = 0; i < 6; i++) {
+      lv_obj_t *vl = lv_obj_create(shiftBox);
+      lv_obj_set_size(vl, 1, 34);
+      lv_obj_align(vl, LV_ALIGN_TOP_LEFT, i * 7, 100);
+      lv_obj_set_style_bg_color(vl, lv_color_hex(C_TEXT), LV_PART_MAIN);
+      lv_obj_set_style_border_width(vl, 0, LV_PART_MAIN);
+      lv_obj_set_style_radius(vl, 0, LV_PART_MAIN);
+      lv_obj_remove_flag(vl, LV_OBJ_FLAG_SCROLLABLE);
+    }
+
+    lv_obj_t *txt = lv_label_create(shiftBox);
+    lv_obj_set_style_text_font(txt, &lv_font_montserrat_18, LV_PART_MAIN);
+    lv_obj_set_style_text_color(txt, lv_color_hex(C_TEXT), LV_PART_MAIN);
+    lv_label_set_text(txt, "f1 present");
+    lv_obj_align(txt, LV_ALIGN_TOP_LEFT, 0, 142);
+
+    lv_timer_create(shiftTimerCb, 1000, nullptr);
   }
 }
 
