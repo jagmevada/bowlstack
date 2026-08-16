@@ -26,10 +26,15 @@ lv_obj_t *battBody_;
 lv_obj_t *battFill_;
 lv_obj_t *battBolt_;
 lv_obj_t *wifiBtn_;
+lv_obj_t *battBtn_;
 void (*onWifiTap_)(void) = nullptr;
+void (*onBattTap_)(void) = nullptr;
 
 void wifiClicked(lv_event_t *) {
   if (onWifiTap_) onWifiTap_();
+}
+void battClicked(lv_event_t *) {
+  if (onBattTap_) onBattTap_();
 }
 
 // Cached, so a steady state does no work and invalidates nothing. Without this
@@ -153,11 +158,23 @@ void buildStatus(lv_obj_t *parent) {
     lv_obj_set_pos(bars_[i], i * (WIFI_BAR_W + WIFI_BAR_GAP), baseY - WIFI_BAR_H[i]);
   }
 
+  // Same reasoning as the WiFi cluster: a 26x13 icon plus its 2 px nub is not a
+  // touch target, so a transparent box wraps the whole thing.
+  battBtn_ = lv_obj_create(right);
+  lv_obj_set_size(battBtn_, 32, STATUS_H - 2);
+  lv_obj_set_pos(battBtn_, 30, 0);
+  lv_obj_set_style_bg_opa(battBtn_, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(battBtn_, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(battBtn_, 0, LV_PART_MAIN);
+  lv_obj_remove_flag(battBtn_, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(battBtn_, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(battBtn_, battClicked, LV_EVENT_CLICKED, nullptr);
+
   // Battery: body, nub, fill. Phone-shaped because that is the one icon every
   // person already reads correctly without a legend.
-  battBody_ = lv_obj_create(right);
+  battBody_ = lv_obj_create(battBtn_);
   lv_obj_set_size(battBody_, 26, 13);
-  lv_obj_set_pos(battBody_, 30, 6);
+  lv_obj_set_pos(battBody_, 0, 6);
   lv_obj_set_style_bg_opa(battBody_, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_border_color(battBody_, lv_color_hex(C_MUTED), LV_PART_MAIN);
   lv_obj_set_style_border_width(battBody_, 1, LV_PART_MAIN);
@@ -165,8 +182,8 @@ void buildStatus(lv_obj_t *parent) {
   lv_obj_set_style_pad_all(battBody_, 0, LV_PART_MAIN);
   lv_obj_remove_flag(battBody_, LV_OBJ_FLAG_SCROLLABLE);
 
-  lv_obj_t *nub = rect(right, 2, 5, C_MUTED);
-  lv_obj_set_pos(nub, 56, 10);
+  lv_obj_t *nub = rect(battBtn_, 2, 5, C_MUTED);
+  lv_obj_set_pos(nub, 26, 10);
 
   battFill_ = rect(battBody_, 22, 9, C_OK);
   lv_obj_set_pos(battFill_, 1, 1);
@@ -174,15 +191,16 @@ void buildStatus(lv_obj_t *parent) {
   // The charging bolt sits ON the battery, the way a phone draws it, rather
   // than beside it -- so "charging" reads as a state OF the battery and not as
   // one more icon competing for the same 62 px.
-  battBolt_ = lv_label_create(right);
+  battBolt_ = lv_label_create(battBtn_);
   lv_obj_set_style_text_font(battBolt_, &lv_font_montserrat_14, LV_PART_MAIN);
   lv_obj_set_style_text_color(battBolt_, lv_color_hex(0x000000), LV_PART_MAIN);
   lv_label_set_text(battBolt_, LV_SYMBOL_CHARGE);
-  lv_obj_set_pos(battBolt_, 38, 5);
+  lv_obj_set_pos(battBolt_, 8, 5);
   lv_obj_add_flag(battBolt_, LV_OBJ_FLAG_HIDDEN);
 }
 
 void statusOnWifiTap(void (*cb)(void)) { onWifiTap_ = cb; }
+void statusOnBatteryTap(void (*cb)(void)) { onBattTap_ = cb; }
 
 void updateStatus(const State &s) {
   if (s.deviceId != lastId_) {

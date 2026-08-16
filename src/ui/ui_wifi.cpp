@@ -332,53 +332,83 @@ void buildWifiPage(lv_obj_t *parent) {
 
   iconButton(hdr, LV_SYMBOL_CLOSE, 38, 30, onClose);
 
-  // --- QR ------------------------------------------------------------------
-  lv_obj_t *qrBox = lv_obj_create(viewMain_);
-  lv_obj_set_size(qrBox, LV_PCT(100), 112);
-  lv_obj_set_style_bg_color(qrBox, lv_color_hex(C_PANEL), LV_PART_MAIN);
-  lv_obj_set_style_border_color(qrBox, lv_color_hex(C_BORDER), LV_PART_MAIN);
-  lv_obj_set_style_border_width(qrBox, 1, LV_PART_MAIN);
-  lv_obj_set_style_radius(qrBox, 4, LV_PART_MAIN);
-  lv_obj_set_style_pad_all(qrBox, 4, LV_PART_MAIN);
-  lv_obj_remove_flag(qrBox, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_set_flex_flow(qrBox, LV_FLEX_FLOW_ROW);
-  lv_obj_set_flex_align(qrBox, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
-                        LV_FLEX_ALIGN_CENTER);
-  lv_obj_set_style_pad_column(qrBox, 8, LV_PART_MAIN);
+  // --- scrollable body: networks first, QR at the end ----------------------
+  // Order is a statement about which path is expected. Picking a visible
+  // network is the everyday case and now needs no scrolling; the phone-based
+  // setup is deliberate enough that scrolling to it is no burden, and it earns
+  // a QR big enough to scan from a comfortable distance in return.
+  lv_obj_t *body = lv_obj_create(viewMain_);
+  lv_obj_set_width(body, LV_PCT(100));
+  lv_obj_set_flex_grow(body, 1);
+  lv_obj_set_style_bg_opa(body, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(body, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(body, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_row(body, 4, LV_PART_MAIN);
+  lv_obj_set_flex_flow(body, LV_FLEX_FLOW_COLUMN);
+  // The one place on this screen that SHOULD scroll, so it says so explicitly
+  // rather than relying on LVGL's default -- everything else has the flag
+  // removed, and an unmarked exception reads as an oversight.
+  lv_obj_add_flag(body, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_scroll_dir(body, LV_DIR_VER);
+  lv_obj_set_scrollbar_mode(body, LV_SCROLLBAR_MODE_AUTO);
 
-  lv_obj_t *qr = lv_qrcode_create(qrBox);
-  // 104, and the payload below is kept SHORT, because both feed the same
-  // problem: lv_qrcode scales the symbol by an integer number of pixels per
-  // module, so whatever is left over between (size / modules) and the next
-  // whole pixel is emitted as blank margin. A long payload needs a higher QR
-  // version -- more modules -- which makes each module smaller and the leftover
-  // slack proportionally larger. That slack is what reads as a fat white bezel.
-  //
-  // Some white IS mandatory: the quiet zone is part of the spec and scanners
-  // fail without it. The aim is to leave only that, not that plus rounding.
-  lv_qrcode_set_size(qr, 104);
-  lv_qrcode_set_dark_color(qr, lv_color_hex(0x000000));
-  lv_qrcode_set_light_color(qr, lv_color_hex(0xFFFFFF));
+  for (uint8_t i = 0; i < netCount_; i++) addNetworkRow(body, i);
+
+  lv_obj_t *sep = lv_label_create(body);
+  lv_obj_set_style_text_font(sep, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_set_style_text_color(sep, lv_color_hex(C_MUTED), LV_PART_MAIN);
+  lv_obj_set_style_margin_top(sep, 6, LV_PART_MAIN);
+  lv_label_set_text(sep, "or set up from your phone:");
+
+  lv_obj_t *qrBox = lv_obj_create(body);
+  lv_obj_set_size(qrBox, LV_PCT(100), 210);
+  lv_obj_set_style_bg_color(qrBox, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
+  lv_obj_set_style_border_width(qrBox, 0, LV_PART_MAIN);
+  lv_obj_set_style_radius(qrBox, 4, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(qrBox, 6, LV_PART_MAIN);
+  lv_obj_remove_flag(qrBox, LV_OBJ_FLAG_SCROLLABLE);
+
   char payload[128];
   snprintf(payload, sizeof(payload), "WIFI:T:WPA;S:%s;P:%s;;", apSsid_, apPass_);
-  lv_qrcode_update(qr, payload, (uint32_t)strlen(payload));
+  const uint32_t plen = (uint32_t)strlen(payload);
 
-  lv_obj_t *qrText = lv_label_create(qrBox);
-  lv_obj_set_style_text_font(qrText, &lv_font_montserrat_14, LV_PART_MAIN);
-  lv_obj_set_style_text_color(qrText, lv_color_hex(C_TEXT), LV_PART_MAIN);
-  lv_obj_set_width(qrText, 112);
-  lv_label_set_long_mode(qrText, LV_LABEL_LONG_WRAP);
-  lv_label_set_text(qrText, "Scan to set up from your phone");
+  // THE BEZEL IS ROUNDING, AND IT IS COMPUTABLE AWAY.
+  //
+  // lv_qrcode draws each module as a whole number of pixels: scale =
+  // size / modules, integer division. Whatever is left over -- up to
+  // modules-1 pixels in each axis -- is emitted as blank border. Asking for
+  // "as big as fits" therefore guarantees a fat white frame, because a round
+  // number like 194 is almost never a multiple of 29 or 33.
+  //
+  // So the module count is derived from the payload and the size is snapped
+  // DOWN to an exact multiple. 194 / 29 = 6.69 -> 6 px modules, 174 px of code
+  // inside a 194 px box: 20 px of slack. 29 * 6 = 174 exactly: none.
+  //
+  // Capacities are ECC LOW, byte mode -- the boundaries at which qrcodegen
+  // steps up a version, and with it the module count.
+  uint16_t modules = 21;                  // v1
+  if (plen > 106) modules = 41;           // v6
+  else if (plen > 78) modules = 37;       // v5
+  else if (plen > 53) modules = 33;       // v4
+  else if (plen > 32) modules = 29;       // v3
+  else if (plen > 17) modules = 25;       // v2
 
-  lv_obj_t *list = lv_obj_create(viewMain_);
-  lv_obj_set_width(list, LV_PCT(100));
-  lv_obj_set_flex_grow(list, 1);
-  lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, LV_PART_MAIN);
-  lv_obj_set_style_border_width(list, 0, LV_PART_MAIN);
-  lv_obj_set_style_pad_all(list, 0, LV_PART_MAIN);
-  lv_obj_set_style_pad_row(list, 4, LV_PART_MAIN);
-  lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
-  for (uint8_t i = 0; i < netCount_; i++) addNetworkRow(list, i);
+  // The largest exact multiple that fits the panel's width less padding.
+  const uint16_t budget = 200;
+  const uint16_t scale = budget / modules;
+  const uint16_t qrPx = (uint16_t)(modules * scale);
+
+  lv_obj_t *qr = lv_qrcode_create(qrBox);
+  lv_qrcode_set_size(qr, qrPx);
+  lv_qrcode_set_dark_color(qr, lv_color_hex(0x000000));
+  lv_qrcode_set_light_color(qr, lv_color_hex(0xFFFFFF));
+  lv_obj_center(qr);
+  lv_qrcode_update(qr, payload, plen);
+
+  // The white that REMAINS is the quiet zone, supplied by this box's own white
+  // background rather than by the symbol. That part is not optional: it is in
+  // the spec and scanners fail without it. Keeping the AP SSID short keeps the
+  // module count low, which keeps the modules fat and the scan distance long.
 
   // --- password view -------------------------------------------------------
   viewPass_ = lv_obj_create(parent);

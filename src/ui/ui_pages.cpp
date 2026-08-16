@@ -6,6 +6,7 @@
 #include "ui_scope.h"
 #include "ui_screens.h"
 #include "ui_status.h"
+#include "ui_battery.h"
 #include "ui_wifi.h"
 
 namespace ui {
@@ -22,19 +23,41 @@ lv_obj_t *lastActive_ = nullptr;
 // bar stays visible and the thing you tapped to get here remains on screen.
 // Hidden rather than destroyed, because rebuilding a QR code and a keyboard on
 // every open would be visibly slow for a screen people bounce in and out of.
-lv_obj_t *detail_ = nullptr;
-bool detailOpen_ = false;
+lv_obj_t *detailWifi_ = nullptr;
+lv_obj_t *detailBatt_ = nullptr;
+lv_obj_t *detailOpen_ = nullptr;
 
 void closeDetail() {
-  if (!detail_) return;
-  lv_obj_add_flag(detail_, LV_OBJ_FLAG_HIDDEN);
-  detailOpen_ = false;
+  if (detailWifi_) lv_obj_add_flag(detailWifi_, LV_OBJ_FLAG_HIDDEN);
+  if (detailBatt_) lv_obj_add_flag(detailBatt_, LV_OBJ_FLAG_HIDDEN);
+  detailOpen_ = nullptr;
 }
 
-void openWifi() {
-  if (!detail_) return;
-  lv_obj_remove_flag(detail_, LV_OBJ_FLAG_HIDDEN);
-  detailOpen_ = true;
+void openDetail(lv_obj_t *which) {
+  closeDetail();
+  if (!which) return;
+  lv_obj_remove_flag(which, LV_OBJ_FLAG_HIDDEN);
+  detailOpen_ = which;
+}
+
+void openWifi() { openDetail(detailWifi_); }
+void openBattery() { openDetail(detailBatt_); }
+
+// Every detail panel is the same shape: an overlay pinned below the status bar
+// and taken out of the screen's flex flow. Built once here rather than repeated
+// per page, because the flag is the non-obvious half -- without it the panel is
+// a flex ITEM placed after the tileview and hangs off the bottom.
+lv_obj_t *makeDetail(lv_obj_t *scr) {
+  lv_obj_t *d = lv_obj_create(scr);
+  lv_obj_add_flag(d, LV_OBJ_FLAG_IGNORE_LAYOUT);
+  lv_obj_set_pos(d, 0, STATUS_H);
+  lv_obj_set_size(d, SCREEN_W, SCREEN_H - STATUS_H);
+  lv_obj_set_style_pad_all(d, 0, LV_PART_MAIN);
+  lv_obj_set_style_border_width(d, 0, LV_PART_MAIN);
+  lv_obj_set_style_radius(d, 0, LV_PART_MAIN);
+  lv_obj_remove_flag(d, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_add_flag(d, LV_OBJ_FLAG_HIDDEN);
+  return d;
 }
 
 }  // namespace
@@ -70,32 +93,17 @@ void buildPages() {
   tileScope_ = lv_tileview_add_tile(tv_, 1, 0, LV_DIR_LEFT);
   buildScope(tileScope_);
 
-  // Created AFTER the tileview so it stacks above it, and sized to the page
-  // area rather than the screen -- the status bar is deliberately still
-  // reachable while a detail page is open.
-  detail_ = lv_obj_create(scr);
-  // IGNORE_LAYOUT, and this is the fix for a real bug rather than a tidy-up.
-  //
-  // The screen is a flex COLUMN. Without this flag the detail panel is a flex
-  // ITEM, so it is placed after the status bar and the tileview rather than
-  // over them -- 100% height starting 26 px down, i.e. 26 px of it hanging off
-  // the bottom. On screen that presented as the last row of the keyboard being
-  // sliced, which looks like a keyboard sizing problem and is not.
-  //
-  // Taken out of the flow it needs explicit geometry, which is also the honest
-  // description of what it is: an overlay pinned below the status bar.
-  lv_obj_add_flag(detail_, LV_OBJ_FLAG_IGNORE_LAYOUT);
-  lv_obj_set_pos(detail_, 0, STATUS_H);
-  lv_obj_set_size(detail_, SCREEN_W, SCREEN_H - STATUS_H);
-  lv_obj_set_style_pad_all(detail_, 0, LV_PART_MAIN);
-  lv_obj_set_style_border_width(detail_, 0, LV_PART_MAIN);
-  lv_obj_set_style_radius(detail_, 0, LV_PART_MAIN);
-  lv_obj_remove_flag(detail_, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_add_flag(detail_, LV_OBJ_FLAG_HIDDEN);
-  buildWifiPage(detail_);
+  // Detail overlays, created AFTER the tileview so they stack above it.
+  detailWifi_ = makeDetail(scr);
+  buildWifiPage(detailWifi_);
   wifiOnClose(closeDetail);
 
+  detailBatt_ = makeDetail(scr);
+  buildBatteryPage(detailBatt_);
+  batteryOnClose(closeDetail);
+
   statusOnWifiTap(openWifi);
+  statusOnBatteryTap(openBattery);
 
   lastActive_ = nullptr;
 }
@@ -121,7 +129,14 @@ void pagesTick(uint32_t nowMs) {
   // A detail page covers the tileview entirely, so nothing underneath is worth
   // rendering. Data collection above still runs -- that is the point of the
   // split -- so the scope's history is intact when the panel closes.
-  if (detailOpen_) return;
+  //
+  // The battery page is the exception that proves the rule: it IS visible, so
+  // it gets updated. It shows live measurements, and a diagnostic screen frozen
+  // at whatever the values were when it opened would be worse than none.
+  if (detailOpen_) {
+    if (detailOpen_ == detailBatt_) updateBatteryPage(s);
+    return;
+  }
 
   // --- rendering: only the page a person is actually looking at ------------
   // THIS IS WHAT KEEPS THE FRAME RATE FLAT AS PAGES ARE ADDED. Cost scales with

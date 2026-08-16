@@ -38,7 +38,17 @@ const uint32_t C_PANEL = 0x161B22;
 const uint32_t C_BORDER = 0x30363D;
 const uint32_t C_TEXT = 0xE6EDF3;
 const uint32_t C_MUTED = 0x8B949E;
-const uint32_t C_PRESENT = 0x1F6F43;
+// Blue for a present bowl, not green. Green reads as "OK" -- a judgement --
+// and a full stack is not better than an empty one, it is just a different
+// amount of food. Blue says "occupied" without editorialising, which leaves
+// green and red free to mean healthy and faulty on the same screen.
+const uint32_t C_PRESENT = 0x1F6FEB;
+
+// Light red fills the whole cell for a dead sensor, rather than the thin red
+// border it had before. A 1 px border on a 240 px panel is not something anyone
+// notices across a kitchen, and a sensor fault is the one thing on this screen
+// that needs to be noticed from a distance.
+const uint32_t C_CELL_FAULT = 0xE05C5C;
 const uint32_t C_WARN = 0x9E6A03;
 const uint32_t C_FAULT = 0xB62324;
 
@@ -155,22 +165,19 @@ void build(lv_obj_t *parent) {
     lv_obj_set_style_pad_all(cell, 4, LV_PART_MAIN);
     lv_obj_remove_flag(cell, LV_OBJ_FLAG_SCROLLABLE);
 
-    // Row, not a centred string. "f1" gets 24 px because the level identity is
-    // what a person scans for; the state word gets 20, above the 18 floor for
-    // states. Packing both into one centred label forced a single size, and the
-    // size that made the whole string fit was one that could not be read.
-    lv_obj_set_flex_flow(cell, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(cell, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER);
-
-    lv_obj_t *tag = lv_label_create(cell);
-    lv_obj_set_style_text_font(tag, &lv_font_montserrat_24, LV_PART_MAIN);
-    lv_label_set_text_fmt(tag, "f%u", i + 1);
-
+    // The f1..f4 tags are gone. Their job was to say which level a cell is, and
+    // the column's own order already says that -- bottom cell is the bottom
+    // bowl, which is the physical arrangement and needs no caption once you
+    // have looked at it twice. Removing them leaves the state word centred with
+    // the whole cell width to itself.
+    //
+    // Worth noting what is lost: a photograph of this screen no longer labels
+    // its own rows. If a level ever has to be named to someone not standing in
+    // front of it, that belongs in the health page rather than back here.
     lv_obj_t *l = lv_label_create(cell);
-    // The most-read state on the screen, so above the 18 floor.
     lv_obj_set_style_text_font(l, &lv_font_montserrat_20, LV_PART_MAIN);
     lv_label_set_text(l, "--");
+    lv_obj_center(l);
 
     cells[i] = cell;
     cellLabels[i] = l;
@@ -243,15 +250,19 @@ void update(const State &s) {
   static const char *levelText[] = {"unknown", "absent", "present"};
   for (uint8_t i = 0; i < LEVELS; i++) {
     const Level lv = s.levels[i];
+    // Three states, three fills: occupied, empty, faulty. Colour carries this
+    // now that the level tags are gone, so it has to be unambiguous at a glance
+    // -- the word beside it is the confirmation, not the signal.
     uint32_t bg = C_PANEL;
-    if (lv == Level::Present) bg = C_PRESENT;
+    if (!s.sensorOnline[i]) bg = C_CELL_FAULT;
+    else if (lv == Level::Present) bg = C_PRESENT;
     lv_obj_set_style_bg_color(cells[i], lv_color_hex(bg), LV_PART_MAIN);
 
     // A dead sensor is called out on the cell it belongs to, rather than only
     // in an aggregate count, because "which one" is the actionable part. The
     // level tag stays put; only the state word changes.
     if (!s.sensorOnline[i]) {
-      lv_obj_set_style_border_color(cells[i], lv_color_hex(C_FAULT), LV_PART_MAIN);
+      lv_obj_set_style_border_color(cells[i], lv_color_hex(C_CELL_FAULT), LV_PART_MAIN);
       lv_label_set_text(cellLabels[i], "offline");
     } else {
       lv_obj_set_style_border_color(cells[i], lv_color_hex(C_BORDER), LV_PART_MAIN);
@@ -365,6 +376,10 @@ State unknownState() {
   s.sensorsOnline = 0;
   s.battery = Battery::Unknown;
   s.batteryMv = 0;
+  s.batteryPinMv = 0;
+  // -1 rather than the 0 that zero-initialisation would leave. A freshly
+  // constructed state knows nothing about the cell, and 0 would say it is flat.
+  s.batteryPercent = -1;
   s.chargingKnown = false;
   s.charging = false;
   s.wifiConnected = false;

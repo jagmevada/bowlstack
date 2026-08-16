@@ -33,6 +33,7 @@
 
 #include <esp_mac.h>
 
+#include "battery_soc.h"
 #include "board_waveshare_s3.h"
 #include "lgfx_waveshare_s3.h"
 #include "version.h"
@@ -318,6 +319,37 @@ void loop() {
 
   // Drives both pages, same clock and same cadence as the desktop preview.
   ui::pagesTick(millis());
+
+  // Feed the REAL battery into the UI. This is a legitimate platform-specific
+  // source in the sense CLAUDE.md means it: the device has an ADC on a divider
+  // and the desktop has neither, so measured-here / fabricated-there is a
+  // difference in the world rather than in the fixtures.
+  //
+  // Once per second, not per frame. The 16-sample mean costs 16 ADC
+  // conversions, a cell moves over hours, and the battery page is the only
+  // thing that reads it.
+  static uint32_t nextBatt = 0;
+  if ((int32_t)(millis() - nextBatt) >= 0) {
+    nextBatt = millis() + 1000;
+    const uint16_t pinMv = readBatteryPinMv();
+    const uint16_t cellMv = (uint16_t)(pinMv * board::BATTERY_DIVIDER_NOMINAL);
+
+    // Bounded at BOTH ends, exactly as config.h argues. Below the floor the
+    // input is floating rather than measuring; above the ceiling no lithium
+    // cell can produce it, so the measurement is broken -- and it was a real
+    // failure, a disconnected pin once reading 6365 mV as "100% (good)".
+    ui::Battery band = ui::Battery::Unknown;
+    int8_t pct = -1;
+    if (cellMv >= 2500 && cellMv <= 4400) {
+      const float soc = battery::socFromMillivolts(cellMv);
+      pct = (int8_t)(soc + 0.5f);
+      if (soc > 70.0f) band = ui::Battery::Good;
+      else if (soc > 35.0f) band = ui::Battery::Medium;
+      else if (soc > 10.0f) band = ui::Battery::Low;
+      else band = ui::Battery::Critical;
+    }
+    ui::demoOverrideBattery(cellMv, pinMv, pct, band);
+  }
 
   static uint32_t nextConsole = 0;
   const uint32_t now = millis();

@@ -83,6 +83,17 @@ image. Always pass `-e`.
 The simulator holds `program.exe` open while running; stop it before a rebuild
 or the link fails with `Access is denied`.
 
+**Launch it with mingw64 on PATH**, or it dies at load with no message:
+
+```
+PATH="/c/msys64/mingw64/bin:$PATH" ./.pio/build/sim/program.exe
+```
+
+`SDL2.dll`, `libstdc++-6.dll` and `libwinpthread-1.dll` live there. Started
+without it the process exits instantly, which is easy to misread as a crash in
+the UI -- it has been misread that way once already. Backgrounding it from a
+shell that then exits produces the same false alarm, reported as a segfault.
+
 ---
 
 ## Editing

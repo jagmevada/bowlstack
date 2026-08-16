@@ -36,5 +36,6 @@ void updateStatus(const State &s);
 // callback rather than calling ui_pages directly, so the status bar stays a
 // leaf -- it knows what was tapped, not what should happen next.
 void statusOnWifiTap(void (*cb)(void));
+void statusOnBatteryTap(void (*cb)(void));
 
 }  // namespace ui

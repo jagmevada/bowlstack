@@ -51,6 +51,25 @@ struct State {
   Battery battery;
   uint16_t batteryMv;
 
+  // Percentage from the measured discharge curve, or -1 for unknown.
+  //
+  // LOCAL ONLY, and that distinction is the whole reason it can be here at all.
+  // device_status.h computes this and prints it to the console but never sends
+  // it upstream: a resting-voltage estimate moves several points with load,
+  // temperature, cell age and per-unit ADC calibration, so publishing a number
+  // would invite a dashboard to render precision the measurement lacks.
+  //
+  // The battery detail page has the same audience as that console line -- a
+  // person standing at the device with a multimeter -- so it shows the same
+  // figures. The STATUS BAR still shows only the band, because that is the
+  // glanceable surface and the argument against a number holds there.
+  int8_t batteryPercent;
+
+  // Raw millivolts at the ADC pin, before the divider. This is what you compare
+  // against a multimeter to derive BOWLSTACK_BATTERY_CAL, and an implausible
+  // value here identifies a wiring fault that the cell figure would disguise.
+  uint16_t batteryPinMv;
+
   // Tri-state on purpose. The Waveshare board cannot read charge state at all
   // -- the ETA6098's STAT output never reaches a GPIO -- and this codebase does
   // not state what it cannot measure. A plain `bool charging` would force a

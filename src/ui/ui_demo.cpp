@@ -20,6 +20,11 @@ bool armed_ = false;
 State latest_;
 bool haveLatest_ = false;
 
+bool battOverride_ = false;
+uint16_t ovCellMv_ = 0, ovPinMv_ = 0;
+int8_t ovPct_ = -1;
+Battery ovBand_ = Battery::Unknown;
+
 State base() {
   State s = unknownState();
   for (uint8_t i = 0; i < LEVELS; i++) s.sensorOnline[i] = true;
@@ -27,6 +32,8 @@ State base() {
   s.stack = Stack::Ok;
   s.battery = Battery::Good;
   s.batteryMv = 4102;
+  s.batteryPercent = 95;
+  s.batteryPinMv = 1367;  // 4102 / 3.0, the on-board divider ratio
   s.chargingKnown = false;
   s.wifiConnected = true;
   s.wifiRssi = -58;
@@ -75,6 +82,10 @@ State sNoCell() {
   State s = stacked(3);
   s.battery = Battery::Unknown;
   s.batteryMv = 0;
+  s.batteryPinMv = 0;
+  // -1, not 0. "0%" is a claim that the cell is empty; this state is that
+  // nothing is known about it, which is a different statement entirely.
+  s.batteryPercent = -1;
   return s;
 }
 
@@ -82,6 +93,8 @@ State sCritical() {
   State s = stacked(1);
   s.battery = Battery::Critical;
   s.batteryMv = 3312;
+  s.batteryPercent = 8;
+  s.batteryPinMv = 1104;
   s.wifiConnected = false;
   s.wifiRssi = 0;
   return s;
@@ -97,6 +110,8 @@ State sCharging() {
   State s = stacked(4);
   s.battery = Battery::Medium;
   s.batteryMv = 3821;
+  s.batteryPercent = 52;
+  s.batteryPinMv = 1274;
   s.chargingKnown = true;
   s.charging = true;
   return s;
@@ -135,6 +150,14 @@ void demoInstallWifiMocks() {
   // networking at all. Showing a fabricated association would put a number on
   // screen that no part of this build could have measured.
   wifiSetConnected(nullptr, 0, nullptr);
+}
+
+void demoOverrideBattery(uint16_t cellMv, uint16_t pinMv, int8_t pct, Battery band) {
+  battOverride_ = true;
+  ovCellMv_ = cellMv;
+  ovPinMv_ = pinMv;
+  ovPct_ = pct;
+  ovBand_ = band;
 }
 
 uint8_t demoCount() { return (uint8_t)(sizeof(SCENARIOS) / sizeof(SCENARIOS[0])); }
@@ -181,6 +204,13 @@ const State &demoLatest(uint32_t nowMs) {
   } else {
     latest_.timeKnown = false;
   }
+  if (battOverride_) {
+    latest_.batteryMv = ovCellMv_;
+    latest_.batteryPinMv = ovPinMv_;
+    latest_.batteryPercent = ovPct_;
+    latest_.battery = ovBand_;
+  }
+
   latest_.uptimeSec = nowMs / 1000;
   return latest_;
 }

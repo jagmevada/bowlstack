@@ -57,4 +57,16 @@ const State &demoLatest(uint32_t nowMs);
 // the fixtures.
 void demoInstallWifiMocks();
 
+// Replaces the fabricated battery figures with measured ones.
+//
+// This is the SECOND legitimate platform-specific source, alongside the MAC:
+// the device has an ADC on a real divider and the desktop has neither. Once
+// called, every demoLatest() carries the measured values, so the battery page
+// on hardware shows the cell in front of it rather than a fixture.
+//
+// The simulator never calls it and keeps the fabricated values, which is what
+// lets the page's states -- full, critical, no cell -- be looked at without
+// having to discharge an actual battery to see them.
+void demoOverrideBattery(uint16_t cellMv, uint16_t pinMv, int8_t pct, Battery band);
+
 }  // namespace ui
