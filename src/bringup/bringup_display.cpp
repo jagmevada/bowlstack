@@ -136,12 +136,30 @@ void flushCb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
   lv_display_flush_ready(disp);
 }
 
+// THE ONLY PLACE THE TOUCH CONTROLLER IS READ. Nothing else may call
+// gfx.getTouch().
+//
+// The CST816D hands over a touch event and clears its data register in the same
+// transaction, so a second reader does not observe the same event -- it steals
+// it. With the status line below polling getTouch() on its own 500 ms cadence,
+// roughly one press in four was consumed before LVGL's indev ever saw it, and
+// LVGL was left inferring press/release transitions from a stream with holes in
+// it. That is a drag gesture as far as LVGL is concerned.
+//
+// Last coordinates are latched here for the status label to read, which is why
+// the label is a consumer of this callback rather than a second poller.
+lv_point_t lastTouch = {0, 0};
+bool everTouched = false;
+
 void touchCb(lv_indev_t *, lv_indev_data_t *data) {
   uint16_t x, y;
   if (gfx.getTouch(&x, &y)) {
     data->point.x = x;
     data->point.y = y;
     data->state = LV_INDEV_STATE_PRESSED;
+    lastTouch.x = x;
+    lastTouch.y = y;
+    everTouched = true;
   } else {
     data->state = LV_INDEV_STATE_RELEASED;
   }
@@ -153,13 +171,30 @@ void onTap(lv_event_t *) {
   Serial.printf("bringup: tap %u\n", tapCount);
 }
 
-// --- stage 3: raw panel test, before LVGL exists ---------------------------
-// If this stage looks wrong, LVGL cannot fix it and adding LVGL will only
-// obscure it. Specifically:
-//   - inverted colours (white text on white)  -> cfg.invert in the LGFX header
-//   - red and blue swapped                    -> cfg.rgb_order
-//   - content off the edge / rotated          -> setRotation, offset_x/y
+// --- stage 3: the panel, before LVGL exists --------------------------------
+// Kept as its own stage because if the panel is wrong, LVGL cannot fix it and
+// adding LVGL only obscures it.
+//
+// The colour bars are now OFF by default. They were a one-time question --
+// is invert right, is rgb_order right, are rows lost to a bad offset -- and it
+// has been answered on this hardware. Leaving a full-screen test pattern in the
+// boot path of a device someone watches every day is noise, not diagnostics.
+//
+// They are retained rather than deleted because the question comes back the
+// moment the panel, the FPC or the LGFX config changes:
+//
+//     pio run -e ws-s3-bringup -t upload  (with -DBRINGUP_COLOR_BARS=1)
+//
+// | symptom                        | fix, in lgfx_waveshare_s3.h |
+// | black-on-white where inverted  | cfg.invert                  |
+// | red and blue swapped           | cfg.rgb_order               |
+// | content shifted or rotated     | setRotation, cfg.offset_x/y |
+#ifndef BRINGUP_COLOR_BARS
+#define BRINGUP_COLOR_BARS 0
+#endif
+
 void panelSelfTest() {
+#if BRINGUP_COLOR_BARS
   const struct { uint16_t c; const char *name; } bars[] = {
       {TFT_RED, "RED"}, {TFT_GREEN, "GREEN"}, {TFT_BLUE, "BLUE"}, {TFT_WHITE, "WHITE"},
   };
@@ -178,6 +213,19 @@ void panelSelfTest() {
   gfx.setCursor(8, gfx.height() - 24);
   gfx.printf("%dx%d", gfx.width(), gfx.height());
   delay(1500);
+#else
+  // Placeholder for the Dadabhagwan Foundation logo (todo.md). Text on black
+  // for now -- deliberately drawn with raw LovyanGFX rather than as an LVGL
+  // screen, so that when the logo replaces it, it still appears BEFORE LVGL
+  // initialises and the boot has no dark gap.
+  gfx.fillScreen(TFT_BLACK);
+  gfx.setTextColor(TFT_WHITE, TFT_BLACK);
+  gfx.setTextSize(2);
+  gfx.setTextDatum(middle_center);
+  gfx.drawString("Bowlstack", gfx.width() / 2, gfx.height() / 2);
+  gfx.setTextDatum(top_left);
+  delay(600);
+#endif
 }
 
 // --- stage 4/5: the LVGL screen -------------------------------------------
@@ -186,6 +234,21 @@ void panelSelfTest() {
 void buildScreen() {
   lv_obj_t *scr = lv_screen_active();
   lv_obj_set_style_bg_color(scr, lv_color_hex(0x101418), LV_PART_MAIN);
+
+  // THIS IS THE FLICKER FIX. An LVGL screen is SCROLLABLE BY DEFAULT, and this
+  // layout is a few pixels taller than 320, so it had somewhere to scroll to.
+  //
+  // Any touch that moved even one pixel therefore started a drag. The content
+  // shifted, sprang back under LV_OBJ_FLAG_SCROLL_ELASTIC, and every frame of
+  // that bounce was a full-screen redraw. With no TE/vsync signal wired on this
+  // board -- the panel's TE pin does not reach a GPIO -- those redraws tear
+  // against the panel's own scan. That reads as flicker, and it stops when the
+  // scroll animation settles, which is exactly the reported symptom: flickers
+  // on touch, then goes stable.
+  //
+  // Nothing here is meant to scroll, so the fix is to say so rather than to
+  // chase the tearing.
+  lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
 
   lv_obj_t *title = lv_label_create(scr);
   lv_label_set_text(title, "Bowlstack  bring-up");
@@ -208,7 +271,7 @@ void buildScreen() {
     lv_obj_set_style_border_color(cell, lv_color_hex(0x30363D), LV_PART_MAIN);
     lv_obj_set_style_bg_color(
         cell, present[i] ? lv_color_hex(0x1F6F43) : lv_color_hex(0x1C2128), LV_PART_MAIN);
-    lv_obj_clear_flag(cell, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(cell, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *l = lv_label_create(cell);
     lv_label_set_text_fmt(l, "%s  %s", levels[i], present[i] ? "present" : "absent");
@@ -353,9 +416,11 @@ void loop() {
     const uint16_t cellMv = (uint16_t)(pinMv * board::BATTERY_DIVIDER_NOMINAL);
     if (lblBattery) lv_label_set_text_fmt(lblBattery, "batt  pin %u mV -> cell %u mV", pinMv, cellMv);
 
-    uint16_t x, y;
-    if (gfx.getTouch(&x, &y)) {
-      if (lblTouch) lv_label_set_text_fmt(lblTouch, "touch  x=%u y=%u", x, y);
+    // Reads the coordinates LATCHED BY touchCb rather than polling the
+    // controller again -- see the comment there. A second getTouch() here is
+    // what made touches erratic.
+    if (lblTouch && everTouched) {
+      lv_label_set_text_fmt(lblTouch, "touch  x=%d y=%d", (int)lastTouch.x, (int)lastTouch.y);
     }
 
     static uint32_t nextConsole = 0;

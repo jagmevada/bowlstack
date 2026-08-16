@@ -205,6 +205,13 @@ the same class of failure as the floating pin that once read 6365 mV as
       corrupt-looking crash far from its cause
 - [ ] Compile `indicators` out under the board macro
 - [ ] Screens: stock, health, setup
+- [ ] **Dadabhagwan Foundation logo as the boot splash.** The colour-bar test
+      pattern is now off by default (`-DBRINGUP_COLOR_BARS=1` brings it back)
+      and a plain "Bowlstack" text splash stands in its place. Draw the logo
+      with raw LovyanGFX in `panelSelfTest()`, *before* LVGL initialises, so
+      the boot has no dark gap. Source art wanted as a 1-bit or RGB565 C array
+      — at 240×320 an RGB565 full-screen image is 150 KB of flash, so a
+      smaller centred logo on black is the better trade.
 
 > The local UI must not contradict [FRONTEND_HANDOFF.md](docs/FRONTEND_HANDOFF.md) §4:
 > `discontiguous` renders a **fault, not a count**; `degraded` shows the number
