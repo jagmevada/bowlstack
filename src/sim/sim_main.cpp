@@ -35,16 +35,6 @@
 #include "ui_screens.h"
 #include "ui_wifi.h"
 
-namespace {
-// Fabricated scan results. Real ones arrive when net.cpp joins this image; the
-// UI never calls WiFi itself, for the same reason ui_state.h exists.
-const ui::Network MOCK_NETS[] = {
-    {"Kitchen-2G", -47, true},   {"Mandir_Guest", -61, true},
-    {"BSNL-AP-04", -72, true},   {"Seva-Office", -78, true},
-    {"OpenServe", -83, false},
-};
-}  // namespace
-
 int main(int, char **) {
   lv_init();
 
@@ -67,8 +57,7 @@ int main(int, char **) {
 
   ui::wifiSetMac("28:84:85:47:ab:bc");
   ui::wifiSetSetupAp("Bowlstack-BWL-001", "bowlstack");
-  ui::wifiSetNetworks(MOCK_NETS, sizeof(MOCK_NETS) / sizeof(MOCK_NETS[0]));
-  ui::wifiSetConnected("Kitchen-2G", -58, "192.168.1.47");
+  ui::demoInstallWifiMocks();
 
   ui::buildPages();
 

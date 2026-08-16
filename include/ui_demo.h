@@ -43,4 +43,18 @@ uint8_t demoIndex();
 // handling.
 const State &demoLatest(uint32_t nowMs);
 
+// Installs the fabricated WiFi scan results and connection state.
+//
+// It lives HERE, with the rest of the mock data, for the same reason the
+// scenarios do: both targets must be handed identical values or the desktop
+// preview stops being evidence about the device. That is not hypothetical --
+// the sim was previously told it was connected to a network at -58 dBm while
+// the device was told nothing, so the two rendered different headers from the
+// same source file, and it read as a rendering bug.
+//
+// The MAC is deliberately NOT set here: the device has a real one in its eFuse
+// and the preview does not, which is a difference in the world rather than in
+// the fixtures.
+void demoInstallWifiMocks();
+
 }  // namespace ui

@@ -1,6 +1,7 @@
 #include "ui_demo.h"
 
 #include "ui_screens.h"
+#include "ui_wifi.h"
 
 namespace ui {
 namespace {
@@ -118,7 +119,23 @@ const Scenario SCENARIOS[] = {
     {"weak signal", sWeakSignal},
 };
 
+// Fabricated scan results. Real ones arrive when net.cpp joins this image; the
+// UI never calls WiFi itself, for the same reason ui_state.h exists.
+const Network MOCK_NETS[] = {
+    {"Kitchen-2G", -47, true},   {"Mandir_Guest", -61, true},
+    {"BSNL-AP-04", -72, true},   {"Seva-Office", -78, true},
+    {"OpenServe", -83, false},
+};
+
 }  // namespace
+
+void demoInstallWifiMocks() {
+  wifiSetNetworks(MOCK_NETS, (uint8_t)(sizeof(MOCK_NETS) / sizeof(MOCK_NETS[0])));
+  // Not connected, matching what the harness can actually claim: it links no
+  // networking at all. Showing a fabricated association would put a number on
+  // screen that no part of this build could have measured.
+  wifiSetConnected(nullptr, 0, nullptr);
+}
 
 uint8_t demoCount() { return (uint8_t)(sizeof(SCENARIOS) / sizeof(SCENARIOS[0])); }
 const char *demoName(uint8_t i) { return SCENARIOS[i % demoCount()].name; }

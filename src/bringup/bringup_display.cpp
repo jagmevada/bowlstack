@@ -43,16 +43,6 @@
 #include "ui_wifi.h"
 
 namespace {
-// Fabricated scan results. Real ones arrive when net.cpp joins this image; the
-// UI never calls WiFi itself, for the same reason ui_state.h exists.
-const ui::Network MOCK_NETS[] = {
-    {"Kitchen-2G", -47, true},   {"Mandir_Guest", -61, true},
-    {"BSNL-AP-04", -72, true},   {"Seva-Office", -78, true},
-    {"OpenServe", -83, false},
-};
-}  // namespace
-
-namespace {
 
 LGFX_WaveshareS3Touch2 gfx;
 
@@ -303,8 +293,7 @@ void setup() {
     ui::wifiSetSetupAp(apSsid, "bowlstack");
     Serial.printf("  mac %s\n", macStr);
   }
-  ui::wifiSetNetworks(MOCK_NETS, sizeof(MOCK_NETS) / sizeof(MOCK_NETS[0]));
-  ui::wifiSetConnected(nullptr, 0, nullptr);
+  ui::demoInstallWifiMocks();
 
   ui::buildPages();
   Serial.println("  2 pages, swipe horizontally -- identical to `pio run -e sim`:");
