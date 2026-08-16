@@ -205,32 +205,18 @@ void build(lv_obj_t *parent) {
   lv_label_set_text(lblStatus, "");
   lv_obj_add_flag(lblStatus, LV_OBJ_FLAG_HIDDEN);
 
-  // --- footer --------------------------------------------------------------
-  lv_obj_t *footer = lv_obj_create(scr);
-  styleFlat(footer);
-  lv_obj_set_size(footer, LV_PCT(100), 26);
-  lv_obj_set_flex_flow(footer, LV_FLEX_FLOW_ROW);
-  lv_obj_set_flex_align(footer, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
-                        LV_FLEX_ALIGN_CENTER);
-
-  // The ADC PIN voltage is deliberately absent. It is a calibration aid, it
-  // belongs on the console next to the cell voltage, and it was half of what
-  // made the old footer string 30 characters wide on a 240 px panel -- i.e.
-  // clipped, which is worse than absent because it looks like data.
-  lblBattery = lv_label_create(footer);
-  // Information rather than state -- read when someone is diagnosing, not at a
-  // glance during service -- so 16.
-  lv_obj_set_style_text_font(lblBattery, &lv_font_montserrat_16, LV_PART_MAIN);
-  lv_obj_set_style_text_color(lblBattery, lv_color_hex(C_MUTED), LV_PART_MAIN);
-  lv_label_set_text(lblBattery, "battery --");
-
-  barBattery = lv_obj_create(footer);
-  lv_obj_set_size(barBattery, 34, 12);
-  lv_obj_set_style_radius(barBattery, 3, LV_PART_MAIN);
-  lv_obj_set_style_border_width(barBattery, 1, LV_PART_MAIN);
-  lv_obj_set_style_border_color(barBattery, lv_color_hex(C_BORDER), LV_PART_MAIN);
-  lv_obj_set_style_bg_color(barBattery, lv_color_hex(C_PANEL), LV_PART_MAIN);
-  lv_obj_remove_flag(barBattery, LV_OBJ_FLAG_SCROLLABLE);
+  // NO FOOTER. The battery line and its bar are gone: the status bar shows the
+  // band permanently, and tapping it opens a page with the voltage, the
+  // percentage and the charge state. This row was a third rendering of the same
+  // fact, and the least precise of the three.
+  //
+  // Hidden rather than deleted, like the header labels above -- update() still
+  // writes to them, and null-guarding every call site buys nothing. Both sets
+  // should go properly when the health page takes over their content.
+  lblBattery = lv_label_create(scr);
+  lv_obj_add_flag(lblBattery, LV_OBJ_FLAG_HIDDEN);
+  barBattery = lv_obj_create(scr);
+  lv_obj_add_flag(barBattery, LV_OBJ_FLAG_HIDDEN);
 }
 
 void update(const State &s) {

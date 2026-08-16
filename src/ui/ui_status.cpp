@@ -11,6 +11,30 @@ const uint32_t C_WARN = 0xD29922;
 const uint32_t C_FAULT = 0xF85149;
 const uint32_t C_RULE = 0x21262D;
 
+// Draws a hairline around each touch target so its real extent is visible.
+//
+// It outlines the BUTTON OBJECT, which is now also exactly the hit area -- the
+// previous version used lv_obj_set_ext_click_area(), and an extended hit test
+// cannot be outlined at all, because the extension exists only in hit-testing
+// and has no geometry to draw. Sizing the boxes properly instead means what you
+// see is what responds.
+//
+// Set to 0 once the sizes are settled.
+#ifndef UI_TOUCH_DEBUG
+#define UI_TOUCH_DEBUG 1
+#endif
+
+void debugOutline(lv_obj_t *o) {
+#if UI_TOUCH_DEBUG
+  lv_obj_set_style_border_color(o, lv_color_hex(0x8B949E), LV_PART_MAIN);
+  lv_obj_set_style_border_width(o, 1, LV_PART_MAIN);
+  lv_obj_set_style_border_opa(o, LV_OPA_60, LV_PART_MAIN);
+  lv_obj_set_style_radius(o, 3, LV_PART_MAIN);
+#else
+  (void)o;
+#endif
+}
+
 // --- WiFi strength ---------------------------------------------------------
 // Four bars, drawn as rectangles. Thresholds are the conventional ones for
 // 2.4 GHz: -55 is excellent, -85 is barely associated.
@@ -130,8 +154,14 @@ void buildStatus(lv_obj_t *parent) {
   lv_label_set_text(lblTime_, "--:--");
 
   // Right-hand cluster: signal, then battery, the order a phone uses.
+  //
+  // 72 wide, up from 62. In a space-between row this cluster is pinned to the
+  // right edge, so widening it moves its LEFT edge -- and the WiFi bars with it
+  // -- 10 px toward the clock, which is the requested shift. The 10 px reappear
+  // as gap between the two icons, which is what lets their touch boxes grow
+  // without overlapping.
   lv_obj_t *right = lv_obj_create(parent);
-  lv_obj_set_size(right, 62, STATUS_H - 2);
+  lv_obj_set_size(right, 72, STATUS_H);
   lv_obj_set_style_bg_opa(right, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_border_width(right, 0, LV_PART_MAIN);
   lv_obj_set_style_pad_all(right, 0, LV_PART_MAIN);
@@ -141,7 +171,7 @@ void buildStatus(lv_obj_t *parent) {
   // Four 3 px rectangles are not tappable; an 26x24 box around them is. The box
   // is transparent, so it costs nothing visually and everything in usability.
   wifiBtn_ = lv_obj_create(right);
-  lv_obj_set_size(wifiBtn_, 26, STATUS_H - 2);
+  lv_obj_set_size(wifiBtn_, 30, STATUS_H);
   lv_obj_set_pos(wifiBtn_, 0, 0);
   lv_obj_set_style_bg_opa(wifiBtn_, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_border_width(wifiBtn_, 0, LV_PART_MAIN);
@@ -149,45 +179,39 @@ void buildStatus(lv_obj_t *parent) {
   lv_obj_remove_flag(wifiBtn_, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(wifiBtn_, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_event_cb(wifiBtn_, wifiClicked, LV_EVENT_CLICKED, nullptr);
-  // Extends the HIT TEST past the object's bounds without changing its layout
-  // or what is drawn. The icons stay exactly the size they are; only the region
-  // that counts as a press grows.
-  lv_obj_set_ext_click_area(wifiBtn_, 8);
+  debugOutline(wifiBtn_);
 
   // Bars share a common BASELINE, so they grow upward like a signal meter
   // rather than being centred, which would read as a bar chart of nothing.
-  const int16_t baseY = 19;
+  // They are inset within the button rather than flush to it: the box is the
+  // touch target and the icon is what you aim at, and the two are allowed to be
+  // different sizes.
+  const int16_t baseY = 20;
+  const int16_t barsW = WIFI_BARS * WIFI_BAR_W + (WIFI_BARS - 1) * WIFI_BAR_GAP;
+  const int16_t barsX = (30 - barsW) / 2;
   for (uint8_t i = 0; i < WIFI_BARS; i++) {
     bars_[i] = rect(wifiBtn_, WIFI_BAR_W, WIFI_BAR_H[i], C_DIM);
-    lv_obj_set_pos(bars_[i], i * (WIFI_BAR_W + WIFI_BAR_GAP), baseY - WIFI_BAR_H[i]);
+    lv_obj_set_pos(bars_[i], barsX + i * (WIFI_BAR_W + WIFI_BAR_GAP), baseY - WIFI_BAR_H[i]);
   }
 
   // Same reasoning as the WiFi cluster: a 26x13 icon plus its 2 px nub is not a
   // touch target, so a transparent box wraps the whole thing.
   battBtn_ = lv_obj_create(right);
-  lv_obj_set_size(battBtn_, 32, STATUS_H - 2);
-  lv_obj_set_pos(battBtn_, 30, 0);
+  lv_obj_set_size(battBtn_, 36, STATUS_H);
+  lv_obj_set_pos(battBtn_, 36, 0);
   lv_obj_set_style_bg_opa(battBtn_, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_border_width(battBtn_, 0, LV_PART_MAIN);
   lv_obj_set_style_pad_all(battBtn_, 0, LV_PART_MAIN);
   lv_obj_remove_flag(battBtn_, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_add_flag(battBtn_, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_event_cb(battBtn_, battClicked, LV_EVENT_CLICKED, nullptr);
-  // 14 px on every side, so a 32x24 icon becomes a 60x52 target -- comfortably
-  // past the ~9 mm that reads as reliable at this pixel density. The battery
-  // was the one that "hardly registers", and it sits at the screen edge where
-  // a finger lands least precisely.
-  //
-  // ext_click_area rather than a bigger box: the box would push the layout
-  // around and shrink the space left for the clock, and the ask was explicitly
-  // to keep the symbol the size it is.
-  lv_obj_set_ext_click_area(battBtn_, 14);
+  debugOutline(battBtn_);
 
   // Battery: body, nub, fill. Phone-shaped because that is the one icon every
   // person already reads correctly without a legend.
   battBody_ = lv_obj_create(battBtn_);
   lv_obj_set_size(battBody_, 26, 13);
-  lv_obj_set_pos(battBody_, 0, 6);
+  lv_obj_set_pos(battBody_, 3, 7);
   lv_obj_set_style_bg_opa(battBody_, LV_OPA_TRANSP, LV_PART_MAIN);
   lv_obj_set_style_border_color(battBody_, lv_color_hex(C_MUTED), LV_PART_MAIN);
   lv_obj_set_style_border_width(battBody_, 1, LV_PART_MAIN);
@@ -196,7 +220,7 @@ void buildStatus(lv_obj_t *parent) {
   lv_obj_remove_flag(battBody_, LV_OBJ_FLAG_SCROLLABLE);
 
   lv_obj_t *nub = rect(battBtn_, 2, 5, C_MUTED);
-  lv_obj_set_pos(nub, 26, 10);
+  lv_obj_set_pos(nub, 29, 11);
 
   battFill_ = rect(battBody_, 22, 9, C_OK);
   lv_obj_set_pos(battFill_, 1, 1);
@@ -208,7 +232,7 @@ void buildStatus(lv_obj_t *parent) {
   lv_obj_set_style_text_font(battBolt_, &lv_font_montserrat_14, LV_PART_MAIN);
   lv_obj_set_style_text_color(battBolt_, lv_color_hex(0x000000), LV_PART_MAIN);
   lv_label_set_text(battBolt_, LV_SYMBOL_CHARGE);
-  lv_obj_set_pos(battBolt_, 8, 5);
+  lv_obj_set_pos(battBolt_, 11, 6);
   lv_obj_add_flag(battBolt_, LV_OBJ_FLAG_HIDDEN);
 }
 
