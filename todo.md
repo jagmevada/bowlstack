@@ -7,50 +7,53 @@ Rationale for each is in [docs/waveshare_port.md](docs/waveshare_port.md).
 
 ## Resume here
 
-**State as of 2026-08-17.** Bowlstack is being ported from the discrete ESP32
-board to a **Waveshare ESP32-S3-Touch-LCD-2** — 2" 240×320 IPS, CST816D touch,
-on-board Li-ion charging. The touchscreen **replaces** the five discrete status
-LEDs. Work is on branch `touch-ui`, off `main`; the discrete build on `main` is
-untouched and still the working prototype.
+**State as of 2026-08-17, after an overnight optimisation pass.** Bowlstack is
+being ported from the discrete ESP32 board to a **Waveshare ESP32-S3-Touch-LCD-2**
+— 2" 240×320 IPS, CST816D touch, on-board Li-ion charging. The touchscreen
+**replaces** the five discrete status LEDs. Work is on branch `touch-ui`; the
+discrete build on `main` is untouched.
 
-**Done:** board pin map established from the schematic netlist, LVGL 9.5 +
-LovyanGFX 1.2 stack chosen and wired up, six-stage bring-up harness written and
-**building clean** (RAM 26.6%, flash 12.4%). Not yet run on hardware.
+### First thing in the morning
 
-**Hardware on hand: the bare board on USB. Nothing else.** No sensors, no mux,
-no header wiring. That is what makes the next step what it is.
+1. **Tap the screen.** A bug was found and fixed overnight where initialising
+   the sensors killed the touch controller (see below). The chip is proven
+   reachable again, but only a finger closes that loop.
+2. Swipe to the scope page and watch the perf line — it should read around
+   **10–12 fps at ~11% busy**.
+3. Tap the WiFi icon. The network list is **real** now.
 
-**Next step, agreed:** a **mock state source** producing `DeviceStatus` /
-`PlotFrame` values, so the UI can be built and demoed with no sensors attached.
-It is not a testing nicety — it is what makes UI work possible at all right now.
-It also fits the existing architecture: `Reading reading(uint8_t level)` and
-`tasks::snapshot()` are already the seams, so a mock sits behind them and the
-`ui` module cannot tell the difference. Same property that lets the mux drop in
-later without touching `bowl_logic`.
+### What the night produced
 
-Then, in order: `ui` module taking the `leds` task slot → stock screen →
-health screen.
+| | before | after |
+| --- | --- | --- |
+| stock page | ~8 fps, full repaint every frame | 1–4 fps, **10% busy**, 6–9 ms frames |
+| scope page | 14 fps, **79% busy**, 49,000 px/frame | 10–12 fps, **11% busy**, 2,400 px/frame |
+| preview LVGL pool | 51k/55k used, 11% frag (hangs) | 51k/183k, 1% frag |
 
-**First thing to try on hardware:**
+Low fps on the stock page is the **goal**, not a regression: it redraws when the
+bowl count changes and is idle otherwise. That is the CPU the sensors, WiFi and
+Supabase need.
 
-```
-pio run -e ws-s3-bringup -t upload --upload-port COMx
-```
+- **Real WiFi** — async scan, bounded 12 s join, live status. Verified against
+  `Amba`: 15–18 networks found, joined, `ip 192.168.1.19 rssi -61`.
+- **Sensor stack ported** — `sensor_array` + `bowl_logic` + `trimmed_window`
+  compile and run on the new pins. With nothing attached every level reports
+  offline/unknown, which is correct.
+- **Idle timeout** — returns to the stock page after 60 s untouched.
+- **Boot logo**, touch outlines removed, QR bezel fixed.
 
-Console is over **native USB**, not UART — the port re-enumerates after
-flashing. Expected output and what each stage rules out is in
-[docs/waveshare_port.md](docs/waveshare_port.md) §5.
+### Wiring, when you have the parts
 
-> On this machine `pio` is not on PATH — use
-> `~/.platformio/penv/Scripts/pio.exe`. Builds take ~10 minutes, and **`pio`
-> exits 0 even when the build FAILED**, so read the status line, not the exit
-> code.
+| Signal | GPIO | Header |
+| --- | --- | --- |
+| Sensor I2C SDA | 21 | P1-7 |
+| Sensor I2C SCL | 16 | P1-4 |
+| XSHUT `f1`–`f4` | 2, 4, 13, 12 | P1-1, P1-2, P2-7, P2-8 |
+| Sensor 3V3 / GND | — | **P2-1 / P2-2** |
 
-**Do not re-derive the board pinout.** It is in
-[include/board_waveshare_s3.h](include/board_waveshare_s3.h), cited line by line
-to `ESP32-S3-Touch-LCD-2-SchDoc.pdf`. Waveshare's wiki returns 403 to automated
-fetches, and search engines will cheerfully echo back whatever pin numbers
-appear in the question — the netlist PDF was the only source trusted here.
+> **P1 carries only GND and 5 V** — sensor power must come off P2.
+> **Never let anything call `Wire.begin()` on this board.** Port 0 belongs to
+> the touch controller; that was the overnight bug.
 
 ---
 
