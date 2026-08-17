@@ -15,6 +15,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 
+#include "ui_demo.h"
 #include "ui_wifi.h"
 
 namespace bringup_wifi {
@@ -65,12 +66,17 @@ void publishScan() {
 }
 
 void publishStatus() {
-  if (WiFi.status() == WL_CONNECTED) {
+  const bool up = (WiFi.status() == WL_CONNECTED);
+  if (up) {
     ui::wifiSetConnected(WiFi.SSID().c_str(), (int16_t)WiFi.RSSI(),
                          WiFi.localIP().toString().c_str());
   } else {
     ui::wifiSetConnected(nullptr, 0, nullptr);
   }
+  // The STATUS BAR reads this, not the WiFi page. Without it the bars showed
+  // whatever the fixture had baked in -- four solid bars on a device with no
+  // link at all.
+  ui::demoOverrideWifi(up, up ? (int16_t)WiFi.RSSI() : 0);
 }
 
 void onJoin(const char *ssid, const char *pass) {

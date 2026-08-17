@@ -29,7 +29,7 @@ uint32_t lastSampleMs_ = 0;
 // continue while the page is hidden, and the canvas is what lets a redraw touch
 // one column instead of the whole plot.
 int16_t ring_[LEVELS][SCOPE_W];
-uint16_t sweep_ = 0;     // column the next sample will occupy
+uint16_t sweep_ = 0;     // column the NEXT sample will occupy
 uint16_t filled_ = 0;    // columns written since boot, capped at SCOPE_W
 int16_t prevY_[LEVELS];  // last plotted row per series, for joining segments
 bool havePrev_ = false;
@@ -190,8 +190,20 @@ void buildScope(lv_obj_t *parent) {
     // on any build where the alignment differs.
     lv_draw_buf_t *db = lv_canvas_get_draw_buf(canvas_);
     if (db) {
-      px_ = (uint16_t *)db->data;
-      stridePx_ = db->header.stride / 2;
+      // SCOPE_BUF_BYTES assumes stride == width * 2, which holds only while
+      // LV_DRAW_BUF_STRIDE_ALIGN is 1. Setting it to 64 for DMA -- a plausible
+      // future change -- would make LVGL compute a 512-byte stride and the
+      // clear loop below would run ~9 KB past the allocation. Checked rather
+      // than assumed, and the scope disables itself rather than corrupting
+      // whatever lives after the buffer.
+      const uint32_t need = (uint32_t)db->header.stride * SCOPE_H;
+      if (need > SCOPE_BUF_BYTES) {
+        LV_LOG_ERROR("scope: buffer too small for stride");
+        canvas_ = nullptr;
+      } else {
+        px_ = (uint16_t *)db->data;
+        stridePx_ = db->header.stride / 2;
+      }
     }
   } else {
     // Loud rather than blank. A scope with no buffer is a platform-layer bug,
@@ -240,6 +252,14 @@ void scopeSample(uint32_t nowMs) {
   for (uint8_t i = 0; i < LEVELS; i++)
     ring_[i][sweep_] = (int16_t)sampleChannel(i, nowMs);
   if (filled_ < SCOPE_W) filled_++;
+
+  // ADVANCED HERE, NOT IN scopeRender(). It used to advance during rendering,
+  // which early-returns when the page is hidden -- so every sample landed in
+  // column 0 while the stock page was up, and entering the scope after 23 s
+  // painted 231 columns of zeros as a solid line pinned to 0 mm. The header of
+  // this file promises data stays current whether or not anyone is looking;
+  // that promise was only true of the ring's CONTENTS, not its cursor.
+  sweep_ = (uint16_t)((sweep_ + 1) % SCOPE_W);
   pendingDraw_ = true;
 }
 
@@ -247,7 +267,9 @@ void scopeRender() {
   if (!canvas_ || !visible_ || !pendingDraw_) return;
   pendingDraw_ = false;
 
-  const uint16_t x = sweep_;
+  // sweep_ points at the column the NEXT sample will use, so the one just
+  // written -- and the one to draw -- is the previous.
+  const uint16_t x = (uint16_t)((sweep_ + SCOPE_W - 1) % SCOPE_W);
   drawColumn(x, true);
 
   // THE POINT OF THE REDESIGN: invalidate the column and its gap, not the
@@ -256,10 +278,21 @@ void scopeRender() {
   lv_area_t a;
   lv_obj_get_coords(canvas_, &a);
   const int32_t left = a.x1 + x;
-  lv_area_t dirty = {left, a.y1, left + (int32_t)GAP + 1, a.y2};
+  const int32_t wantRight = left + (int32_t)GAP + 1;
+  lv_area_t dirty = {left, a.y1, wantRight, a.y2};
   lv_obj_invalidate_area(canvas_, &dirty);
 
-  sweep_ = (uint16_t)((sweep_ + 1) % SCOPE_W);
+  // THE GAP WRAPS AND THE RECTANGLE DOES NOT. drawColumn() blanks
+  // (x + g) % SCOPE_W, so near the right edge it writes columns at the LEFT
+  // edge -- but lv_obj_invalidate_area clips to the object, so those pixels
+  // were correct in the buffer and never pushed to the panel. The visible
+  // effect was the cursor disappearing from the left edge for the last four
+  // columns of every sweep, then snapping back.
+  const int32_t overflow = wantRight - (a.x1 + (int32_t)SCOPE_W - 1);
+  if (overflow > 0) {
+    lv_area_t wrapped = {a.x1, a.y1, a.x1 + overflow, a.y2};
+    lv_obj_invalidate_area(canvas_, &wrapped);
+  }
 
   static uint32_t nextVals = 0;
   const uint32_t now = lv_tick_get();

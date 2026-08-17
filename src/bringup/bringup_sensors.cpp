@@ -86,7 +86,7 @@ void loop(uint32_t nowMs) {
 
   // Published at 5 Hz rather than per iteration. The UI's change detection
   // would discard most of it anyway, and the count only moves when a bowl does.
-  if ((int32_t)(nowMs - nextPublishMs_) < 200) return;
+  if ((int32_t)(nowMs - nextPublishMs_) < 0) return;
   nextPublishMs_ = nowMs + 200;
 
   ui::State s = ui::demoLatest(nowMs);
@@ -102,6 +102,12 @@ void loop(uint32_t nowMs) {
   s.stack = toUiStack(logic_.status());
   s.deviceId = BOWLSTACK_DEVICE_ID;
   s.firmware = BOWLSTACK_FW_VERSION;
+
+  // NO CLOCK ON THIS BOARD. There is no RTC and nothing has supplied a time, so
+  // the status bar shows "--:--" rather than a number. docs/supabase.md already
+  // builds the whole telemetry design around the device having no reliable
+  // time; the screen should not be the one place that pretends otherwise.
+  s.timeKnown = false;
 
   ui::demoOverrideState(s);
 }

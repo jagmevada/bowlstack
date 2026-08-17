@@ -53,4 +53,19 @@ void wifiOnClose(void (*cb)(void));
 // compile and run in the desktop preview.
 void wifiOnJoin(void (*cb)(const char *ssid, const char *pass));
 
+// Rebuilds whatever the setters have invalidated. Call every loop iteration --
+// it early-outs unless something actually changed.
+//
+// It exists because buildWifiPage() runs ONCE, from buildPages(), and on the
+// device that happens before the first scan has returned: the list was built
+// from an empty array and never rebuilt, so the page showed no networks and
+// "not connected" forever no matter what the radio did. The simulator hid it,
+// because there the fixtures are installed before the page is built.
+void wifiTick();
+
+// Returns to the network list and clears the passphrase field. Called when the
+// page is dismissed, so a walk-away does not leave a cleartext key on screen
+// for whoever opens it next.
+void wifiResetView();
+
 }  // namespace ui

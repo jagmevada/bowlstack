@@ -21,6 +21,9 @@ State latest_;
 bool haveLatest_ = false;
 
 bool stateOverride_ = false;
+bool haveWifi_ = false;
+bool wifiConnected_ = false;
+int16_t wifiRssi_ = 0;
 bool battOverride_ = false;
 uint16_t ovCellMv_ = 0, ovPinMv_ = 0;
 int8_t ovPct_ = -1;
@@ -155,10 +158,22 @@ void demoInstallWifiMocks() {
 
 void demoOverrideState(const State &s) {
   latest_ = s;
+  // The radio is a separate source from the sensors and arrives at its own
+  // rate, so the adapter must not be able to stamp stale link state over it.
+  if (haveWifi_) {
+    latest_.wifiConnected = wifiConnected_;
+    latest_.wifiRssi = wifiRssi_;
+  }
   haveLatest_ = true;
   // Stops demoTick() from cycling. Real data outranks fixtures, and the two
   // must not take turns on the same screen.
   stateOverride_ = true;
+}
+
+void demoOverrideWifi(bool connected, int16_t rssi) {
+  wifiConnected_ = connected;
+  wifiRssi_ = rssi;
+  haveWifi_ = true;
 }
 
 void demoOverrideBattery(uint16_t cellMv, uint16_t pinMv, int8_t pct, Battery band) {
@@ -199,22 +214,30 @@ const State &demoLatest(uint32_t nowMs) {
     haveLatest_ = true;
   }
 
-  // A fabricated wall clock so the status bar can be seen working. It starts at
-  // 14:32 and runs a minute per real second, which is fast enough to watch and
-  // slow enough to read.
+  // The fabricated wall clock is a FIXTURE and stops the moment real data
+  // arrives. It used to run unconditionally and AFTER demoOverrideState() had
+  // stored measured values, so on hardware it clobbered whatever the adapter
+  // set and put a clock reading 60x real time on a board that has no RTC at
+  // all -- a confident wrong answer, which is the one kind this codebase is
+  // built to avoid.
   //
-  // Except when WiFi is down: the device has no RTC, so with no link there is
-  // nothing to have learned the time FROM. Leaving timeKnown false there is not
-  // a nicety -- it is the only state the real firmware can ever be in on a cold
-  // boot, and it is worth seeing on screen rather than discovering later.
-  if (latest_.wifiConnected) {
-    const uint32_t mins = (14 * 60 + 32) + (nowMs / 1000);
-    latest_.timeKnown = true;
-    latest_.hh = (uint8_t)((mins / 60) % 24);
-    latest_.mm = (uint8_t)(mins % 60);
-  } else {
-    latest_.timeKnown = false;
+  // With real data the honest value is timeKnown = false, because there is
+  // still no RTC and nothing has supplied a time. See ui_state.h.
+  //
+  // Scoped rather than an early return: the BATTERY override below is a real
+  // measurement and must still be applied on hardware, where stateOverride_ is
+  // always set. An early return here would have silently disabled it.
+  if (!stateOverride_) {
+    if (latest_.wifiConnected) {
+      const uint32_t mins = (14 * 60 + 32) + (nowMs / 1000);
+      latest_.timeKnown = true;
+      latest_.hh = (uint8_t)((mins / 60) % 24);
+      latest_.mm = (uint8_t)(mins % 60);
+    } else {
+      latest_.timeKnown = false;
+    }
   }
+
   if (battOverride_) {
     latest_.batteryMv = ovCellMv_;
     latest_.batteryPinMv = ovPinMv_;

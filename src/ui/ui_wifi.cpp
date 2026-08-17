@@ -33,6 +33,17 @@ lv_obj_t *lblPassSsid_ = nullptr;
 lv_obj_t *taPass_ = nullptr;
 lv_obj_t *kb_ = nullptr;
 lv_obj_t *btnShift_ = nullptr;
+lv_obj_t *body_ = nullptr;
+lv_obj_t *lblConn_ = nullptr;
+lv_obj_t *lblRssi_ = nullptr;
+lv_obj_t *lblMac_ = nullptr;
+lv_obj_t *qrSep_ = nullptr;
+lv_obj_t *qrBox_ = nullptr;
+
+// Set by the setters, consumed by wifiTick(). Rebuilding rows is cheap at a
+// 20 s scan cadence and impossible to get wrong; diffing them would be neither.
+bool netsDirty_ = true;
+bool statusDirty_ = true;
 
 void (*onClose_)(void) = nullptr;
 void (*onJoin_)(const char *, const char *) = nullptr;
@@ -187,7 +198,7 @@ lv_obj_t *iconButton(lv_obj_t *parent, const char *label, int16_t w, int16_t h,
   return b;
 }
 
-void addNetworkRow(lv_obj_t *parent, uint8_t idx) {
+lv_obj_t *addNetworkRow(lv_obj_t *parent, uint8_t idx) {
   lv_obj_t *row = lv_obj_create(parent);
   lv_obj_set_width(row, LV_PCT(100));
   lv_obj_set_height(row, 30);
@@ -218,6 +229,7 @@ void addNetworkRow(lv_obj_t *parent, uint8_t idx) {
   lv_obj_set_style_text_font(meta, &lv_font_montserrat_14, LV_PART_MAIN);
   lv_obj_set_style_text_color(meta, lv_color_hex(C_MUTED), LV_PART_MAIN);
   lv_label_set_text_fmt(meta, "%s%u/4", nets_[idx].secured ? "*" : "", barsFor(nets_[idx].rssi));
+  return row;
 }
 
 }  // namespace
@@ -232,11 +244,60 @@ void wifiSetSetupAp(const char *ssid, const char *pass) {
 void wifiSetNetworks(const Network *list, uint8_t count) {
   netCount_ = count > WIFI_MAX_NETWORKS ? WIFI_MAX_NETWORKS : count;
   for (uint8_t i = 0; i < netCount_; i++) nets_[i] = list[i];
+  netsDirty_ = true;
 }
 void wifiSetConnected(const char *ssid, int16_t rssi, const char *ip) {
+  const bool changed = (strcmp(connSsid_, ssid ? ssid : "") != 0) ||
+                       (strcmp(connIp_, ip ? ip : "") != 0) || (connRssi_ != rssi);
   snprintf(connSsid_, sizeof(connSsid_), "%s", ssid ? ssid : "");
   snprintf(connIp_, sizeof(connIp_), "%s", ip ? ip : "");
   connRssi_ = rssi;
+  // Compared before flagging: this is called at 1 Hz with an RSSI that drifts
+  // constantly, and rebuilding on every call would undo the page's own change
+  // detection.
+  if (changed) statusDirty_ = true;
+}
+
+void wifiResetView() {
+  if (!viewPass_ || !viewMain_) return;
+  if (taPass_) lv_textarea_set_text(taPass_, "");
+  upper_ = false;
+  symbols_ = false;
+  rightHalf_ = false;
+  showPassView(false);
+}
+
+void wifiTick() {
+  if (statusDirty_ && lblConn_ && lblRssi_ && lblMac_) {
+    statusDirty_ = false;
+    if (connSsid_[0]) {
+      lv_obj_set_style_text_color(lblConn_, lv_color_hex(C_OK), LV_PART_MAIN);
+      lv_label_set_text(lblConn_, connSsid_);
+      lv_label_set_text_fmt(lblRssi_, "%d dBm", connRssi_);
+      lv_label_set_text(lblMac_, connIp_[0] ? connIp_ : mac_);
+    } else {
+      lv_obj_set_style_text_color(lblConn_, lv_color_hex(C_FAULT), LV_PART_MAIN);
+      lv_label_set_text(lblConn_, "not connected");
+      lv_label_set_text(lblRssi_, "");
+      lv_label_set_text(lblMac_, mac_);
+    }
+  }
+
+  if (netsDirty_ && body_) {
+    netsDirty_ = false;
+    // Delete only the ROWS. The separator and the QR box are children of the
+    // same container and must survive, so they are moved to the end rather than
+    // rebuilt -- a QR regenerates its whole symbol on creation.
+    while (lv_obj_get_child_count(body_) > 0) {
+      lv_obj_t *c = lv_obj_get_child(body_, 0);
+      if (c == qrSep_ || c == qrBox_) break;
+      lv_obj_delete(c);
+    }
+    for (uint8_t i = 0; i < netCount_; i++) {
+      lv_obj_t *row = addNetworkRow(body_, i);
+      lv_obj_move_to_index(row, (int32_t)i);
+    }
+  }
 }
 void wifiOnClose(void (*cb)(void)) { onClose_ = cb; }
 void wifiOnJoin(void (*cb)(const char *, const char *)) { onJoin_ = cb; }
@@ -291,7 +352,8 @@ void buildWifiPage(lv_obj_t *parent) {
   lv_obj_set_style_text_color(title, lv_color_hex(C_TEXT), LV_PART_MAIN);
   lv_label_set_text(title, "WiFi");
 
-  lv_obj_t *lblRssi = lv_label_create(titleCol);
+  lblRssi_ = lv_label_create(titleCol);
+  lv_obj_t *lblRssi = lblRssi_;
   lv_obj_set_style_text_font(lblRssi, &lv_font_montserrat_14, LV_PART_MAIN);
   lv_obj_set_style_text_color(lblRssi, lv_color_hex(C_MUTED), LV_PART_MAIN);
   // Blank rather than "0 dBm" when there is no link. An RSSI is a measurement
@@ -310,7 +372,8 @@ void buildWifiPage(lv_obj_t *parent) {
   lv_obj_set_flex_flow(info, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_flex_align(info, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_END);
 
-  lv_obj_t *lblConn = lv_label_create(info);
+  lblConn_ = lv_label_create(info);
+  lv_obj_t *lblConn = lblConn_;
   lv_obj_set_style_text_font(lblConn, &lv_font_montserrat_14, LV_PART_MAIN);
   lv_label_set_long_mode(lblConn, LV_LABEL_LONG_DOT);
   lv_obj_set_width(lblConn, 124);
@@ -323,7 +386,8 @@ void buildWifiPage(lv_obj_t *parent) {
     lv_label_set_text(lblConn, "not connected");
   }
 
-  lv_obj_t *lblMac = lv_label_create(info);
+  lblMac_ = lv_label_create(info);
+  lv_obj_t *lblMac = lblMac_;
   lv_obj_set_style_text_font(lblMac, &lv_font_montserrat_14, LV_PART_MAIN);
   lv_obj_set_style_text_color(lblMac, lv_color_hex(C_MUTED), LV_PART_MAIN);
   lv_obj_set_width(lblMac, 124);
@@ -337,7 +401,8 @@ void buildWifiPage(lv_obj_t *parent) {
   // network is the everyday case and now needs no scrolling; the phone-based
   // setup is deliberate enough that scrolling to it is no burden, and it earns
   // a QR big enough to scan from a comfortable distance in return.
-  lv_obj_t *body = lv_obj_create(viewMain_);
+  body_ = lv_obj_create(viewMain_);
+  lv_obj_t *body = body_;
   lv_obj_set_width(body, LV_PCT(100));
   lv_obj_set_flex_grow(body, 1);
   lv_obj_set_style_bg_opa(body, LV_OPA_TRANSP, LV_PART_MAIN);
@@ -354,13 +419,15 @@ void buildWifiPage(lv_obj_t *parent) {
 
   for (uint8_t i = 0; i < netCount_; i++) addNetworkRow(body, i);
 
-  lv_obj_t *sep = lv_label_create(body);
+  qrSep_ = lv_label_create(body);
+  lv_obj_t *sep = qrSep_;
   lv_obj_set_style_text_font(sep, &lv_font_montserrat_14, LV_PART_MAIN);
   lv_obj_set_style_text_color(sep, lv_color_hex(C_MUTED), LV_PART_MAIN);
   lv_obj_set_style_margin_top(sep, 6, LV_PART_MAIN);
   lv_label_set_text(sep, "or set up from your phone:");
 
-  lv_obj_t *qrBox = lv_obj_create(body);
+  qrBox_ = lv_obj_create(body);
+  lv_obj_t *qrBox = qrBox_;
   lv_obj_set_style_bg_color(qrBox, lv_color_hex(0xFFFFFF), LV_PART_MAIN);
   lv_obj_set_style_border_width(qrBox, 0, LV_PART_MAIN);
   lv_obj_set_style_radius(qrBox, 4, LV_PART_MAIN);
@@ -389,8 +456,8 @@ void buildWifiPage(lv_obj_t *parent) {
   uint16_t modules = 21;                  // v1, <= 14 bytes
   if (plen > 106) modules = 41;           // v6
   else if (plen > 84) modules = 37;       // v5
-  else if (plen > 62) modules = 33;       // v4
-  else if (plen > 42) modules = 33;       // v4
+  else if (plen > 62) modules = 37;       // v5 -- 63..84 bytes
+  else if (plen > 42) modules = 33;       // v4 -- 43..62 bytes
   else if (plen > 26) modules = 29;       // v3
   else if (plen > 14) modules = 25;       // v2
 

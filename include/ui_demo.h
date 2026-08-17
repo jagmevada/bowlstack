@@ -80,4 +80,10 @@ void demoOverrideBattery(uint16_t cellMv, uint16_t pinMv, int8_t pct, Battery ba
 // board today.
 void demoOverrideState(const State &s);
 
+// Link state from the radio. Separate from demoOverrideState because the two
+// arrive from different places at different rates, and the status bar showed
+// four solid signal bars on a disconnected device when the fixture's value was
+// allowed to ride along with the sensor state.
+void demoOverrideWifi(bool connected, int16_t rssi);
+
 }  // namespace ui

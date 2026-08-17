@@ -29,6 +29,10 @@ lv_obj_t *detailBatt_ = nullptr;
 lv_obj_t *detailOpen_ = nullptr;
 
 void closeDetail() {
+  // Back to the network list AND clear the field. The passphrase box is
+  // deliberately unmasked (see ui_wifi.cpp), so leaving it populated after an
+  // idle timeout would show the key to whoever walks up next.
+  wifiResetView();
   if (detailWifi_) lv_obj_add_flag(detailWifi_, LV_OBJ_FLAG_HIDDEN);
   if (detailBatt_) lv_obj_add_flag(detailBatt_, LV_OBJ_FLAG_HIDDEN);
   detailOpen_ = nullptr;
@@ -175,6 +179,13 @@ void pagesTick(uint32_t nowMs) {
   // The battery page is the exception that proves the rule: it IS visible, so
   // it gets updated. It shows live measurements, and a diagnostic screen frozen
   // at whatever the values were when it opened would be worse than none.
+  // Before the early return: the measurement window has to keep closing while
+  // an overlay is up, or the console reprints stale fps/busy figures for the
+  // whole time someone is poking at the device -- which is precisely when the
+  // numbers are being read.
+  wifiTick();
+  perfTick(nowMs);
+
   if (detailOpen_) {
     if (detailOpen_ == detailBatt_) updateBatteryPage(s);
     return;
@@ -201,12 +212,8 @@ void pagesTick(uint32_t nowMs) {
     // Once a second, not per frame: the readout is a line of text, and
     // rewriting it at frame rate would be its own measurable cost inside the
     // thing it is measuring.
-    if (perfTick(nowMs)) scopeShowPerf();
+    scopeShowPerf();
   }
-
-  // perfTick still has to run when the scope is not the visible page, or the
-  // window never closes and the console figures go stale.
-  if (active != tileScope_) perfTick(nowMs);
 }
 
 }  // namespace ui
