@@ -33,6 +33,8 @@
 
 #include <esp_mac.h>
 
+#include "bringup_wifi.h"
+
 #include "battery_soc.h"
 #include "board_waveshare_s3.h"
 #include "lgfx_waveshare_s3.h"
@@ -304,7 +306,9 @@ void setup() {
     ui::wifiSetSetupAp(apSsid, "bowlstack");
     Serial.printf("  mac %s\n", macStr);
   }
-  ui::demoInstallWifiMocks();
+  // Scan results and connection state now come from the radio. The rest of
+  // ui_demo's fixtures stay: the bowl count has no sensors behind it yet.
+  bringup_wifi::begin();
 
   ui::perfBegin();
 
@@ -349,6 +353,7 @@ void loop() {
   // ui::pixelShiftTick(millis());
 
   // Drives both pages, same clock and same cadence as the desktop preview.
+  bringup_wifi::loop(millis());
   ui::pagesTick(millis());
 
   // Feed the REAL battery into the UI. This is a legitimate platform-specific
