@@ -69,4 +69,15 @@ void demoInstallWifiMocks();
 // having to discharge an actual battery to see them.
 void demoOverrideBattery(uint16_t cellMv, uint16_t pinMv, int8_t pct, Battery band);
 
+// Replaces the fabricated bowl state with a measured one, and STOPS the
+// scenario cycle. Once real sensors are talking, rotating through fixtures
+// would overwrite them a third of a second later -- and a screen that alternates
+// between the truth and a demo is worse than either.
+//
+// The battery override stays separate because the two arrive from different
+// places at different rates, and either can exist without the other: sensors
+// wired but no cell, or a cell but no sensors, are both real states of this
+// board today.
+void demoOverrideState(const State &s);
+
 }  // namespace ui

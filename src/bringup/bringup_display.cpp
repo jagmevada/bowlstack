@@ -33,6 +33,7 @@
 
 #include <esp_mac.h>
 
+#include "bringup_sensors.h"
 #include "bringup_wifi.h"
 
 #include "battery_soc.h"
@@ -309,6 +310,7 @@ void setup() {
   // Scan results and connection state now come from the radio. The rest of
   // ui_demo's fixtures stay: the bowl count has no sensors behind it yet.
   bringup_wifi::begin();
+  bringup_sensors::begin();
 
   ui::perfBegin();
 
@@ -354,6 +356,7 @@ void loop() {
 
   // Drives both pages, same clock and same cadence as the desktop preview.
   bringup_wifi::loop(millis());
+  bringup_sensors::loop(millis());
   ui::pagesTick(millis());
 
   // Feed the REAL battery into the UI. This is a legitimate platform-specific

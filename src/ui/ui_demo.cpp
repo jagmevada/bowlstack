@@ -20,6 +20,7 @@ bool armed_ = false;
 State latest_;
 bool haveLatest_ = false;
 
+bool stateOverride_ = false;
 bool battOverride_ = false;
 uint16_t ovCellMv_ = 0, ovPinMv_ = 0;
 int8_t ovPct_ = -1;
@@ -152,6 +153,14 @@ void demoInstallWifiMocks() {
   wifiSetConnected(nullptr, 0, nullptr);
 }
 
+void demoOverrideState(const State &s) {
+  latest_ = s;
+  haveLatest_ = true;
+  // Stops demoTick() from cycling. Real data outranks fixtures, and the two
+  // must not take turns on the same screen.
+  stateOverride_ = true;
+}
+
 void demoOverrideBattery(uint16_t cellMv, uint16_t pinMv, int8_t pct, Battery band) {
   battOverride_ = true;
   ovCellMv_ = cellMv;
@@ -173,6 +182,8 @@ bool demoTick(uint32_t nowMs) {
     armed_ = true;
     nextAt_ = nowMs;
   }
+  // Fixtures stop the moment real sensor data arrives.
+  if (stateOverride_) return false;
   if ((int32_t)(nowMs - nextAt_) < 0) return false;
 
   nextAt_ = nowMs + DWELL_MS;

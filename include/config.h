@@ -39,10 +39,31 @@ static const uint32_t SERIAL_BAUD = 115200;
 // bus cannot take down the whole array.
 // Verified against the board: on I2C0, SDA is on 17 and SCL on 16, NOT the
 // other way round. I2C1 is conventional.
+#if BOWLSTACK_BOARD_WAVESHARE_S3
+// ONE BUS, NOT TWO, and that is forced rather than chosen. The ESP32-S3 has two
+// I2C controllers and the panel's touch chip plus the IMU already occupy one of
+// them on GPIO47/48 -- so the discrete build's blast-radius split, four sensors
+// across two buses, cannot be reproduced here. Both entries point at the same
+// pair; the SensorConfig table keeps its shape so nothing above has to know.
+//
+// GPIO21/16 is the camera's SCCB pair: a complete I2C bus with 4.7k pull-ups
+// already fitted (R4, R5) and broken out on header P1, idle because this
+// project will never fit a camera. See docs/waveshare_port.md.
+//
+// The containment that the two-bus split provided comes back with the TCA9548A
+// in todo.md, which isolates PER SENSOR rather than per pair and is therefore
+// strictly better at the job. Until then a locked bus is still DETECTED -- the
+// 0xFFFF signature and SENSOR_STALE_MS both still fire -- just not contained.
+static const uint8_t I2C0_SDA = 21;
+static const uint8_t I2C0_SCL = 16;
+static const uint8_t I2C1_SDA = 21;
+static const uint8_t I2C1_SCL = 16;
+#else
 static const uint8_t I2C0_SDA = 17;
 static const uint8_t I2C0_SCL = 16;
 static const uint8_t I2C1_SDA = 21;
 static const uint8_t I2C1_SCL = 22;
+#endif
 static const uint32_t I2C_HZ = 400000;
 
 // --- per-sensor wiring -----------------------------------------------------
@@ -202,7 +223,14 @@ static const float HEALTH_BLINK_WIFI_HZ = 2.0f;
 // GPIO35 is input-only, which ruled it out for XSHUT but makes it ideal here.
 // It is ADC1: ADC2 is unusable whenever WiFi is active, so an ADC1 pin is
 // mandatory given the telemetry phase to come.
+#if BOWLSTACK_BOARD_WAVESHARE_S3
+// GPIO5 (ADC1_CH4), and the divider is ALREADY ON THE BOARD: R19 200k / R20
+// 100k / C31, ratio 3.0 rather than the discrete build's 2.0. Fitting another
+// in parallel would load this one and skew every reading.
+static const uint8_t PIN_BATTERY_ADC = 5;
+#else
 static const uint8_t PIN_BATTERY_ADC = 35;
+#endif
 
 // --- charger sense ---------------------------------------------------------
 // Charger 5 V rail through a 10k series resistor to GPIO27, ACTIVE HIGH, with
