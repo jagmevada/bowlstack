@@ -20,6 +20,11 @@ lv_obj_t *canvas_ = nullptr;
 lv_obj_t *lblFps_ = nullptr;
 lv_obj_t *lblVals_ = nullptr;
 void *buf_ = nullptr;
+void (*onClose_)(void) = nullptr;
+
+void closeClicked(lv_event_t *) {
+  if (onClose_) onClose_();
+}
 
 bool visible_ = false;
 uint32_t lastSampleMs_ = 0;
@@ -185,6 +190,7 @@ int32_t sampleChannel(uint8_t i, uint32_t nowMs) {
 }  // namespace
 
 void scopeSetBuffer(void *buf) { buf_ = buf; }
+void scopeOnClose(void (*cb)(void)) { onClose_ = cb; }
 
 void buildScope(lv_obj_t *parent) {
   lv_obj_set_style_bg_color(parent, lv_color_hex(C_BG), LV_PART_MAIN);
@@ -194,12 +200,36 @@ void buildScope(lv_obj_t *parent) {
   lv_obj_set_flex_flow(parent, LV_FLEX_FLOW_COLUMN);
   lv_obj_remove_flag(parent, LV_OBJ_FLAG_SCROLLABLE);
 
-  lblFps_ = lv_label_create(parent);
+  // The back button shares the perf line's row rather than taking a header of
+  // its own. A 30 px header would have pushed the canvas past the page height
+  // and cost plot area; this costs nothing vertical, and the perf text is the
+  // one element here that was never going to fill the width.
+  lv_obj_t *top = lv_obj_create(parent);
+  lv_obj_set_size(top, LV_PCT(100), 30);
+  lv_obj_set_style_bg_opa(top, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_border_width(top, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_all(top, 0, LV_PART_MAIN);
+  lv_obj_set_style_pad_column(top, 6, LV_PART_MAIN);
+  lv_obj_remove_flag(top, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(top, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(top, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER);
+
+  lblFps_ = lv_label_create(top);
   lv_obj_set_style_text_font(lblFps_, &lv_font_montserrat_14, LV_PART_MAIN);
   lv_obj_set_style_text_color(lblFps_, lv_color_hex(C_TEXT), LV_PART_MAIN);
-  lv_obj_set_width(lblFps_, LV_PCT(100));
+  lv_obj_set_flex_grow(lblFps_, 1);
   lv_label_set_long_mode(lblFps_, LV_LABEL_LONG_WRAP);
   lv_label_set_text(lblFps_, "measuring...");
+
+  lv_obj_t *back = lv_button_create(top);
+  lv_obj_set_size(back, 42, 28);
+  lv_obj_set_style_radius(back, 4, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(back, lv_color_hex(0x21262D), LV_PART_MAIN);
+  lv_obj_add_event_cb(back, closeClicked, LV_EVENT_CLICKED, nullptr);
+  lv_obj_t *bl = lv_label_create(back);
+  lv_label_set_text(bl, LV_SYMBOL_LEFT);
+  lv_obj_center(bl);
 
   if (buf_) {
     canvas_ = lv_canvas_create(parent);

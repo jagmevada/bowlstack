@@ -168,6 +168,7 @@ void buildPages() {
 
   detailSensor_ = makeDetail(scr);
   buildScope(detailSensor_);
+  scopeOnClose(back);
 
   detailDevice_ = makeDetail(scr);
   lv_obj_t *device = menuCreate(detailDevice_, "Device", back);

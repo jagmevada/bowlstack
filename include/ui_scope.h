@@ -77,6 +77,11 @@ void scopeRender();
 // is there rather than sweeping in from nothing.
 void scopeSetVisible(bool visible);
 
+// Back button. The scope was the ONE page in the tree with no way out -- every
+// other sub-page has a back or close control, and here the 60 s idle timeout
+// was the only exit, which is a stall rather than a way back.
+void scopeOnClose(void (*cb)(void));
+
 uint16_t scopeFps();
 void scopeShowPerf();
 
