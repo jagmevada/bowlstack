@@ -215,7 +215,13 @@ void pagesTick(uint32_t nowMs) {
   if (menuRoot_) menuSetHint(menuRoot_, 1, s.sensorsOnline ? "" : "offline");
 
   wifiTick();
-  perfTick(nowMs);
+  // Return value CAPTURED, not discarded. perfTick() is true only when a fresh
+  // one-second window has closed, and it is what gates the on-screen readout.
+  // Losing that guard in the menu restructure meant scopeShowPerf() rewrote its
+  // label on every tick -- measured at 31 fps and 64% of a core on a page whose
+  // data arrives at 10 Hz, which is the same "write unconditionally" mistake
+  // this whole optimisation pass was about.
+  const bool perfFresh = perfTick(nowMs);
 
 #if UI_AUTO_CYCLE_MS
   {
@@ -252,7 +258,7 @@ void pagesTick(uint32_t nowMs) {
       updateBatteryPage(s);
     } else if (top == detailSensor_) {
       scopeRender();
-      scopeShowPerf();
+      if (perfFresh) scopeShowPerf();
     }
     return;
   }

@@ -34,6 +34,7 @@
 #include <esp_mac.h>
 
 #include "bringup_sensors.h"
+#include "bringup_time.h"
 #include "bringup_wifi.h"
 
 #include "battery_soc.h"
@@ -326,6 +327,7 @@ void setup() {
   // ui_demo's fixtures stay: the bowl count has no sensors behind it yet.
   bringup_wifi::begin();
   bringup_sensors::begin();
+  bringup_time::begin();
 
   ui::perfBegin();
 
@@ -372,7 +374,16 @@ void loop() {
   // measuring neither of them. The figure has to cover everything the loop does
   // or it cannot support that argument.
   ui::perfFrameStart(millis());
-  lv_timer_handler();
+  ui::perfUiStart(millis());
+  // lv_timer_handler RETURNS how long until it next needs calling, and that
+  // return value is the difference between 10% of a core and ~1%.
+  //
+  // Called blindly every 5 ms it ran ~200 times a second, walking its timer
+  // list and scanning for invalid areas each time -- measured at 10% busy while
+  // drawing ZERO pixels. That is pure polling overhead on a screen showing a
+  // number that changes every three seconds.
+  const uint32_t nextMs = lv_timer_handler();
+  ui::perfUiEnd(millis());
 
   // Pixel shift is OFF -- see todo.md.
   // ui::pixelShiftTick(millis());
@@ -380,6 +391,7 @@ void loop() {
   // Drives both pages, same clock and same cadence as the desktop preview.
   bringup_wifi::loop(millis());
   bringup_sensors::loop(millis());
+  bringup_time::publish();
   ui::pagesTick(millis());
   ui::perfFrameEnd(millis());
 
@@ -436,5 +448,12 @@ void loop() {
                   lastCellMv_, ESP.getFreeHeap());
   }
 
-  delay(5);
+  // Sleep until LVGL actually wants attention, bounded at both ends: at least
+  // 2 ms so the loop always yields to the WiFi and time tasks, at most 20 ms so
+  // touch latency stays under a frame. LV_NO_TIMER_READY comes back when there
+  // is nothing pending at all.
+  uint32_t sleepMs = (nextMs == LV_NO_TIMER_READY) ? 20 : nextMs;
+  if (sleepMs < 2) sleepMs = 2;
+  if (sleepMs > 20) sleepMs = 20;
+  delay(sleepMs);
 }

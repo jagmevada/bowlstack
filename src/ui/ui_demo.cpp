@@ -22,6 +22,9 @@ bool haveLatest_ = false;
 
 bool stateOverride_ = false;
 bool haveWifi_ = false;
+bool haveTime_ = false;
+bool timeKnown_ = false;
+uint8_t timeHH_ = 0, timeMM_ = 0;
 bool wifiConnected_ = false;
 int16_t wifiRssi_ = 0;
 bool battOverride_ = false;
@@ -170,6 +173,13 @@ void demoOverrideState(const State &s) {
   stateOverride_ = true;
 }
 
+void demoOverrideTime(bool known, uint8_t hh, uint8_t mm) {
+  haveTime_ = true;
+  timeKnown_ = known;
+  timeHH_ = hh;
+  timeMM_ = mm;
+}
+
 void demoOverrideWifi(bool connected, int16_t rssi) {
   wifiConnected_ = connected;
   wifiRssi_ = rssi;
@@ -236,6 +246,14 @@ const State &demoLatest(uint32_t nowMs) {
     } else {
       latest_.timeKnown = false;
     }
+  }
+
+  // A real clock outranks both the fixture and the sensor adapter's
+  // timeKnown = false. Applied last so nothing downstream can undo it.
+  if (haveTime_) {
+    latest_.timeKnown = timeKnown_;
+    latest_.hh = timeHH_;
+    latest_.mm = timeMM_;
   }
 
   if (battOverride_) {

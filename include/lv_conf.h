@@ -90,16 +90,20 @@
 #define LV_USE_OS LV_OS_NONE
 
 // --- timing ----------------------------------------------------------------
-// LVGL's default refresh period is 33 ms, i.e. a HARD 30 FPS CEILING that has
-// nothing to do with what the hardware can do. Measuring the scope page against
-// that default would have produced a confident "30 FPS" that was really just
-// this constant being read back.
+// 25 ms. This was briefly 10 ms, to establish what the renderer could do
+// without the timer capping it -- LVGL's 33 ms default is a hard 30 FPS ceiling
+// that has nothing to do with the hardware, and measuring against it would have
+// produced a confident "30 FPS" that was really this constant read back.
 //
-// 10 ms puts the ceiling at 100 FPS, well above anything a 40 MHz SPI panel can
-// sustain, so the number on screen is the renderer's and the bus's limit rather
-// than the timer's. Nothing redraws when nothing is invalidated, so a static
-// screen still costs nothing.
-#define LV_DEF_REFR_PERIOD 10
+// That measurement is done, and 10 ms is now the wrong answer: it fires the
+// refresh timer 100 times a second, and each fire walks the object tree looking
+// for invalid areas whether or not anything changed. Measured at 9-10% of a
+// core on a STATIC screen drawing zero pixels -- pure polling.
+//
+// The scope is data-bound at the sensors' 10 Hz, so a 40 FPS ceiling is already
+// four times more headroom than anything can use, and the tree gets scanned 40
+// times a second instead of 100.
+#define LV_DEF_REFR_PERIOD 25
 // LVGL 9 takes the tick source at RUNTIME via lv_tick_set_cb(millis), so there
 // is no LV_TICK_CUSTOM block here the way v8 needed one. Mentioned because its
 // absence looks like an omission when porting a v8 config.

@@ -86,4 +86,9 @@ void demoOverrideState(const State &s);
 // allowed to ride along with the sensor state.
 void demoOverrideWifi(bool connected, int16_t rssi);
 
+// Wall clock from NTP. Separate again, because it arrives from a third place on
+// a third cadence -- and because on this board it is legitimately absent until
+// a sync lands, which is a state the bar has to be able to show.
+void demoOverrideTime(bool known, uint8_t hh, uint8_t mm);
+
 }  // namespace ui

@@ -42,6 +42,14 @@ void perfBegin();
 // and from the outside they are indistinguishable.
 void perfFlush(uint32_t px);
 
+// Brackets the LVGL half specifically, inside the whole-iteration bracket.
+// Two figures rather than one, because "the UI costs X" and "the loop costs X"
+// are different claims and only the first answers "how much is the screen
+// charging me". The difference between them is the sensors, the radio and the
+// clock.
+void perfUiStart(uint32_t nowMs);
+void perfUiEnd(uint32_t nowMs);
+
 void perfFrameStart(uint32_t nowMs);
 void perfFrameEnd(uint32_t nowMs);
 
@@ -50,6 +58,7 @@ bool perfTick(uint32_t nowMs);
 
 uint16_t perfFps();
 uint8_t perfBusyPct();
+uint8_t perfUiPct();
 uint16_t perfWorstMs();
 
 // Pixels pushed per refresh, averaged over the window, and flushes per refresh.

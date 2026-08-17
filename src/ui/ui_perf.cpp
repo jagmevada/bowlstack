@@ -13,6 +13,9 @@ uint32_t pxPerFrame_ = 0;
 uint16_t flushPerFrame_ = 0;
 uint32_t windowStart_ = 0;
 uint32_t busyAccum_ = 0;
+uint32_t uiAccum_ = 0;
+uint32_t uiEnter_ = 0;
+uint8_t uiPct_ = 0;
 uint32_t frameEnter_ = 0;
 uint16_t worstMs_ = 0;
 
@@ -38,6 +41,9 @@ void perfFlush(uint32_t px) {
   flushes_++;
 }
 
+void perfUiStart(uint32_t nowMs) { uiEnter_ = nowMs; }
+void perfUiEnd(uint32_t nowMs) { uiAccum_ += nowMs - uiEnter_; }
+
 void perfFrameStart(uint32_t nowMs) { frameEnter_ = nowMs; }
 
 void perfFrameEnd(uint32_t nowMs) {
@@ -57,6 +63,8 @@ bool perfTick(uint32_t nowMs) {
 
   fps_ = (uint16_t)((frames_ * 1000UL) / elapsed);
   busyPct_ = (uint8_t)((busyAccum_ * 100UL) / elapsed);
+  uiPct_ = (uint8_t)((uiAccum_ * 100UL) / elapsed);
+  if (uiPct_ > 100) uiPct_ = 100;
   if (busyPct_ > 100) busyPct_ = 100;
   worstReported_ = worstMs_;
 
@@ -67,6 +75,7 @@ bool perfTick(uint32_t nowMs) {
 
   frames_ = 0;
   busyAccum_ = 0;
+  uiAccum_ = 0;
   worstMs_ = 0;
   windowStart_ = nowMs;
 
@@ -80,6 +89,7 @@ bool perfTick(uint32_t nowMs) {
 
 uint16_t perfFps() { return fps_; }
 uint8_t perfBusyPct() { return busyPct_; }
+uint8_t perfUiPct() { return uiPct_; }
 uint16_t perfWorstMs() { return worstReported_; }
 uint32_t perfPxPerFrame() { return pxPerFrame_; }
 uint16_t perfFlushesPerFrame() { return flushPerFrame_; }
@@ -90,8 +100,8 @@ void perfFormat(char *buf, uint32_t len) {
   // slow frame is the bus or the renderer.
   const uint32_t spiUs = (pxPerFrame_ * 2UL * 8UL) / 40UL;
   snprintf(buf, len,
-           "fps %u busy %u%% worst %ums | %lupx/f %uflush spi~%lums | lvgl %luk/%luk frag %u%%",
-           fps_, busyPct_, worstReported_, (unsigned long)pxPerFrame_, flushPerFrame_,
+           "fps %u ui %u%% loop %u%% worst %ums | %lupx/f %uflush spi~%lums | lvgl %luk/%luk frag %u%%",
+           fps_, uiPct_, busyPct_, worstReported_, (unsigned long)pxPerFrame_, flushPerFrame_,
            (unsigned long)(spiUs / 1000), (unsigned long)(memUsed_ / 1024),
            (unsigned long)(memTotal_ / 1024), memFrag_);
 }

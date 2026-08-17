@@ -1,5 +1,7 @@
 #include "ui_scope.h"
 
+#include <string.h>
+
 #include "ui_perf.h"
 #include "ui_state.h"
 
@@ -392,6 +394,10 @@ void scopeShowPerf() {
   if (!visible_ || !lblFps_) return;
   char buf[128];
   perfFormat(buf, sizeof(buf));
+  // Compared before writing, like every other update path here. The caller
+  // already gates this to once a second; this makes a future caller that
+  // forgets cost nothing rather than 60% of a core.
+  if (strcmp(lv_label_get_text(lblFps_), buf) == 0) return;
   lv_label_set_text(lblFps_, buf);
 }
 
