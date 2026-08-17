@@ -112,8 +112,23 @@ void SensorArray::maybeRecover(uint8_t level, uint32_t now) {
 }
 
 void SensorArray::begin() {
+#if BOWLSTACK_BOARD_WAVESHARE_S3
+  // WIRE BELONGS TO THE TOUCHSCREEN ON THIS BOARD. Do not touch it.
+  //
+  // The panel's CST816D and the QMI8658 sit on I2C port 0 at GPIO47/48, and
+  // LovyanGFX configures that port when the display starts. Calling
+  // Wire.begin(21, 16) here re-points the same controller at the sensor pins,
+  // and the touch controller silently stops answering -- the display keeps
+  // working perfectly, so it presents as "touch broke" with no error anywhere
+  // and nothing pointing at the sensor code that caused it.
+  //
+  // Both SensorConfig entries reference Wire1 on this board (see config.cpp),
+  // so port 0 is not needed here at all.
+  Wire1.begin(config::I2C1_SDA, config::I2C1_SCL, config::I2C_HZ);
+#else
   Wire.begin(config::I2C0_SDA, config::I2C0_SCL, config::I2C_HZ);
   Wire1.begin(config::I2C1_SDA, config::I2C1_SCL, config::I2C_HZ);
+#endif
 
   // Force every sensor into reset FIRST. An ESP32-only reset (watchdog, soft
   // reboot, serial upload) does not power-cycle the sensors, so they would
@@ -236,8 +251,14 @@ uint8_t SensorArray::initialisedCount() const {
 }
 
 void SensorArray::printDiagnostics() const {
+#if BOWLSTACK_BOARD_WAVESHARE_S3
+  // Only the sensor bus. Scanning Wire would issue transactions on the
+  // touchscreen's controller -- see begin() for why that is not harmless here.
+  scanBus(Wire1, "sensors");
+#else
   scanBus(Wire, "I2C0");
   scanBus(Wire1, "I2C1");
+#endif
 
   // Tell "absent" apart from "already addressed". If a sensor's XSHUT is not
   // actually wired to its GPIO, we cannot force it back to 0x29, so after a
