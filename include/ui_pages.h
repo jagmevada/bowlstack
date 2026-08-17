@@ -26,6 +26,9 @@ void pagesTick(uint32_t nowMs);
 // timeout, and available to anything else that needs to get home.
 void pagesGoHome();
 
+// Up one level in the menu tree. Wired to every sub-page's back button.
+void pagesBack();
+
 // How long without a touch before the UI returns to the stock page.
 //
 // A device left on the WiFi page is a device whose primary readout -- the bowl

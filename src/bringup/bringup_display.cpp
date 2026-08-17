@@ -344,9 +344,10 @@ void setup() {
   }
 
   ui::buildPages();
-  Serial.println("  2 pages, swipe horizontally -- identical to `pio run -e sim`:");
-  Serial.println("    1  stock view, cycling scenarios every 3 s");
-  Serial.println("    2  scope: 4 live traces 0-500 mm, with a frame-rate readout");
+  Serial.println("  home = stock view; swipe LEFT for the menu:");
+  Serial.println("    Settings -> WiFi, Battery");
+  Serial.println("    Sensors  -> live scope, 4 traces 0-500 mm + frame rate");
+  Serial.println("    Device   -> empty for now");
 
   // --- stage 6: battery ---------------------------------------------------
   analogSetPinAttenuation(board::PIN_BATTERY_ADC, ADC_11db);

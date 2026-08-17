@@ -51,15 +51,9 @@ lv_obj_t *battFill_;
 lv_obj_t *battBolt_;
 lv_obj_t *wifiBtn_;
 lv_obj_t *battBtn_;
-void (*onWifiTap_)(void) = nullptr;
-void (*onBattTap_)(void) = nullptr;
 
-void wifiClicked(lv_event_t *) {
-  if (onWifiTap_) onWifiTap_();
-}
-void battClicked(lv_event_t *) {
-  if (onBattTap_) onBattTap_();
-}
+
+
 
 // Cached, so a steady state does no work and invalidates nothing. Without this
 // the bar would repaint every frame behind a scope running at full tilt, for a
@@ -177,8 +171,11 @@ void buildStatus(lv_obj_t *parent) {
   lv_obj_set_style_border_width(wifiBtn_, 0, LV_PART_MAIN);
   lv_obj_set_style_pad_all(wifiBtn_, 0, LV_PART_MAIN);
   lv_obj_remove_flag(wifiBtn_, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_add_flag(wifiBtn_, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_event_cb(wifiBtn_, wifiClicked, LV_EVENT_CLICKED, nullptr);
+  // NOT clickable any more. These icons were the entry point to the WiFi and
+  // battery pages, which worked for exactly two pages and had nowhere to put a
+  // third. Navigation now goes through the menu page, so the bar is purely an
+  // indicator again -- and a status bar that reports without also being a
+  // control surface is the easier thing to reason about.
   debugOutline(wifiBtn_);
 
   // Bars share a common BASELINE, so they grow upward like a signal meter
@@ -203,8 +200,6 @@ void buildStatus(lv_obj_t *parent) {
   lv_obj_set_style_border_width(battBtn_, 0, LV_PART_MAIN);
   lv_obj_set_style_pad_all(battBtn_, 0, LV_PART_MAIN);
   lv_obj_remove_flag(battBtn_, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_add_flag(battBtn_, LV_OBJ_FLAG_CLICKABLE);
-  lv_obj_add_event_cb(battBtn_, battClicked, LV_EVENT_CLICKED, nullptr);
   debugOutline(battBtn_);
 
   // Battery: body, nub, fill. Phone-shaped because that is the one icon every
@@ -235,9 +230,6 @@ void buildStatus(lv_obj_t *parent) {
   lv_obj_set_pos(battBolt_, 11, 6);
   lv_obj_add_flag(battBolt_, LV_OBJ_FLAG_HIDDEN);
 }
-
-void statusOnWifiTap(void (*cb)(void)) { onWifiTap_ = cb; }
-void statusOnBatteryTap(void (*cb)(void)) { onBattTap_ = cb; }
 
 void updateStatus(const State &s) {
   if (s.deviceId != lastId_) {

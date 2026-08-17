@@ -32,10 +32,4 @@ void buildStatus(lv_obj_t *parent);
 // changed, so a steady state costs a handful of comparisons and no redraw.
 void updateStatus(const State &s);
 
-// The signal cluster is a tap target that opens the WiFi page. Registered as a
-// callback rather than calling ui_pages directly, so the status bar stays a
-// leaf -- it knows what was tapped, not what should happen next.
-void statusOnWifiTap(void (*cb)(void));
-void statusOnBatteryTap(void (*cb)(void));
-
 }  // namespace ui
