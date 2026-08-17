@@ -42,6 +42,51 @@ Supabase need.
 - **Idle timeout** — returns to the stock page after 60 s untouched.
 - **Boot logo**, touch outlines removed, QR bezel fixed.
 
+### Found by adversarial review, still open
+
+Two independent reviews ran against this branch overnight. Most findings are
+fixed and committed; these three are recorded rather than fixed, because each
+needs a decision rather than a patch.
+
+**`SensorArray::poll()` is documented non-blocking and is not.** For every
+`Offline` sensor it calls `maybeRecover()` → `initSensor()`, which contains a
+hard `delay(10)` plus a driver probe. With nothing attached all four are offline
+and share one deadline, so the loop takes a synchronised **40–60 ms hit every
+15 s**. Worse in the lab: `initSensor` sets a 500 ms timeout and Pololu's
+`init()` spins twice on a status register without yielding, so **one half-alive
+clone that ACKs but never calibrates turns a single `poll()` into a ~1 s
+freeze**, and four into ~4 s of dead UI and dead touch.
+
+> This is the single-loop architecture `docs/firmware.md` §2 exists to escape.
+> The proper fix is the FreeRTOS split that `docs/waveshare_port.md` §4 already
+> specifies — `uiTask` at prio 1, below `sensorTask` at prio 3 — and it should
+> happen when the sensors are actually wired, not before.
+
+**The scan rebuild costs a 124 ms frame.** Measured. Ten network rows are
+deleted and recreated whenever a scan returns. Fine at a 20 s cadence, visible
+as a hitch if anyone is swiping at that moment.
+
+**`buildPages()` would strand change-detection state if called twice.**
+`ui_screens`' `prev_` and `ui_status`' caches are not reset, so a rebuilt widget
+tree would show build-time placeholders until the state happened to change. Only
+one call site exists today.
+
+### Numbers, measured on hardware
+
+| | |
+| --- | --- |
+| busy, whole loop (LVGL + WiFi + sensors) | **9–10%** |
+| worst frame, steady | 1–8 ms |
+| worst frame, scan rebuild | 124 ms |
+| scope page | 2,400 px/frame, 1 flush |
+| LVGL pool, device | 37k / 59k, 2% frag |
+| ESP heap with WiFi up | ~171 KB free |
+
+> `busy%` now brackets the **whole loop iteration**. Until the last commits it
+> wrapped `lv_timer_handler()` alone, so the earlier "0–1% busy" figures
+> excluded the sensors and the radio — the two things the number was being used
+> to argue there was headroom for.
+
 ### Wiring, when you have the parts
 
 | Signal | GPIO | Header |
