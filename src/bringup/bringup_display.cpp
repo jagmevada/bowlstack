@@ -79,6 +79,14 @@ uint8_t *buf2 = nullptr;
 // operator is meant to read scrolled past in a boot loop.
 bool uiReady_ = false;
 
+// Shared between the UI update and the console line. They used to call
+// readBatteryPinMv() independently, taking 32 conversions where 16 do and --
+// more usefully -- printing a DIFFERENT sample of the same instant from the one
+// on screen, on exactly the figure an operator is told to compare against a
+// multimeter.
+uint16_t lastPinMv_ = 0;
+uint16_t lastCellMv_ = 0;
+
 // --- battery ---------------------------------------------------------------
 // Same 16-sample mean the discrete build uses. A single ESP32 conversion
 // carries tens of millivolts of noise, and the steep end of a Li-ion discharge
@@ -403,22 +411,28 @@ void loop() {
       else band = ui::Battery::Critical;
     }
     ui::demoOverrideBattery(cellMv, pinMv, pct, band);
+    lastPinMv_ = pinMv;
+    lastCellMv_ = cellMv;
   }
 
   static uint32_t nextConsole = 0;
   const uint32_t now = millis();
   if ((int32_t)(now - nextConsole) >= 0) {
     nextConsole = now + 5000;
-    const uint16_t pinMv = readBatteryPinMv();
-    // The FPS figure is only meaningful WHILE THE SCOPE PAGE IS ON SCREEN.
-    // LVGL does not draw objects that are scrolled off the tileview, so with
-    // the stock view showing, the chart is invalidated but never rendered and
-    // this reads near zero. That is not a stall -- it is the renderer correctly
-    // declining to draw what nobody can see.
-    char perf[96];
+    // fps is only meaningful WHILE THE SCOPE PAGE IS ON SCREEN -- LVGL does not
+    // draw objects scrolled off the tileview, so with the stock view showing
+    // the canvas is invalidated but never rendered and this reads near zero.
+    // That is the renderer correctly declining to draw what nobody can see,
+    // not a stall. busy% is the figure that means something on every page.
+    //
+    // The battery values are the ones the UI was given, not a fresh reading:
+    // sampling again here took 32 conversions where 16 do, and printed a
+    // DIFFERENT sample of the same instant from the one on screen -- on exactly
+    // the figure an operator is told to compare against a multimeter.
+    char perf[128];
     ui::perfFormat(perf, sizeof(perf));
-    Serial.printf("%s | batt %u mV | esp-heap %u\n", perf,
-                  (uint16_t)(pinMv * board::BATTERY_DIVIDER_NOMINAL), ESP.getFreeHeap());
+    Serial.printf("%s | batt pin %u -> cell %u mV | esp-heap %u\n", perf, lastPinMv_,
+                  lastCellMv_, ESP.getFreeHeap());
   }
 
   delay(5);

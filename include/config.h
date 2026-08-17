@@ -22,6 +22,12 @@
 
 namespace config {
 
+// 0xFF means "this board has no such pin". Checked by indicators::begin() and
+// device_status::begin() before they configure anything, and used by the
+// Waveshare branch below for the LEDs and the charger sense that board does not
+// have -- and for I2C0, which it has but which belongs to the touchscreen.
+static const uint8_t PIN_NONE = 0xFF;
+
 // --- stack levels ----------------------------------------------------------
 // Numbered bottom-upward: f1 watches the lowest bowl, f4 the highest.
 static const uint8_t SENSOR_COUNT = 4;
@@ -54,8 +60,17 @@ static const uint32_t SERIAL_BAUD = 115200;
 // in todo.md, which isolates PER SENSOR rather than per pair and is therefore
 // strictly better at the job. Until then a locked bus is still DETECTED -- the
 // 0xFFFF signature and SENSOR_STALE_MS both still fire -- just not contained.
-static const uint8_t I2C0_SDA = 21;
-static const uint8_t I2C0_SCL = 16;
+// I2C0 IS NOT YOURS ON THIS BOARD. Port 0 carries the panel's CST816D and the
+// QMI8658 on GPIO47/48, configured by LovyanGFX when the display starts.
+// Opening it here re-points the pin matrix and the touch controller silently
+// stops answering -- the display keeps working, nothing errors, and the symptom
+// is "touch broke" with nothing pointing at the cause. That happened once
+// already; see the conditional in SensorArray::begin().
+//
+// PIN_NONE rather than the sensor pins, so a reader who wires up I2C0 from this
+// table gets a compile-time nonsense value instead of quietly repeating it.
+static const uint8_t I2C0_SDA = PIN_NONE;
+static const uint8_t I2C0_SCL = PIN_NONE;
 static const uint8_t I2C1_SDA = 21;
 static const uint8_t I2C1_SCL = 16;
 #else
@@ -207,10 +222,6 @@ static const float ABSENT_ABOVE_MM = 400.0f;
 //               mode or the boot log
 //   1, 3        UART0, in use by the serial console
 // 4, 13, 14, 18 and 19 are free of all of that.
-// 0xFF means "this board has no such pin". Checked by indicators::begin() and
-// device_status::begin() before they configure anything.
-static const uint8_t PIN_NONE = 0xFF;
-
 #if BOWLSTACK_BOARD_WAVESHARE_S3
 // NO DISCRETE LEDS ON THIS BOARD -- the panel replaces them. These are not
 // merely unused, they would be ACTIVELY HARMFUL if configured: GPIO4 and GPIO13
