@@ -24,6 +24,17 @@ void *buf_ = nullptr;
 bool visible_ = false;
 uint32_t lastSampleMs_ = 0;
 
+// Set by the first scopeFeed(). After that the fabricated generator below never
+// runs again -- real data outranks fixtures, and a scope that mixes the two is
+// worse than either.
+bool fedReal_ = false;
+int16_t feedMm_[LEVELS] = {0, 0, 0, 0};
+bool feedValid_[LEVELS] = {false, false, false, false};
+
+// Stored for a level with no usable reading. Distinct from any real distance so
+// drawColumn can leave a gap instead of plotting it.
+const int16_t NO_READING = -1;
+
 // The ring holds the DATA; the canvas holds the PICTURE. They exist separately
 // because they answer different questions -- the ring is what lets sampling
 // continue while the page is hidden, and the canvas is what lets a redraw touch
@@ -32,6 +43,7 @@ int16_t ring_[LEVELS][SCOPE_W];
 uint16_t sweep_ = 0;     // column the NEXT sample will occupy
 uint16_t filled_ = 0;    // columns written since boot, capped at SCOPE_W
 int16_t prevY_[LEVELS];  // last plotted row per series, for joining segments
+bool havePrevCh_[LEVELS] = {false, false, false, false};
 bool havePrev_ = false;
 bool pendingDraw_ = false;
 
@@ -96,14 +108,23 @@ void drawColumn(uint16_t x, bool joinToPrev) {
   // The traces. A vertical run from the previous sample's row to this one, so a
   // step reads as a connected edge rather than two unrelated dots.
   for (uint8_t i = 0; i < LEVELS; i++) {
+    // A level with no reading draws NOTHING. Clamping it to 0 mm would put a
+    // solid line at the top of the plot, which reads as "bowl pressed against
+    // the sensor" -- the most alarming possible misreport of "this sensor is
+    // not talking". A gap is the honest mark.
+    if (ring_[i][x] == NO_READING) {
+      havePrevCh_[i] = false;
+      continue;
+    }
     const int16_t y = yForMm(ring_[i][x]);
     int16_t y0 = y, y1 = y;
-    if (joinToPrev && havePrev_) {
+    if (joinToPrev && havePrev_ && havePrevCh_[i]) {
       y0 = prevY_[i] < y ? prevY_[i] : y;
       y1 = prevY_[i] < y ? y : prevY_[i];
     }
     vline(x, y0, y1, rgb565(C_SERIES[i]));
     prevY_[i] = y;
+    havePrevCh_[i] = true;
   }
   havePrev_ = true;
 }
@@ -235,6 +256,14 @@ void buildScope(lv_obj_t *parent) {
   }
 }
 
+void scopeFeed(const int16_t mm[LEVELS], const bool valid[LEVELS]) {
+  fedReal_ = true;
+  for (uint8_t i = 0; i < LEVELS; i++) {
+    feedMm_[i] = mm[i];
+    feedValid_[i] = valid[i];
+  }
+}
+
 void scopeSample(uint32_t nowMs) {
   if (!armed_) {
     armChannels(nowMs);
@@ -249,8 +278,10 @@ void scopeSample(uint32_t nowMs) {
   if ((int32_t)(nowMs - lastSampleMs_) < 100) return;
   lastSampleMs_ = nowMs;
 
-  for (uint8_t i = 0; i < LEVELS; i++)
-    ring_[i][sweep_] = (int16_t)sampleChannel(i, nowMs);
+  for (uint8_t i = 0; i < LEVELS; i++) {
+    ring_[i][sweep_] = fedReal_ ? (feedValid_[i] ? feedMm_[i] : NO_READING)
+                                : (int16_t)sampleChannel(i, nowMs);
+  }
   if (filled_ < SCOPE_W) filled_++;
 
   // ADVANCED HERE, NOT IN scopeRender(). It used to advance during rendering,

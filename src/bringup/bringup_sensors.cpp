@@ -23,6 +23,7 @@
 #include "bringup_sensors.h"
 #include "sensor_array.h"
 #include "ui_demo.h"
+#include "ui_scope.h"
 #include "ui_state.h"
 #include "version.h"
 
@@ -83,6 +84,21 @@ void loop(uint32_t nowMs) {
   // waiting and returns, so it costs nothing when none do.
   sensors_.poll();
   logic_.update(sensors_);
+
+  // The SCOPE gets raw distances, not the thresholded presence the stock page
+  // shows. That is the whole point of the page: it is where someone looks to
+  // judge whether a sensor is ranging and how noisy it is, which the
+  // present/absent decision has already thrown away.
+  {
+    int16_t mm[ui::LEVELS];
+    bool ok[ui::LEVELS];
+    for (uint8_t i = 0; i < ui::LEVELS; i++) {
+      const Reading r = sensors_.reading(i);
+      ok[i] = r.valid;
+      mm[i] = (int16_t)r.distanceMm;
+    }
+    ui::scopeFeed(mm, ok);
+  }
 
   // Published at 5 Hz rather than per iteration. The UI's change detection
   // would discard most of it anyway, and the count only moves when a bowl does.

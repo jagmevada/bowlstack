@@ -73,6 +73,12 @@ const uint32_t LV_BUF_BYTES = LV_BUF_PX * LV_BUF_BPP;
 uint8_t *buf1 = nullptr;
 uint8_t *buf2 = nullptr;
 
+// Set only once the display, buffers and input device all exist. Without it the
+// early return above left loop() calling pagesTick() against widgets that were
+// never built and a null tileview -- a panic reboot, so the FATAL line the
+// operator is meant to read scrolled past in a boot loop.
+bool uiReady_ = false;
+
 // --- battery ---------------------------------------------------------------
 // Same 16-sample mean the discrete build uses. A single ESP32 conversion
 // carries tens of millivolts of noise, and the steep end of a Li-ion discharge
@@ -278,7 +284,7 @@ void setup() {
   buf2 = (uint8_t *)heap_caps_malloc(LV_BUF_BYTES, MALLOC_CAP_DMA);
   if (!buf1 || !buf2) {
     Serial.println("  FATAL: draw buffer allocation failed");
-    return;
+    return;  // loop() checks uiReady_ and will not touch LVGL
   }
   Serial.printf("  draw buffers 2 x %u bytes = %u lines (DMA-capable)\n",
                 (unsigned)LV_BUF_BYTES, (unsigned)LV_BUF_LINES);
@@ -290,6 +296,7 @@ void setup() {
   lv_indev_t *indev = lv_indev_create();
   lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
   lv_indev_set_read_cb(indev, touchCb);
+  uiReady_ = true;
 
   // --- stage 5: the shared UI --------------------------------------------
   // The REAL MAC, read from the eFuse. It needs no WiFi stack, which matters
@@ -344,12 +351,19 @@ void setup() {
 }
 
 void loop() {
-  // Bracketed so busy% is measured rather than guessed. That figure -- share of
-  // wall clock spent inside LVGL -- is the one that decides whether this board
-  // has anything left for four VL53L0X, a WiFi link and a Supabase POST.
+  if (!uiReady_) {
+    delay(100);
+    return;
+  }
+
+  // BRACKETS THE WHOLE ITERATION, not just LVGL. It used to wrap
+  // lv_timer_handler() alone, which excluded bringup_wifi::loop(),
+  // bringup_sensors::loop() and pagesTick() -- so busy% was being quoted as
+  // evidence that the board has room for the sensors and the radio while
+  // measuring neither of them. The figure has to cover everything the loop does
+  // or it cannot support that argument.
   ui::perfFrameStart(millis());
   lv_timer_handler();
-  ui::perfFrameEnd(millis());
 
   // Pixel shift is OFF -- see todo.md.
   // ui::pixelShiftTick(millis());
@@ -358,6 +372,7 @@ void loop() {
   bringup_wifi::loop(millis());
   bringup_sensors::loop(millis());
   ui::pagesTick(millis());
+  ui::perfFrameEnd(millis());
 
   // Feed the REAL battery into the UI. This is a legitimate platform-specific
   // source in the sense CLAUDE.md means it: the device has an ADC on a divider

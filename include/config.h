@@ -207,8 +207,29 @@ static const float ABSENT_ABOVE_MM = 400.0f;
 //               mode or the boot log
 //   1, 3        UART0, in use by the serial console
 // 4, 13, 14, 18 and 19 are free of all of that.
+// 0xFF means "this board has no such pin". Checked by indicators::begin() and
+// device_status::begin() before they configure anything.
+static const uint8_t PIN_NONE = 0xFF;
+
+#if BOWLSTACK_BOARD_WAVESHARE_S3
+// NO DISCRETE LEDS ON THIS BOARD -- the panel replaces them. These are not
+// merely unused, they would be ACTIVELY HARMFUL if configured: GPIO4 and GPIO13
+// are XSHUT f2 and f3 here, so indicators::begin() driving them push-pull HIGH
+// would hold two sensors in a state sensor_array.cpp explicitly forbids ("never
+// drive it high: the bare sensor's XSHUT is a 2.8 V input") and fight
+// SensorArray::shutdown() output-against-output. GPIO19 is USB D-, which under
+// ARDUINO_USB_CDC_ON_BOOT is the only console this board has.
+//
+// Left unbranched, the first boot of the integrated firmware env would kill its
+// own console and clamp two sensors. Nothing links indicators today; this is
+// here so that when it does, it fails to compile a wrong pin rather than
+// driving one.
+static const uint8_t LED_LEVEL[SENSOR_COUNT] = {PIN_NONE, PIN_NONE, PIN_NONE, PIN_NONE};
+static const uint8_t LED_HEALTH = PIN_NONE;
+#else
 static const uint8_t LED_LEVEL[SENSOR_COUNT] = {4, 13, 14, 18};
 static const uint8_t LED_HEALTH = 19;
+#endif
 
 // Health blink rates, in Hz. Solid = healthy.
 //
@@ -248,7 +269,15 @@ static const uint8_t PIN_BATTERY_ADC = 35;
 // the clamp -- not the pull-down -- sets the charging-state voltage, so the
 // pull-down's loose tolerance never enters the measurement. It only has to win
 // against leakage when nothing is connected, which it does easily.
+#if BOWLSTACK_BOARD_WAVESHARE_S3
+// NOT READABLE ON THIS BOARD, and 27 would be actively wrong: GPIO26-32 are the
+// in-package quad flash. The ETA6098's STAT output drives the charge LED's
+// cathode and reaches no GPIO at all, so charge state is genuinely unknown here
+// until the one-resistor mod in todo.md is fitted.
+static const uint8_t PIN_CHARGING = PIN_NONE;
+#else
 static const uint8_t PIN_CHARGING = 27;
+#endif
 
 // FALSE: this senses the charger's 5 V rail, so the pin is HIGH while charging.
 // True would suit a TP4056-style open-drain STAT output, which pulls low.

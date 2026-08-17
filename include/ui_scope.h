@@ -59,6 +59,17 @@ void buildScope(lv_obj_t *parent);
 // touches no LVGL object and invalidates nothing, so data stays current whether
 // or not anyone is looking. In the shipping firmware the sensors do not stop
 // ranging because someone swiped.
+// Supplies one real reading per level, in millimetres, with `valid` false for
+// a sensor that is not producing. Once called, the fabricated generator stops
+// for good.
+//
+// Without this the scope drew four healthy stepping traces with ZERO sensors
+// attached -- on the one page an operator would swipe to in order to judge
+// whether a sensor is ranging. That is the same failure the rest of this
+// codebase forbids everywhere ("no cell detected reports null, not 0%"), and it
+// only became a lie when the other pages became real.
+void scopeFeed(const int16_t mm[4], const bool valid[4]);
+
 void scopeSample(uint32_t nowMs);
 void scopeRender();
 

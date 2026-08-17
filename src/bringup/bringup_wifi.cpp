@@ -42,7 +42,21 @@ const uint32_t JOIN_TIMEOUT_MS = 12000;
 
 void publishScan() {
   const int16_t n = WiFi.scanComplete();
-  if (n < 0) return;  // still running, or nothing to collect
+
+  // -1 is RUNNING and -2 is FAILED, and treating them alike latched scanning
+  // off permanently: the rescan gate requires !scanRunning_, which only
+  // publishScan() clears. One refusal -- reachable on a cold boot, since the
+  // first scan fires 500 ms after WiFi.mode() while the STA may still be coming
+  // up -- and the page froze on its last list with nothing said.
+  if (n == WIFI_SCAN_RUNNING) return;
+  if (n < 0) {
+    Serial.printf("wifi: scan failed (%d), retrying in %lu ms\n", (int)n,
+                  (unsigned long)RESCAN_MS);
+    WiFi.scanDelete();
+    scanRunning_ = false;
+    nextScanMs_ = millis() + RESCAN_MS;
+    return;
+  }
 
   ui::Network list[ui::WIFI_MAX_NETWORKS];
   uint8_t count = 0;
@@ -155,8 +169,15 @@ void loop(uint32_t nowMs) {
   if (!scanRunning_ && !joinStartedMs_ && (int32_t)(nowMs - nextScanMs_) >= 0) {
     // async = true, show_hidden = false. Async is what keeps the UI responsive
     // through the 2-10 s a scan takes.
-    WiFi.scanNetworks(true, false);
-    scanRunning_ = true;
+    const int16_t started = WiFi.scanNetworks(true, false);
+    if (started == WIFI_SCAN_FAILED) {
+      // scanNetworks returns WIFI_SCAN_FAILED synchronously when the driver
+      // refuses. Marking the scan as running on that would wedge the gate.
+      Serial.println("wifi: scan request refused, will retry");
+      nextScanMs_ = nowMs + RESCAN_MS;
+    } else {
+      scanRunning_ = true;
+    }
   }
   if (scanRunning_) publishScan();
 
