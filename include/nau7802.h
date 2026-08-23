@@ -87,7 +87,38 @@ class Nau7802 {
   // reads plausibly and wrongly.
   bool calibrateAfe();
 
+  // --- boot diagnostics ------------------------------------------------------
+  // BLOCKING, and called once from setup() before the scale task exists.
+  //
+  // It exists to answer one question that no amount of staring at the dashboard
+  // can: when a cell converts happily and its number does not move with load,
+  // is the CONVERTER not seeing a signal, or is the CELL not producing one?
+  // Those have completely different fixes -- one is wiring, the other is a
+  // mounting or a dead gauge -- and from the outside they look identical.
+  //
+  // Three measurements, printed with their peak-to-peak:
+  //
+  //   bridge     what the part reads normally
+  //   shorted    the same with the PGA's own inputs internally shorted
+  //              (I2C_CTRL bit 3). If this is close to the bridge reading AND
+  //              the bridge reading is quiet, the input already looks like a
+  //              short to the converter -- i.e. nothing is wired to it, or the
+  //              bridge is open, or the excitation is dead.
+  //   channel 2  the part's second input pair. A bridge landed on VIN2 instead
+  //              of VIN1 reads exactly like a disconnected cell on channel 1,
+  //              and this is the only cheap way to find that out.
+  //
+  // PEAK-TO-PEAK IS THE FIGURE THAT MATTERS. A mean can sit anywhere; what
+  // separates a live 350 ohm bridge from an open input is how much the reading
+  // moves between conversions, and whether it moves at all.
+  void selfTest();
+
  private:
+  // Blocking: waits for `n` completed conversions and returns their mean and
+  // peak-to-peak. Boot only -- it spins on the ready flag, which is exactly
+  // what poll() exists to avoid doing on the render loop.
+  bool sampleStats(uint8_t n, int32_t *mean, int32_t *pp, uint32_t timeoutMs);
+
   bool read(uint8_t reg, uint8_t *buf, uint8_t len);
   bool write(uint8_t reg, uint8_t val);
   bool setBit(uint8_t reg, uint8_t bit, bool on);

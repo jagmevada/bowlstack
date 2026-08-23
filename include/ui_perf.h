@@ -33,14 +33,22 @@ namespace ui {
 void perfBegin();
 
 // Bracket every lv_timer_handler() call.
-// Called from the flush callback with the pixel count of each transfer.
+// Called from the flush callback with the pixel count AND the wall time of each
+// transfer.
+//
+// The pixel count alone was not enough. This board reported 10,000 px/frame and
+// a 250 ms frame, and a derived "spi~4ms" figure computed from the pixel count
+// at the bus clock -- which is a LOWER BOUND on the transfer and says nothing
+// about how long the call actually took. Two very different faults produce that
+// picture: a renderer that is slow, and a flush that blocks. Measuring the
+// flush is what tells them apart.
 //
 // Separates the two halves of a frame's cost, which behave completely
 // differently: pixels pushed is SPI time and scales with INVALIDATED AREA,
 // while the remainder is software rendering and scales with how many draw
 // operations cover that area. Optimising the wrong one is free effort wasted,
 // and from the outside they are indistinguishable.
-void perfFlush(uint32_t px);
+void perfFlush(uint32_t px, uint32_t us);
 
 // Brackets the LVGL half specifically, inside the whole-iteration bracket.
 // Two figures rather than one, because "the UI costs X" and "the loop costs X"
@@ -49,6 +57,12 @@ void perfFlush(uint32_t px);
 // clock.
 void perfUiStart(uint32_t nowMs);
 void perfUiEnd(uint32_t nowMs);
+
+// Wall time inside the touch read, accumulated. A touch controller that has
+// stopped acknowledging costs ~13 ms per failed I2C transaction and LVGL polls
+// it from inside lv_timer_handler, so it can dominate the UI figure while the
+// renderer is doing almost nothing.
+void perfTouch(uint32_t us);
 
 void perfFrameStart(uint32_t nowMs);
 void perfFrameEnd(uint32_t nowMs);
@@ -60,6 +74,12 @@ uint16_t perfFps();
 uint8_t perfBusyPct();
 uint8_t perfUiPct();
 uint16_t perfWorstMs();
+
+// Share of the window spent inside the flush callback and inside the touch
+// read. Subtract both from perfUiPct() and what remains is LVGL rendering --
+// which is the only way to know which of the three to go and fix.
+uint8_t perfFlushPct();
+uint8_t perfTouchPct();
 
 // Pixels pushed per refresh, averaged over the window, and flushes per refresh.
 uint32_t perfPxPerFrame();

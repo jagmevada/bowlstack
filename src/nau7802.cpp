@@ -20,6 +20,7 @@ namespace {
 const uint8_t REG_PU_CTRL = 0x00;
 const uint8_t REG_CTRL1 = 0x01;
 const uint8_t REG_CTRL2 = 0x02;
+const uint8_t REG_I2C_CTRL = 0x11;
 const uint8_t REG_ADCO_B2 = 0x12;  // 0x12/0x13/0x14, MSB first
 const uint8_t REG_ADC = 0x15;
 const uint8_t REG_PGA = 0x1B;
@@ -38,6 +39,10 @@ const uint8_t PU_AVDDS = 7; // AVDD source: 1 = internal LDO
 // CTRL2
 const uint8_t C2_CALS = 2;      // start calibration; self-clears when done
 const uint8_t C2_CAL_ERR = 3;   // calibration failed
+const uint8_t C2_CHS = 7;       // 0 = input pair 1, 1 = input pair 2
+
+// I2C_CTRL
+const uint8_t IC_SI = 3;        // short the PGA inputs together, internally
 
 // PGA (0x1B)
 const uint8_t PGA_LDOMODE = 6;
@@ -247,6 +252,146 @@ bool Nau7802::calibrateAfe() {
     return false;
   }
   return true;
+}
+
+bool Nau7802::sampleStats(uint8_t n, int32_t *mean, int32_t *pp, uint32_t timeoutMs) {
+  int64_t acc = 0;
+  int32_t lo = 0, hi = 0;
+  uint8_t got = 0;
+  bool dropFirst = true;
+  const uint32_t deadline = millis() + timeoutMs;
+
+  while (got < n && (int32_t)(millis() - deadline) < 0) {
+    uint8_t pu = 0;
+    if (!read(REG_PU_CTRL, &pu, 1)) return false;
+    if (!((pu >> PU_CR) & 1)) {
+      delay(2);
+      continue;
+    }
+
+    uint8_t b[3];
+    if (!read(REG_ADCO_B2, b, 3)) return false;
+    int32_t raw = ((int32_t)b[0] << 24) | ((int32_t)b[1] << 16) | ((int32_t)b[2] << 8);
+    raw >>= 8;
+
+    // The first conversion after a configuration change was integrating ACROSS
+    // that change, so it belongs to neither setting. Dropping it is the
+    // difference between a clean before/after and a p-p figure dominated by one
+    // transitional sample.
+    if (dropFirst) {
+      dropFirst = false;
+      continue;
+    }
+
+    if (got == 0) {
+      lo = hi = raw;
+    } else {
+      if (raw < lo) lo = raw;
+      if (raw > hi) hi = raw;
+    }
+    acc += raw;
+    got++;
+  }
+
+  if (got == 0) return false;
+  *mean = (int32_t)(acc / got);
+  *pp = hi - lo;
+  return true;
+}
+
+void Nau7802::selfTest() {
+  if (state_ == CellState::Offline) {
+    Serial.printf("  %s: offline -- nothing to test\n", name_);
+    return;
+  }
+
+  // Read the configuration BACK rather than trusting that the writes landed.
+  // Two cells configured by the same code on two different buses should read
+  // identically here; a difference means a write did not take, which is a
+  // completely different fault from a cell that is not wired.
+  uint8_t pu = 0, c1 = 0, c2 = 0, pga = 0, pwr = 0;
+  read(REG_PU_CTRL, &pu, 1);
+  read(REG_CTRL1, &c1, 1);
+  read(REG_CTRL2, &c2, 1);
+  read(REG_PGA, &pga, 1);
+  read(REG_POWER, &pwr, 1);
+  Serial.printf("  %s: PU_CTRL %02X  CTRL1 %02X  CTRL2 %02X  PGA %02X  POWER %02X\n", name_,
+                pu, c1, c2, pga, pwr);
+
+  int32_t mBridge = 0, ppBridge = 0;
+  const bool okBridge = sampleStats(16, &mBridge, &ppBridge, 1500);
+  if (okBridge) {
+    Serial.printf("  %s: bridge     mean %9ld   p-p %7ld\n", name_, (long)mBridge,
+                  (long)ppBridge);
+  } else {
+    Serial.printf("  %s: bridge     NO CONVERSIONS\n", name_);
+  }
+
+  // --- the PGA's own inputs, shorted together -------------------------------
+  int32_t mShort = 0, ppShort = 0;
+  bool okShort = false;
+  if (setBit(REG_I2C_CTRL, IC_SI, true)) {
+    delay(60);  // two conversion periods at 80 SPS, so the change has landed
+    okShort = sampleStats(16, &mShort, &ppShort, 1500);
+    setBit(REG_I2C_CTRL, IC_SI, false);
+    delay(60);
+  }
+  if (okShort) {
+    Serial.printf("  %s: shorted    mean %9ld   p-p %7ld   delta %ld\n", name_, (long)mShort,
+                  (long)ppShort, (long)(mBridge - mShort));
+  }
+
+  // --- the second input pair ------------------------------------------------
+  // Switching channels invalidates the offset calibration, which is per
+  // channel, so both the move and the move back re-run it. That costs a few
+  // hundred milliseconds of boot and is worth it exactly once: a bridge landed
+  // on VIN2 reads identically to no bridge at all on VIN1.
+  int32_t mCh2 = 0, ppCh2 = 0;
+  bool okCh2 = false;
+  {
+    uint8_t saved = 0;
+    if (read(REG_CTRL2, &saved, 1) && write(REG_CTRL2, (uint8_t)(saved | (1u << C2_CHS)))) {
+      calibrateAfe();
+      okCh2 = sampleStats(16, &mCh2, &ppCh2, 1500);
+      write(REG_CTRL2, saved);
+      calibrateAfe();
+    }
+  }
+  if (okCh2) {
+    Serial.printf("  %s: channel 2  mean %9ld   p-p %7ld\n", name_, (long)mCh2, (long)ppCh2);
+  }
+
+  // --- what the numbers mean ------------------------------------------------
+  // Stated in the log rather than left as an exercise. The thresholds are
+  // deliberately loose: this is meant to point at the right half of the
+  // problem, not to grade a cell.
+  //
+  // A live 350 ohm bridge is a NOISE SOURCE. At gain 128 the converter resolves
+  // well under a microvolt, so even a perfectly balanced, perfectly still cell
+  // wanders by tens to hundreds of counts between conversions. An input with
+  // nothing across it does not: it sits where the offset calibration parked it.
+  // So peak-to-peak, not the mean, is what separates the two cases -- and the
+  // mean is exactly what a trimmed average on the dashboard is designed to make
+  // look calm.
+  if (!okBridge) return;
+  const bool quiet = ppBridge < 50;
+  const bool looksShorted = okShort && (mBridge - mShort < 500) && (mShort - mBridge < 500);
+  if (quiet && looksShorted) {
+    Serial.printf(
+        "  %s: >> READS LIKE AN OPEN OR SHORTED INPUT. p-p %ld counts is too quiet for a\n"
+        "     live bridge, and shorting the PGA barely moved it. Check E+/E- for ~3.0 V,\n"
+        "     check A+/A- continuity through the cell, and check the cell is not on\n"
+        "     channel 2 (see above).\n",
+        name_, (long)ppBridge);
+  } else if (quiet) {
+    Serial.printf("  %s: >> quiet (p-p %ld) but the short moved it -- input is connected.\n",
+                  name_, (long)ppBridge);
+  }
+  if (okCh2 && ppCh2 > ppBridge * 4 && ppCh2 > 200) {
+    Serial.printf("  %s: >> CHANNEL 2 IS NOISIER THAN CHANNEL 1. The bridge may be wired to\n"
+                  "     VIN2P/VIN2N. This firmware reads channel 1.\n",
+                  name_);
+  }
 }
 
 bool Nau7802::poll(uint32_t nowMs) {

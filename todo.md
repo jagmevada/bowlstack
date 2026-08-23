@@ -4,30 +4,67 @@
 
 ## Resume here — `loadcell` branch
 
-**First code for the weighing station: two NAU7802 on two buses, feeding the
-same UI.** Both images build clean with `-Wall`; nothing below has been run
-against real hardware yet, because there was none attached.
+**Two NAU7802 on two buses, feeding the same UI. RUNNING ON HARDWARE.** Both
+cells read, both respond to load, the dashboard holds 11 fps. Not yet
+calibrated, and nothing is published upstream.
 
-### What to do with a board in hand
+### Measured on the board
 
-1. **Fit the pull-ups on bus B first.** GPIO11/12 have none. 4.7 k from each to
-   3V3; 3V3 and GND are both on header P2. Without them the bit-banged bus runs
-   on the ESP32's ~45 kΩ internal pull-ups, which works on a short bench lead and
-   fails intermittently on anything longer — as NAKs that read like a bad part.
-2. `pio run -e ws-s3-loadcell -t upload --upload-port COM6`, then watch the
-   console. The boot block says, per cell: whether 0x2A answered, the silicon
-   revision, and whether the internal offset calibration passed. `CAL_ERR` there
-   means the bridge wiring, not the code — check E+/E−/A+/A−.
-3. **Tap the screen.** Cell A shares the touch controller's I²C port. lgfx takes
-   a per-port mutex so this *should* be safe, but only a finger closes that loop.
-   If touch dies once cells are attached, that sharing is the first suspect and
-   moving cell A to a second bit-banged pair is the fallback.
-4. Watch the `n/s` figures on the dashboard. They are MEASURED, not the
-   configured 80 SPS. Bus B well under bus A points at the pull-ups.
-5. Menu → Settings → Scale → **Tare**, put a known mass on, **Calibrate**. The
-   mass is `-DBOWLSTACK_CAL_MASS_G` in platformio.ini, currently 1000 g.
-6. Menu → Sensors for the live scope: two traces, auto-ranged, in counts before
-   calibration and grams after. Press on one corner and one trace should move.
+| | |
+| --- | --- |
+| cells | both `rev 0x0F`, 79 SPS each against 80 configured |
+| raw, unloaded | A ~119,400, B ~110,000 counts; p-p 200–500 |
+| dashboard | **11 fps, ui 74%** (flush 8%, touch 0%), worst frame 88 ms |
+| free heap | ~126 kB; LVGL pool 51k/89k, 1% fragmentation |
+| scale task | 2.8 kB of stack still free of 4 kB |
+
+### Two faults this cost, both now fixed
+
+**Cell A was a dry solder joint.** It presented three different ways across
+reboots — converting but reading ~0 and ignoring load, converting normally, and
+not acknowledging at 0x2A at all — which reads like three faults and was one.
+The figure that identifies it is **peak-to-peak**: a live 350 Ω bridge at gain
+128 wanders by hundreds of counts between conversions and an open input does
+not move at all, while the trimmed mean the dashboard shows is *designed* to
+look calm and hides the difference. p-p is now on the console line and in
+`Nau7802::selfTest()`.
+
+**The page rendered at 3 fps because every label was content-sized.** A label
+that re-measures to a different width marks its flex parent's layout dirty, so
+one changed digit re-ran the layout, moved its siblings and re-invalidated
+them — twenty times a second, because the number is live ADC counts. The
+instrumented perf line is what settled it: `ui 86% (flush 3% touch 0%)` with
+11,574 px and a 250 ms frame is not the bus, not the touch chip, and cannot be
+blitting cost. Fixed widths with right-aligned digits took it to 11 fps.
+
+### Next: calibrate it
+
+The board is on **COM10** (`USB VID:PID=303A:1001`) — native USB-Serial-JTAG,
+not a CP210x. The COM6 in older docs is a *Bluetooth* port on this machine.
+
+```
+pio run -e ws-s3-loadcell -t upload --upload-port COM10
+```
+
+With a terminal on the console, `t` / `c` / `x` / `?` do exactly what the
+Settings → Scale rows do:
+
+1. **Empty the platform.** Press `t`. Both cells should then read within a few
+   hundred counts of zero.
+2. Put the known mass on — `BOWLSTACK_CAL_MASS_G` in platformio.ini, presently
+   1000 g — centred, and let it settle.
+3. Press `c`. The screen switches from `cts` to `g`.
+
+**Expect roughly 215 counts per gram** for the assembly, if the cells are the
+usual 20 kg / 2 mV/V: full scale at gain 128 off a 3.0 V LDO is about ±11.7 mV,
+a 20 kg cell gives 6.0 mV at full load, so 20 kg is ~4.3 M counts. A 1 kg mass
+should move the **sum** by ~215,000 counts wherever it sits on the platform.
+Half that means 1 mV/V cells; wildly off means the factor is wrong and every
+reading after it will be too.
+
+Calibration refuses a mass under 200 g, and refuses outright if the sum does not
+go *positive* — which is the check for a cell wired backwards, where the two
+would subtract instead of add.
 
 ### Known open
 
@@ -42,6 +79,18 @@ against real hardware yet, because there was none attached.
   dropping the file if this branch outlives the port.
 - **`buildPages()` would strand change-detection state if called twice** —
   inherited from `touch-ui`, still true, still only one call site.
+- **Bus B still has no pull-ups.** GPIO11/12 are running on the ESP32's ~45 kΩ
+  internal ones. It works today at 100 kHz on a short lead; 4.7 k to 3V3 on both
+  lines is what makes it right, and is what would let `HZ_B` in scale.cpp go to
+  400000.
+- **ui 74% is still high for 11 fps.** What remains after the layout fix is
+  genuine software glyph rendering — ~13,000 px of 4 bpp antialiased 48 px
+  digits, eleven times a second, on a core with no 2D acceleration. The levers
+  left are a smaller total, fewer digits changing (grams round harder than raw
+  counts do), or a partial-digit redraw, and none is obviously worth it yet.
+- **The split assumes matched cells** — press one corner and watch that cell
+  move alone. The total is honest wherever the load sits; the per-cell shares
+  are only right if the two sensitivities match.
 
 ---
 

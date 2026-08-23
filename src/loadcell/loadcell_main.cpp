@@ -93,6 +93,7 @@ void lvglLog(lv_log_level_t, const char *msg) { Serial.printf("lvgl: %s\n", msg)
 void flushCb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
   const int32_t w = area->x2 - area->x1 + 1;
   const int32_t h = area->y2 - area->y1 + 1;
+  const uint32_t t0 = micros();
 
   gfx.startWrite();
   gfx.setAddrWindow(area->x1, area->y1, w, h);
@@ -102,9 +103,36 @@ void flushCb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
   gfx.writePixels(reinterpret_cast<lgfx::rgb565_t *>(px_map), w * h);
   gfx.endWrite();
 
-  ui::perfFlush((uint32_t)(w * h));
+  ui::perfFlush((uint32_t)(w * h), micros() - t0);
   lv_display_flush_ready(disp);
 }
+
+// --- touch, and what a dead touch bus costs -------------------------------
+// A FAILING TOUCH CHIP MUST NOT DESTROY THE FRAME RATE, and left alone it does.
+//
+// LVGL polls the input device from inside lv_timer_handler(), roughly every
+// 30 ms. LovyanGFX's CST816S driver answers by re-running its init probe and
+// then retrying the data read up to three times -- and on a bus where nothing
+// acknowledges, each of those transactions runs to the I2C peripheral's ~13 ms
+// timeout. Five failing transactions is ~65 ms spent inside lv_timer_handler
+// for a read that returns "no finger", every 30 ms. The renderer is then
+// drawing a few thousand pixels per frame and still managing six of them a
+// second, which is exactly the shape of the numbers this board reported:
+//
+//     fps 6  ui 84%  worst 172ms | 7795px/f  spi~3ms
+//
+// Tiny pixel counts, trivial SPI time, and a loop that is nevertheless pegged.
+// That combination cannot be a slow renderer; it is a blocked one.
+//
+// So the read is TIMED, and if it starts taking milliseconds the driver is
+// clearly not talking to anything -- back off to one attempt every half second
+// and say so once. The screen stops being responsive to touch, which it already
+// was not, and stops taking the rest of the UI down with it.
+const uint32_t TOUCH_SLOW_US = 3000;    // a healthy read is tens of microseconds
+const uint32_t TOUCH_BACKOFF_MS = 500;  // retry cadence once it looks dead
+uint8_t touchSlowRun_ = 0;
+uint32_t touchNextTryMs_ = 0;
+bool touchWarned_ = false;
 
 // THE ONLY PLACE THE TOUCH CONTROLLER IS READ. Nothing else may call
 // gfx.getTouch().
@@ -120,13 +148,42 @@ void flushCb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
 // both must go through lgfx rather than one of them opening Wire -- see
 // nau7802.h.
 void touchCb(lv_indev_t *, lv_indev_data_t *data) {
+  data->state = LV_INDEV_STATE_RELEASED;
+
+  const uint32_t now = millis();
+  if (touchSlowRun_ >= 3 && (int32_t)(now - touchNextTryMs_) < 0) return;
+
+  const uint32_t t0 = micros();
   uint16_t x, y;
-  if (gfx.getTouch(&x, &y)) {
+  const bool touched = gfx.getTouch(&x, &y);
+  const uint32_t took = micros() - t0;
+  ui::perfTouch(took);
+
+  if (took > TOUCH_SLOW_US) {
+    if (touchSlowRun_ < 255) touchSlowRun_++;
+    touchNextTryMs_ = now + TOUCH_BACKOFF_MS;
+    if (touchSlowRun_ == 3 && !touchWarned_) {
+      touchWarned_ = true;
+      Serial.printf(
+          "\n!! TOUCH IS NOT ANSWERING: a read took %lu us, which is an I2C timeout and\n"
+          "   not a touch controller. GPIO47/48 carry the touch chip, the IMU and cell A;\n"
+          "   if the boot scan did not list 0x15, that bus is down and cell A is the only\n"
+          "   thing on it this branch added. Backing touch off to one read every %lu ms so\n"
+          "   the rest of the UI keeps its frame rate.\n\n",
+          (unsigned long)took, (unsigned long)TOUCH_BACKOFF_MS);
+    }
+    return;
+  }
+
+  // A read that completed promptly means the bus is healthy again -- a wedged
+  // slave can recover on its own, and a device that stays permanently degraded
+  // after one bad second would be worse than the problem.
+  touchSlowRun_ = 0;
+
+  if (touched) {
     data->point.x = x;
     data->point.y = y;
     data->state = LV_INDEV_STATE_PRESSED;
-  } else {
-    data->state = LV_INDEV_STATE_RELEASED;
   }
 }
 
@@ -226,6 +283,53 @@ void onClearCal() {
   scale::clearCalibration();
 }
 
+// --- the same three actions, from the console -------------------------------
+// A SECOND ROUTE TO THE SAME FUNCTIONS, not a second implementation: every one
+// of these calls the identical scale:: entry point the menu row does.
+//
+// It earns its place because calibration is a two-handed job. You put a known
+// mass on the platform and then have to tell the device it is there -- and
+// tapping a 2" screen with the hand that is not holding the weight steady is
+// how a calibration gets taken mid-wobble. A keystroke on a terminal that is
+// already open for the console output is the better hand.
+//
+// It is also what makes provisioning a fleet scriptable later: 32 units to tare
+// and calibrate is 32 keystrokes over USB rather than 32 trips to a menu.
+void serviceConsole() {
+  while (Serial.available()) {
+    const int c = Serial.read();
+    switch (c) {
+      case 't':
+      case 'T':
+        Serial.println("\n> tare");
+        scale::tare();
+        break;
+      case 'c':
+      case 'C':
+        Serial.printf("\n> calibrate against %d g\n", (int)BOWLSTACK_CAL_MASS_G);
+        Serial.printf("  %s\n", scale::calibrate((float)BOWLSTACK_CAL_MASS_G)
+                                    ? "accepted"
+                                    : "REFUSED -- see the line above");
+        break;
+      case 'x':
+      case 'X':
+        Serial.println("\n> clear calibration");
+        scale::clearCalibration();
+        break;
+      case '?':
+        Serial.println(
+            "\n  t  tare -- zero both cells at whatever is on the platform NOW\n"
+            "  c  calibrate -- declares that the current load is the known mass\n"
+            "  x  clear the calibration and go back to counts\n"
+            "\n  Order matters: tare on an EMPTY platform, then put the mass on,\n"
+            "  wait for the reading to settle, then calibrate.\n");
+        break;
+      default:
+        break;  // newlines and stray bytes from a terminal are not errors
+    }
+  }
+}
+
 }  // namespace
 
 void setup() {
@@ -244,6 +348,31 @@ void setup() {
   Serial.printf("  heap        %u bytes free\n", ESP.getFreeHeap());
   if (ESP.getPsramSize() == 0) {
     Serial.println("  !! PSRAM NOT DETECTED -- check board_build.arduino.memory_type = qio_opi");
+  }
+
+  // --- I2C idle levels, BEFORE anything claims the pins --------------------
+  // Read as plain GPIO, and read FIRST, because this is the one measurement
+  // that separates "nothing is on that bus" from "something is holding it
+  // down". A scan cannot tell those apart -- both look like silence -- and the
+  // difference is the difference between a missing module and a wedged one.
+  //
+  // Both lines should read 1. Bus A has 4.7k pull-ups fitted on the board
+  // (R29/R30); bus B has none, so a 1 there is the ESP32's internal pull-up if
+  // you have not fitted the resistors, which is weak but still reads high.
+  // A 0 on SDA is a slave holding the bus, and it takes the touch controller
+  // down with it.
+  {
+    const int8_t pins[4] = {board::CELL_A_SDA, board::CELL_A_SCL, board::CELL_B_SDA,
+                            board::CELL_B_SCL};
+    for (uint8_t i = 0; i < 4; i++) pinMode(pins[i], INPUT_PULLUP);
+    delayMicroseconds(200);
+    Serial.printf("  i2c idle    bus A  SDA(%d)=%d SCL(%d)=%d   bus B  SDA(%d)=%d SCL(%d)=%d\n",
+                  pins[0], digitalRead(pins[0]), pins[1], digitalRead(pins[1]), pins[2],
+                  digitalRead(pins[2]), pins[3], digitalRead(pins[3]));
+    if (!digitalRead(pins[0]) || !digitalRead(pins[1])) {
+      Serial.println("  !! BUS A IS HELD LOW. The touch controller lives on it, so the screen");
+      Serial.println("     will not respond either. Unplug cell A and reboot to confirm.");
+    }
   }
 
   // --- the panel, before LVGL exists --------------------------------------
@@ -335,6 +464,7 @@ void setup() {
   ui::pagesOnScaleClearCal(onClearCal);
 
   ui::buildPages();
+  Serial.println("  console: t = tare, c = calibrate, x = clear, ? = help");
   Serial.println("  home = weight; swipe LEFT for the menu:");
   Serial.println("    Settings -> WiFi, Battery, Scale (tare / calibrate)");
   Serial.println("    Sensors  -> live cell scope, both traces + frame rate");
@@ -368,6 +498,7 @@ void loop() {
 
   bringup_wifi::loop(millis());
   bringup_time::publish();
+  serviceConsole();
 
   // 20 Hz, matching what the scale task publishes at. Faster would copy the
   // same snapshot repeatedly under a mutex the measuring task wants back.
@@ -424,9 +555,16 @@ void loop() {
       const char *st = c.state == CellState::Online
                            ? "online"
                            : (c.state == CellState::Warming ? "warming" : "OFFLINE");
-      Serial.printf("  cell %c  %-7s rev 0x%02X  raw %8ld  filt %8ld  tare %8ld  %u/s (%u in window)\n",
-                    'A' + i, st, c.revision, (long)c.rawCounts, (long)c.counts,
-                    (long)c.offset, c.sps, c.samples);
+      // p-p IS PRINTED BESIDE THE MEAN ON PURPOSE. The mean is a trimmed
+      // average and is meant to look calm, so a cell with a disconnected
+      // bridge and a cell sitting perfectly still print the same steady
+      // number. The peak-to-peak is what tells them apart: a live 350 ohm
+      // bridge at gain 128 wanders by tens to hundreds of counts between
+      // conversions, and an open input does not move at all.
+      Serial.printf(
+          "  cell %c  %-7s rev 0x%02X  raw %8ld  filt %8ld  p-p %6ld  tare %8ld  %u/s (%u)\n",
+          'A' + i, st, c.revision, (long)c.rawCounts, (long)c.counts, (long)c.pp,
+          (long)c.offset, c.sps, c.samples);
     }
     if (sn.calibrated) {
       Serial.printf("  total  %.0f g   (%.3f counts/g)\n", sn.totalGrams, sn.countsPerGram);

@@ -8,6 +8,15 @@
 
 #include "board_waveshare_s3.h"
 
+// ON BY DEFAULT, because this branch is bring-up and the self-test answers the
+// first question anybody asks of a new assembly: is that cell wired. It costs
+// roughly a second of boot per cell -- two channel switches, each needing its
+// own offset calibration -- so turn it off with -DBOWLSTACK_CELL_SELFTEST=0
+// once the wiring is settled and the boot time starts to matter.
+#ifndef BOWLSTACK_CELL_SELFTEST
+#define BOWLSTACK_CELL_SELFTEST 1
+#endif
+
 namespace scale {
 namespace {
 
@@ -67,6 +76,20 @@ class CountWindow {
     if (count_ < WINDOW) count_++;
   }
   uint8_t size() const { return count_; }
+
+  // Peak-to-peak, untrimmed on purpose. The trim exists to keep a knock out of
+  // the WEIGHT; here the extremes are the measurement -- the question is how
+  // far the raw signal moves, and discarding the outliers would answer a
+  // different one.
+  int32_t pp() const {
+    if (count_ < 2) return 0;
+    int32_t lo = ring_[0], hi = ring_[0];
+    for (uint8_t i = 1; i < count_; i++) {
+      if (ring_[i] < lo) lo = ring_[i];
+      if (ring_[i] > hi) hi = ring_[i];
+    }
+    return hi - lo;
+  }
 
   // Discards the WINDOW_TRIM highest and lowest before averaging. Below
   // 2*TRIM+2 samples the trim is skipped rather than applied to almost nothing
@@ -181,6 +204,7 @@ void publish() {
     c.rawCounts = cell_[i].counts();
     c.counts = window_[i].mean();
     c.samples = window_[i].size();
+    c.pp = window_[i].pp();
     c.sps = cell_[i].sps();
     c.offset = offset_[i];
 
@@ -297,6 +321,34 @@ void scaleTask(void *) {
 
 }  // namespace
 
+// Reports what acknowledges, and -- just as importantly -- separates "nothing is
+// there" from "the bus is stuck". A pair of lines held low by a wedged slave
+// looks identical to an empty bus through a scan alone, so the idle levels are
+// read as plain GPIO first, before any transaction is attempted.
+//
+// This is the ToF bring-up harness's scanBus() brought back, because the
+// failure it was written for turns out to be the one this branch actually has:
+// cell A shares GPIO47/48 with the touch controller, and if that bus goes down
+// BOTH stop answering. Without this you see two unrelated-looking symptoms --
+// a dead cell and a screen that will not respond -- and no reason to connect
+// them.
+void scanBus(int port, const char *name, int sda, int scl, uint32_t hz) {
+  Serial.printf("  %s (SDA=%d SCL=%d, i2c port %d)\n", name, sda, scl, port);
+
+  uint8_t found = 0;
+  for (uint8_t addr = 0x08; addr < 0x78; addr++) {
+    uint8_t b = 0;
+    if (!lgfx::i2c::transactionRead(port, addr, &b, 1, hz).has_value()) continue;
+    const char *known = "";
+    if (addr == 0x15) known = "  <- CST816D touch";
+    else if (addr == 0x6A || addr == 0x6B) known = "  <- QMI8658 IMU";
+    else if (addr == board::NAU7802_ADDR) known = "  <- NAU7802 load cell";
+    Serial.printf("    0x%02X ack%s\n", addr, known);
+    found++;
+  }
+  if (found == 0) Serial.println("    (nothing acknowledged)");
+}
+
 void begin() {
   mutex_ = xSemaphoreCreateMutex();
   published_ = Snapshot{};
@@ -314,6 +366,14 @@ void begin() {
   Serial.printf("  bus B  i2c port %d (bit-banged)  SDA=%d SCL=%d  %s\n", PORT_B,
                 board::CELL_B_SDA, board::CELL_B_SCL, bOk ? "" : "-- INIT FAILED");
   Serial.println("         no pull-ups on this pair: fit 4.7k to 3V3 on both lines.");
+
+  Serial.println("\n  bus scan:");
+  scanBus(PORT_A, "bus A -- touch + IMU + cell A", board::CELL_A_SDA, board::CELL_A_SCL, HZ_A);
+  Serial.println("    expect 0x15 (touch), 0x6A or 0x6B (IMU), 0x2A (cell A).");
+  Serial.println("    0x15 MISSING means the bus is down, and the SCREEN goes with it --");
+  Serial.println("    every failed touch read costs ~13 ms of I2C timeout inside the");
+  Serial.println("    render loop, which shows up as a collapsed frame rate.");
+  scanBus(PORT_B, "bus B -- cell B", board::CELL_B_SDA, board::CELL_B_SCL, HZ_B);
 
   cell_[0].configure(PORT_A, HZ_A, "cell A");
   cell_[1].configure(PORT_B, HZ_B, "cell B");

@@ -61,6 +61,12 @@ char prevFlag_[16] = {0};
 char prevCellValue_[CELLS][16] = {{0}, {0}};
 char prevCellSub_[CELLS][16] = {{0}, {0}};
 char prevRate_[40] = {0};
+// The total's colour, cached like everything else. lv_obj_set_style_text_color
+// does not compare before acting, and this used to run unguarded on every
+// update -- the same "write unconditionally" mistake the rest of this page was
+// written to avoid, on the largest object on the screen.
+uint32_t prevTotalColor_ = 0;
+bool haveTotalColor_ = false;
 bool prevCalibrated_ = false;
 bool haveCal_ = false;
 Cell prevCellState_[CELLS] = {Cell::Offline, Cell::Offline};
@@ -72,6 +78,13 @@ void setIfChanged(lv_obj_t *label, char *prev, uint32_t prevLen, const char *tex
   if (strncmp(prev, text, prevLen - 1) == 0) return;
   snprintf(prev, prevLen, "%s", text);
   lv_label_set_text(label, text);
+}
+
+void setTotalColor(uint32_t rgb) {
+  if (haveTotalColor_ && prevTotalColor_ == rgb) return;
+  haveTotalColor_ = true;
+  prevTotalColor_ = rgb;
+  lv_obj_set_style_text_color(lblTotal, lv_color_hex(rgb), LV_PART_MAIN);
 }
 
 lv_obj_t *makeCell(lv_obj_t *parent, uint8_t i, const char *name) {
@@ -95,14 +108,23 @@ lv_obj_t *makeCell(lv_obj_t *parent, uint8_t i, const char *name) {
   lv_obj_set_style_text_color(cellName[i], lv_color_hex(C_MUTED), LV_PART_MAIN);
   lv_label_set_text(cellName[i], name);
 
+  // Fixed width and centred, for the reason spelled out at lblTotal: these two
+  // change as often as the total does, and a content-sized label that changes
+  // width re-lays-out its parent every time.
   cellValue[i] = lv_label_create(box);
   lv_obj_set_style_text_font(cellValue[i], &lv_font_montserrat_20, LV_PART_MAIN);
   lv_obj_set_style_text_color(cellValue[i], lv_color_hex(C_TEXT), LV_PART_MAIN);
+  lv_obj_set_width(cellValue[i], LV_PCT(100));
+  lv_obj_set_style_text_align(cellValue[i], LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  lv_label_set_long_mode(cellValue[i], LV_LABEL_LONG_CLIP);
   lv_label_set_text(cellValue[i], "--");
 
   cellSub[i] = lv_label_create(box);
   lv_obj_set_style_text_font(cellSub[i], &lv_font_montserrat_14, LV_PART_MAIN);
   lv_obj_set_style_text_color(cellSub[i], lv_color_hex(C_MUTED), LV_PART_MAIN);
+  lv_obj_set_width(cellSub[i], LV_PCT(100));
+  lv_obj_set_style_text_align(cellSub[i], LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  lv_label_set_long_mode(cellSub[i], LV_LABEL_LONG_CLIP);
   lv_label_set_text(cellSub[i], "");
 
   cellBox[i] = box;
@@ -126,6 +148,9 @@ void buildWeight(lv_obj_t *parent) {
   lblCaption = lv_label_create(scr);
   lv_obj_set_style_text_font(lblCaption, &lv_font_montserrat_16, LV_PART_MAIN);
   lv_obj_set_style_text_color(lblCaption, lv_color_hex(C_MUTED), LV_PART_MAIN);
+  lv_obj_set_width(lblCaption, LV_PCT(100));
+  lv_obj_set_style_text_align(lblCaption, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  lv_label_set_long_mode(lblCaption, LV_LABEL_LONG_CLIP);
   lv_label_set_text(lblCaption, "total");
 
   // The number and its unit are ONE ROW with their bottoms aligned, not a
@@ -141,13 +166,53 @@ void buildWeight(lv_obj_t *parent) {
   lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_END,
                         LV_FLEX_ALIGN_CENTER);
 
+  // EVERY LABEL ON THIS PAGE HAS A FIXED WIDTH, AND THAT IS THE WHOLE
+  // PERFORMANCE STORY.
+  //
+  // A content-sized label re-measures itself on every lv_label_set_text and,
+  // when the width comes out different, calls lv_obj_mark_layout_as_dirty on
+  // its parent. The parent here is a flex row inside a flex column, so one
+  // changed digit re-runs the layout, MOVES the siblings -- a centred row
+  // shifts everything when its content grows -- and invalidates the old and new
+  // position of each. On the bowl branch that happened when a bowl moved, a few
+  // times per service. Here the number is live ADC counts, so it happened
+  // twenty times a second, and the panel measured:
+  //
+  //     fps 3  ui 86% (flush 3% touch 0%)  worst 301ms | 11574px/f
+  //
+  // Three per cent in the flush and nothing in the touch read, yet 250 ms a
+  // frame to push eleven thousand pixels. That is not blitting cost and it is
+  // not the bus; it is the layout being recomputed and the page being
+  // re-invalidated, over and over, for a digit.
+  //
+  // A fixed width removes the trigger entirely: the text changes, the box does
+  // not, so nothing above the label learns about it and only the label's own
+  // rectangle is invalidated.
+  //
+  // It is also simply better to look at. Right-aligned digits in a fixed box
+  // grow leftward from a stationary edge, the way every scale and every meter
+  // displays a number, instead of jittering horizontally as the value moves.
+  //
+  //   186 + 4 (column pad) + 34 = 224, which is the 240 px panel less the 8 px
+  //   page padding on each side. 186 px holds six 48 px digits; the largest
+  //   honest reading on a 2 x 20 kg platform is 40000, five.
   lblTotal = lv_label_create(row);
   lv_obj_set_style_text_font(lblTotal, &lv_font_montserrat_48, LV_PART_MAIN);
+  lv_obj_set_width(lblTotal, 186);
+  lv_obj_set_style_text_align(lblTotal, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+  // CLIP rather than the default WRAP. Wrapping would put a second line under
+  // the first, which changes the label's HEIGHT -- and a height change marks
+  // the layout dirty exactly the way the width change this fix removes. A
+  // clipped digit would be a bug worth seeing; a relayout storm would not be.
+  lv_label_set_long_mode(lblTotal, LV_LABEL_LONG_CLIP);
   lv_label_set_text(lblTotal, "--");
 
   lblUnit = lv_label_create(row);
   lv_obj_set_style_text_font(lblUnit, &lv_font_montserrat_20, LV_PART_MAIN);
   lv_obj_set_style_text_color(lblUnit, lv_color_hex(C_MUTED), LV_PART_MAIN);
+  lv_obj_set_width(lblUnit, 34);
+  lv_obj_set_style_text_align(lblUnit, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
+  lv_label_set_long_mode(lblUnit, LV_LABEL_LONG_CLIP);
   // 6 px of bottom padding rather than a margin, so the label's own box carries
   // the offset and the row's END alignment still has something to align to.
   lv_obj_set_style_pad_bottom(lblUnit, 6, LV_PART_MAIN);
@@ -184,6 +249,9 @@ void buildWeight(lv_obj_t *parent) {
   lblRate = lv_label_create(scr);
   lv_obj_set_style_text_font(lblRate, &lv_font_montserrat_14, LV_PART_MAIN);
   lv_obj_set_style_text_color(lblRate, lv_color_hex(C_MUTED), LV_PART_MAIN);
+  lv_obj_set_width(lblRate, LV_PCT(100));
+  lv_obj_set_style_text_align(lblRate, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+  lv_label_set_long_mode(lblRate, LV_LABEL_LONG_CLIP);
   lv_label_set_text(lblRate, "");
 }
 
@@ -215,7 +283,7 @@ void updateWeight(const State &st) {
     // on a scale, zero is a measurement someone might act on.
     setIfChanged(lblTotal, prevTotal_, sizeof(prevTotal_), "--");
     setIfChanged(lblUnit, prevUnit_, sizeof(prevUnit_), "");
-    lv_obj_set_style_text_color(lblTotal, lv_color_hex(C_MUTED), LV_PART_MAIN);
+    setTotalColor(C_MUTED);
     setIfChanged(lblCaption, prevCaption_, sizeof(prevCaption_), "total");
   } else {
     if (s.calibrated) {
@@ -225,7 +293,7 @@ void updateWeight(const State &st) {
     }
     setIfChanged(lblTotal, prevTotal_, sizeof(prevTotal_), buf);
     setIfChanged(lblUnit, prevUnit_, sizeof(prevUnit_), s.calibrated ? "g" : "cts");
-    lv_obj_set_style_text_color(lblTotal, lv_color_hex(C_TEXT), LV_PART_MAIN);
+    setTotalColor(C_TEXT);
 
     // "AT LEAST", NOT "TOTAL", WHEN A CELL IS MISSING -- the same word the bowl
     // page uses for a degraded count, and for the same reason. The sum of the

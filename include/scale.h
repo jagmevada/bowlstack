@@ -55,6 +55,17 @@ struct CellSnapshot {
   int32_t rawCounts;  // the most recent single conversion, unfiltered
   uint16_t sps;       // conversions per second actually delivered
   uint8_t samples;    // how many are in the window right now
+
+  // Peak-to-peak of the raw conversions currently in the window.
+  //
+  // THE FIGURE THAT SAYS WHETHER A CELL IS ALIVE. The trimmed mean beside it is
+  // designed to look calm, so a cell whose bridge is disconnected and a cell
+  // sitting perfectly still produce the same steady number -- and the first
+  // time you find out which you had is when the weight does not move. A live
+  // 350 ohm bridge at gain 128 wanders by tens to hundreds of counts between
+  // conversions; an open input sits exactly where the offset calibration
+  // parked it. See Nau7802::selfTest().
+  int32_t pp;
   int32_t offset;     // tare, in counts
   float grams;        // this cell's share; meaningless unless `calibrated`
 };

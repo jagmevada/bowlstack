@@ -9,6 +9,10 @@ namespace {
 volatile uint32_t frames_ = 0;
 volatile uint32_t flushPx_ = 0;
 volatile uint32_t flushes_ = 0;
+volatile uint32_t flushUs_ = 0;
+volatile uint32_t touchUs_ = 0;
+uint8_t flushPct_ = 0;
+uint8_t touchPct_ = 0;
 uint32_t pxPerFrame_ = 0;
 uint16_t flushPerFrame_ = 0;
 uint32_t windowStart_ = 0;
@@ -36,10 +40,13 @@ void perfBegin() {
   if (d) lv_display_add_event_cb(d, onRefrReady, LV_EVENT_REFR_READY, nullptr);
 }
 
-void perfFlush(uint32_t px) {
+void perfFlush(uint32_t px, uint32_t us) {
   flushPx_ += px;
+  flushUs_ += us;
   flushes_++;
 }
+
+void perfTouch(uint32_t us) { touchUs_ += us; }
 
 void perfUiStart(uint32_t nowMs) { uiEnter_ = nowMs; }
 void perfUiEnd(uint32_t nowMs) { uiAccum_ += nowMs - uiEnter_; }
@@ -70,8 +77,16 @@ bool perfTick(uint32_t nowMs) {
 
   pxPerFrame_ = frames_ ? (flushPx_ / frames_) : flushPx_;
   flushPerFrame_ = (uint16_t)(frames_ ? (flushes_ / frames_) : flushes_);
+  // Microseconds against milliseconds of window, hence the /10 rather than
+  // *100: (us/1000) / (ms) * 100.
+  flushPct_ = (uint8_t)((flushUs_ / 10UL) / elapsed);
+  touchPct_ = (uint8_t)((touchUs_ / 10UL) / elapsed);
+  if (flushPct_ > 100) flushPct_ = 100;
+  if (touchPct_ > 100) touchPct_ = 100;
   flushPx_ = 0;
   flushes_ = 0;
+  flushUs_ = 0;
+  touchUs_ = 0;
 
   frames_ = 0;
   busyAccum_ = 0;
@@ -91,6 +106,8 @@ uint16_t perfFps() { return fps_; }
 uint8_t perfBusyPct() { return busyPct_; }
 uint8_t perfUiPct() { return uiPct_; }
 uint16_t perfWorstMs() { return worstReported_; }
+uint8_t perfFlushPct() { return flushPct_; }
+uint8_t perfTouchPct() { return touchPct_; }
 uint32_t perfPxPerFrame() { return pxPerFrame_; }
 uint16_t perfFlushesPerFrame() { return flushPerFrame_; }
 
@@ -103,11 +120,16 @@ void perfFormat(char *buf, uint32_t len) {
   // byte, 40 MHz. Printing it beside the frame time says immediately whether a
   // slow frame is the bus or the renderer.
   const uint32_t spiUs = (pxPerFrame_ * 2UL * 8UL) / 40UL;
+  // flush% and touch% are MEASURED; spi~ is the arithmetic lower bound for the
+  // same transfer. Printing them side by side is the point: if flush% is many
+  // times spi~, the bus is not the problem and the flush is waiting on
+  // something. Whatever ui% has left after flush% and touch% is the renderer.
   snprintf(buf, len,
-           "fps %u ui %u%% loop %u%% worst %ums | %lupx/f %uflush spi~%lums | lvgl %luk/%luk frag %u%%",
-           fps_, uiPct_, busyPct_, worstReported_, (unsigned long)pxPerFrame_, flushPerFrame_,
-           (unsigned long)(spiUs / 1000), (unsigned long)(memUsed_ / 1024),
-           (unsigned long)(memTotal_ / 1024), memFrag_);
+           "fps %u ui %u%% (flush %u%% touch %u%%) loop %u%% worst %ums | %lupx/f %uflush "
+           "spi~%lums | lvgl %luk/%luk frag %u%%",
+           fps_, uiPct_, flushPct_, touchPct_, busyPct_, worstReported_,
+           (unsigned long)pxPerFrame_, flushPerFrame_, (unsigned long)(spiUs / 1000),
+           (unsigned long)(memUsed_ / 1024), (unsigned long)(memTotal_ / 1024), memFrag_);
 }
 
 }  // namespace ui
