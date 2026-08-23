@@ -5,6 +5,7 @@
 
 #include "ui_battery.h"
 #include "ui_demo.h"
+#include "ui_calib.h"
 #include "ui_device.h"
 #include "ui_menu.h"
 #include "ui_perf.h"
@@ -32,9 +33,10 @@ lv_obj_t *menuRoot_ = nullptr;
 //     |
 //     +-- Settings --+-- WiFi
 //     |              +-- Battery
-//     |              +-- Scale    (tare, calibrate, clear)
+//     |              +-- Scale --+-- Calibrate  (keypad, arbitrary mass)
+//     |                          (tare, clear, average)
 //     +-- Sensors  (the live cell scope)
-//     +-- Device   (empty, deliberately)
+//     +-- Device   (raw counts, tare, rate, settings)
 //
 // Sub-pages are OVERLAYS rather than more tiles, because a tileview is a flat
 // sequence and this is a tree: Settings > WiFi has to go BACK to Settings, not
@@ -49,6 +51,7 @@ lv_obj_t *detailSettings_ = nullptr;
 lv_obj_t *detailWifi_ = nullptr;
 lv_obj_t *detailBatt_ = nullptr;
 lv_obj_t *detailScale_ = nullptr;
+lv_obj_t *detailCalib_ = nullptr;
 lv_obj_t *detailSensor_ = nullptr;
 lv_obj_t *detailDevice_ = nullptr;
 
@@ -62,7 +65,6 @@ uint8_t depth_ = 0;
 // Installed by the firmware; absent in the desktop preview, where there are no
 // cells to tare. A null handler leaves the row inert rather than pretending.
 void (*onTare_)(void) = nullptr;
-void (*onCalibrate_)(void) = nullptr;
 void (*onClearCal_)(void) = nullptr;
 void (*onCycleAvg_)(void) = nullptr;
 
@@ -70,22 +72,13 @@ lv_obj_t *settingsMenu_ = nullptr;
 lv_obj_t *scaleMenu_ = nullptr;
 
 void doTare() { if (onTare_) onTare_(); }
-void doCalibrate() { if (onCalibrate_) onCalibrate_(); }
 void doClearCal() { if (onClearCal_) onClearCal_(); }
 void doCycleAvg() { if (onCycleAvg_) onCycleAvg_(); }
 
-// The known mass used by the Calibrate row. A build constant rather than an
-// on-screen number pad: this is done once per assembly, with a mass someone
-// physically owns, and typing digits on a 2" panel to describe it is the wrong
-// trade. Override per bench from platformio.ini.
-#ifndef BOWLSTACK_CAL_MASS_G
-#define BOWLSTACK_CAL_MASS_G 1000
-#endif
-
 void showOnly(lv_obj_t *which) {
-  lv_obj_t *all[] = {detailSettings_, detailWifi_,   detailBatt_,
-                     detailScale_,    detailSensor_, detailDevice_};
-  for (uint8_t i = 0; i < 6; i++) {
+  lv_obj_t *all[] = {detailSettings_, detailWifi_,   detailBatt_,   detailScale_,
+                     detailCalib_,    detailSensor_, detailDevice_};
+  for (uint8_t i = 0; i < 7; i++) {
     if (!all[i]) continue;
     if (all[i] == which) lv_obj_remove_flag(all[i], LV_OBJ_FLAG_HIDDEN);
     else lv_obj_add_flag(all[i], LV_OBJ_FLAG_HIDDEN);
@@ -121,6 +114,7 @@ void openSettings() { push(detailSettings_); }
 void openWifi() { push(detailWifi_); }
 void openBattery() { push(detailBatt_); }
 void openScale() { push(detailScale_); }
+void openCalib() { push(detailCalib_); }
 void openSensor() { push(detailSensor_); }
 void openDevice() { push(detailDevice_); }
 
@@ -195,11 +189,12 @@ void buildPages() {
   detailScale_ = makeDetail(scr);
   scaleMenu_ = menuCreate(detailScale_, "Scale", back);
   menuAddRow(scaleMenu_, "Tare", nullptr, doTare);
-  {
-    static char calLabel[24];
-    snprintf(calLabel, sizeof(calLabel), "Calibrate %d g", (int)BOWLSTACK_CAL_MASS_G);
-    menuAddRow(scaleMenu_, calLabel, nullptr, doCalibrate);
-  }
+  // OPENS A PAGE rather than acting. The mass used to be baked into this label
+  // from a build flag, which assumed the person calibrating owns the weight the
+  // firmware was compiled against -- when what they actually own is whatever is
+  // to hand. The hint carries the last mass used on this unit, so the row still
+  // says what it will do.
+  menuAddRow(scaleMenu_, "Calibrate", nullptr, openCalib);
   menuAddRow(scaleMenu_, "Clear calibration", nullptr, doClearCal);
   // A ROW THAT CYCLES rather than a sub-page of five radio buttons. There are
   // five values, they are ordered, and the whole point of the setting is to
@@ -207,6 +202,10 @@ void buildPages() {
   // better -- which a tap-to-advance row does in one gesture and a sub-page
   // does in four. The current value is the hint on the right.
   menuAddRow(scaleMenu_, "Average", nullptr, doCycleAvg);
+
+  detailCalib_ = makeDetail(scr);
+  buildCalibPage(detailCalib_);
+  calibOnClose(back);
 
   detailWifi_ = makeDetail(scr);
   buildWifiPage(detailWifi_);
@@ -239,7 +238,6 @@ void pagesGoHome() {
 void pagesBack() { back(); }
 
 void pagesOnScaleTare(void (*cb)(void)) { onTare_ = cb; }
-void pagesOnScaleCalibrate(void (*cb)(void)) { onCalibrate_ = cb; }
 void pagesOnScaleClearCal(void (*cb)(void)) { onClearCal_ = cb; }
 void pagesOnScaleCycleAvg(void (*cb)(void)) { onCycleAvg_ = cb; }
 
@@ -276,6 +274,11 @@ void pagesTick(uint32_t nowMs) {
     // The Average row shows the value it will change, which is what makes a
     // tap-to-cycle row usable at all -- otherwise you are guessing where in the
     // sequence you are.
+    // Row 1 is Calibrate: its hint is the mass it will open pre-filled with, so
+    // the row still says what it does now that the label no longer can.
+    static char mass[12];
+    snprintf(mass, sizeof(mass), "%ld g", (long)(s.scale.calMassG + 0.5f));
+    menuSetHint(scaleMenu_, 1, s.scale.calMassG > 0.0f ? mass : "");
     static char avg[8];
     snprintf(avg, sizeof(avg), "%u", s.scale.window);
     menuSetHint(scaleMenu_, 3, avg);
@@ -328,6 +331,8 @@ void pagesTick(uint32_t nowMs) {
       // hints, which are written below regardless of which page is up.
     } else if (top == detailDevice_) {
       updateDevicePage(s);
+    } else if (top == detailCalib_) {
+      updateCalibPage(s);
     } else if (top == detailSensor_) {
       scopeRender();
       if (perfFresh) scopeShowPerf();

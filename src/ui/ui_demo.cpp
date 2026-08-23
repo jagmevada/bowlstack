@@ -125,6 +125,7 @@ void withScale(State &s, float aG, float bG, bool calibrated, bool tared, uint8_
   // The default the firmware ships with, so the preview and the panel agree
   // about what the Average row says before anyone touches it.
   s.scale.window = (uint8_t)BOWLSTACK_AVG_WINDOW;
+  s.scale.calMassG = (float)BOWLSTACK_CAL_MASS_G;
 }
 
 State sEmpty() {

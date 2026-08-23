@@ -98,6 +98,10 @@ struct ScaleView {
   float countsPerGram;
   uint8_t window;  // samples in the moving average
 
+  // The reference mass last calibrated against on this unit. Shown as the
+  // Calibrate row's hint and used to pre-fill the keypad.
+  float calMassG;
+
   uint8_t online;
 };
 

@@ -64,15 +64,25 @@ Every action exists in two places, and they call the same function:
 |---|---|---|
 | `t` | Settings → Scale → Tare | zero both cells |
 | `a` / `b` | **TARE 0** inside each cell panel | zero one cell |
-| `c` | Settings → Scale → Calibrate 175 g | declare the current load |
+| `c` | — | calibrate against the **stored** mass |
+| — | Settings → Scale → Calibrate | keypad: type **any** mass, then OK |
 | `x` | Settings → Scale → Clear calibration | back to counts |
 | `w` | Settings → Scale → Average | step 8→16→32→64→128 |
 | `?` | — | help |
 
-To recalibrate against a different mass: set `BOWLSTACK_CAL_MASS_G`, empty the
-platform, `t`, put the mass on centred, let it settle, `c`. The factor lands in
-NVS and survives reflashing; **Clear calibration removes the key** rather than
-writing a zero, so the build default applies again at the next boot.
+**Calibrating with any mass you have:** empty the platform → `t` (or the Tare
+row) → put the mass on centred → **Settings → Scale → Calibrate** → type the
+grams → OK. The page shows the live deflection in counts while you type, which
+is how you catch the two ways this goes wrong: nothing actually on the platform,
+or the tare taken while the mass was already there. Both give a deflection near
+zero and both are invisible if you only look at what you typed.
+
+The factor **and the mass** land in NVS and survive reflashing — the keypad
+opens pre-filled with whatever this unit was last calibrated against, and `c` on
+the console uses that same stored mass. `BOWLSTACK_CAL_MASS_G` is now only the
+value a never-calibrated board starts from. **Clear calibration removes the NVS
+key** rather than writing a zero, so the build default applies again at the next
+boot.
 
 Calibration refuses a mass under 20 g, and refuses a deflection under 5,000
 counts — the second is the real guard, since it scales with whatever the cells

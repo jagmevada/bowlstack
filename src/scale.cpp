@@ -57,6 +57,7 @@ const char *KEY_OFF_B = "offB";
 const char *KEY_CPG = "cpg";
 const char *KEY_TARED = "tared";
 const char *KEY_WINDOW = "win";
+const char *KEY_CALMASS = "calmass";
 
 // What a calibration must clear, and the important half is the SECOND test.
 //
@@ -85,6 +86,13 @@ const int32_t OVER_RANGE_COUNTS = 8000000;  // 95% of 2^23
 // size implies about the usable range.
 #ifndef BOWLSTACK_COUNTS_PER_GRAM
 #define BOWLSTACK_COUNTS_PER_GRAM 0.0f
+#endif
+
+// The mass the calibrate keypad OPENS WITH on a unit that has never been
+// calibrated. After the first successful calibration the stored one wins, so
+// this is a starting point rather than a setting.
+#ifndef BOWLSTACK_CAL_MASS_G
+#define BOWLSTACK_CAL_MASS_G 175
 #endif
 
 // --- the trimmed window ----------------------------------------------------
@@ -167,6 +175,7 @@ int32_t offset_[CELLS] = {0, 0};
 float countsPerGram_ = 0.0f;
 bool tared_ = false;
 uint8_t window_n_ = BOWLSTACK_AVG_WINDOW;
+float calMass_ = (float)BOWLSTACK_CAL_MASS_G;
 volatile uint8_t wantWindow_ = 0;  // 0 = no change pending
 
 Preferences prefs_;
@@ -205,6 +214,8 @@ void loadPersisted() {
   tared_ = prefs_.getBool(KEY_TARED, false);
   window_n_ = prefs_.getUChar(KEY_WINDOW, (uint8_t)BOWLSTACK_AVG_WINDOW);
   if (window_n_ < 4 || window_n_ > WINDOW_MAX) window_n_ = BOWLSTACK_AVG_WINDOW;
+  calMass_ = prefs_.getFloat(KEY_CALMASS, (float)BOWLSTACK_CAL_MASS_G);
+  if (calMass_ < MIN_CAL_GRAMS) calMass_ = (float)BOWLSTACK_CAL_MASS_G;
   prefs_.end();
 
   if (countsPerGram_ > 0.0f) {
@@ -241,12 +252,18 @@ void storeOffsets() {
 void storeFactor() {
   prefs_.begin(NVS_NS, false);
   prefs_.putFloat(KEY_CPG, countsPerGram_);
+  // The MASS goes with the factor, not because anything computes from it but
+  // because the next person to calibrate this unit almost certainly has the
+  // same weight in their hand. Pre-filling the keypad with it turns a four-tap
+  // job into one.
+  prefs_.putFloat(KEY_CALMASS, calMass_);
   prefs_.end();
 }
 
 void publish() {
   Snapshot s{};
   s.window = window_n_;
+  s.calMassG = calMass_;
   s.countsPerGram = countsPerGram_;
   s.calibrated = countsPerGram_ > 0.0f;
   s.tared = tared_;
@@ -366,6 +383,7 @@ void serviceCommands() {
       // catching here rather than as a scale that counts downward.
       if (online == CELLS && sumNet >= MIN_CAL_COUNTS) {
         countsPerGram_ = (float)sumNet / known;
+        calMass_ = known;
         storeFactor();
         calResult_ = true;
         Serial.printf("scale: calibrated -- %ld counts for %.0f g = %.3f counts/g\n",
@@ -522,6 +540,8 @@ void tareCell(uint8_t index) {
 }
 
 uint8_t window() { return window_n_; }
+
+float calMass() { return calMass_; }
 
 uint8_t windowTrim() {
   const uint8_t t = (uint8_t)(window_n_ / 32);

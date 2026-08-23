@@ -41,6 +41,7 @@
 #include "lgfx_waveshare_s3.h"
 #include "logo128.h"
 #include "scale.h"
+#include "ui_calib.h"
 #include "ui_demo.h"
 #include "ui_pages.h"
 #include "ui_perf.h"
@@ -226,6 +227,7 @@ void publishScale(uint32_t nowMs) {
   s.scale.overRange = sn.overRange;
   s.scale.countsPerGram = sn.countsPerGram;
   s.scale.window = sn.window;
+  s.scale.calMassG = sn.calMassG;
 
   int32_t totalCounts = 0;
   for (uint8_t i = 0; i < ui::CELLS; i++) {
@@ -273,19 +275,44 @@ void publishScale(uint32_t nowMs) {
 // Called on the UI task from a row tap. scale::tare() and clearCalibration()
 // only raise a flag for the scale task, so they return at once; calibrate()
 // waits, bounded, because its answer decides what the screen may show next.
-#ifndef BOWLSTACK_CAL_MASS_G
-#define BOWLSTACK_CAL_MASS_G 1000
-#endif
+//
+// The calibration mass is no longer a constant here -- it lives in NVS and is
+// typed on the Calibrate page. scale::calMass() is the one place that knows it.
 
 void onTare() {
   Serial.println("ui: tare requested");
   scale::tare();
 }
 
-void onCalibrate() {
-  Serial.printf("ui: calibrate against %d g requested\n", (int)BOWLSTACK_CAL_MASS_G);
-  const bool ok = scale::calibrate((float)BOWLSTACK_CAL_MASS_G);
-  Serial.printf("ui: calibration %s\n", ok ? "accepted" : "REFUSED (see the line above)");
+// Called from the keypad's OK, with whatever mass was typed.
+//
+// THE REFUSAL REASON IS WORKED OUT HERE rather than returned by scale::, and
+// deliberately: the causes are all visible in the snapshot, and a page that
+// said only "refused" would send somebody to a serial console to find out why
+// -- which rather defeats the point of putting calibration on the device.
+void onCalibApply(float grams) {
+  Serial.printf("ui: calibrate against %.0f g requested\n", grams);
+  const bool ok = scale::calibrate(grams);
+  const scale::Snapshot sn = scale::snapshot();
+
+  char msg[48];
+  if (ok) {
+    snprintf(msg, sizeof(msg), "ok -- %.3f counts/g", sn.countsPerGram);
+  } else if (sn.online < scale::CELLS) {
+    snprintf(msg, sizeof(msg), "only %u of %u cells online", sn.online, scale::CELLS);
+  } else if (!sn.tared) {
+    snprintf(msg, sizeof(msg), "tare on an empty platform first");
+  } else {
+    // The remaining case is a deflection too small to derive anything from,
+    // which in practice means the mass is not actually on the platform -- or
+    // the tare was taken with it already there, which comes to the same thing.
+    snprintf(msg, sizeof(msg), "no load: %+ld counts", (long)(sn.cell[0].counts -
+                                                              sn.cell[0].offset +
+                                                              sn.cell[1].counts -
+                                                              sn.cell[1].offset));
+  }
+  Serial.printf("ui: calibration %s\n", ok ? msg : "REFUSED");
+  ui::calibSetResult(msg, ok);
 }
 
 void onTareCell(uint8_t i) {
@@ -335,10 +362,11 @@ void serviceConsole() {
         break;
       case 'c':
       case 'C':
-        Serial.printf("\n> calibrate against %d g\n", (int)BOWLSTACK_CAL_MASS_G);
-        Serial.printf("  %s\n", scale::calibrate((float)BOWLSTACK_CAL_MASS_G)
-                                    ? "accepted"
-                                    : "REFUSED -- see the line above");
+        // The STORED mass -- the same one the keypad opens with -- so the
+        // console shortcut and the on-screen page calibrate against the same
+        // thing. To use a different weight, type it on the page.
+        Serial.printf("\n> calibrate against the stored %.0f g\n", scale::calMass());
+        onCalibApply(scale::calMass());
         break;
       case 'x':
       case 'X':
@@ -353,7 +381,8 @@ void serviceConsole() {
         Serial.println(
             "\n  t  tare BOTH cells at whatever is on the platform NOW\n"
             "  a  tare cell A only      b  tare cell B only\n"
-            "  c  calibrate -- declares that the current load is the known mass\n"
+            "  c  calibrate against the STORED mass -- Settings > Scale >\n"
+            "     Calibrate on the panel to type a different one\n"
             "  x  clear the calibration and go back to counts\n"
             "  w  step the moving average 8 -> 16 -> 32 -> 64 -> 128 -> 8\n"
             "\n  Order matters: tare on an EMPTY platform, then put the mass on,\n"
@@ -499,9 +528,12 @@ void setup() {
 
   ui::pagesOnScaleTare(onTare);
   ui::weightOnTareCell(onTareCell);
-  ui::pagesOnScaleCalibrate(onCalibrate);
   ui::pagesOnScaleClearCal(onClearCal);
   ui::pagesOnScaleCycleAvg(onCycleAvg);
+  ui::calibOnApply(onCalibApply);
+  // Opens pre-filled with whatever this unit was last calibrated against, which
+  // on a fresh board is the build default.
+  ui::calibSetMass(scale::calMass());
 
   ui::buildPages();
   Serial.println("  console: t = tare both, a/b = tare one, c = calibrate, x = clear, ? = help");

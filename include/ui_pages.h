@@ -42,12 +42,10 @@ void pagesBack();
 // desktop preview installs none and the rows are inert, which is the honest
 // behaviour for a machine with no cells attached.
 //
-// The calibration mass is a build constant rather than an on-screen entry.
-// Typing a number on a 2" panel to do a thing that is done once per assembly is
-// the wrong trade -- put the known mass on the platform, tap the row, and the
-// factor follows.
+// Calibration itself is NOT here: it has its own page with a keypad, and it
+// installs its own handler through ui_calib.h. See that header for why the mass
+// stopped being a build constant.
 void pagesOnScaleTare(void (*cb)(void));
-void pagesOnScaleCalibrate(void (*cb)(void));
 void pagesOnScaleClearCal(void (*cb)(void));
 
 // Steps the moving-average length to the next of 8/16/32/64/128 and wraps. A

@@ -156,7 +156,8 @@ struct Snapshot {
   float countsPerGram;
   bool calibrated;
 
-  uint8_t window;  // samples currently averaged
+  uint8_t window;   // samples currently averaged
+  float calMassG;   // reference mass last calibrated against
   uint8_t online;  // cells currently producing conversions
   bool tared;      // a tare has been taken since the offsets were last cleared
   bool overRange;  // at least one cell is saturated -- the total is not a weight
@@ -202,11 +203,19 @@ void tare();
 void tareCell(uint8_t index);
 
 // Records that the current load is `knownGrams` and derives countsPerGram from
-// it. Requires a tare first, and a mass large enough to be worth measuring --
-// calibrating against 5 g of noise would fix a wildly wrong factor.
+// it. Requires a tare first, and a deflection large enough to be worth
+// measuring -- calibrating against noise would fix a wildly wrong factor.
+//
+// On success the mass is PERSISTED alongside the factor, so the next
+// calibration on this unit opens pre-filled with the weight that was used last
+// time. Recalibrating with the same reference is then one tap.
 //
 // Returns false and changes nothing if either condition fails.
 bool calibrate(float knownGrams);
+
+// The reference mass last calibrated against on this unit, or the build default
+// if it has never been calibrated. Grams.
+float calMass();
 
 // Forgets the calibration. The UI drops back to counts, which is the honest
 // display for an uncalibrated scale.
