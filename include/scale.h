@@ -43,10 +43,71 @@ static const uint8_t CELLS = 2;
 // one large sample rather than as spread -- so the extremes are discarded
 // rather than averaged in.
 //
-// 8 samples at 80 SPS is 100 ms of group delay: fast enough that placing a bowl
-// looks instantaneous, long enough to bury the converter's own noise.
-static const uint8_t WINDOW = 8;
-static const uint8_t WINDOW_TRIM = 1;
+// THE WINDOW IS CHOSEN AT RUNTIME, from the Settings page or the console,
+// because the right value is a judgement about the gesture rather than a fact
+// about the hardware -- and a judgement is far easier to make by flipping
+// between two of them with a mass on the platform than by reflashing.
+//
+// The whole trade is one line: NOISE FALLS WITH THE SQUARE ROOT of the window
+// and LATENCY RISES LINEARLY with it. Measured on this assembly -- 79 SPS,
+// +/-200 counts of raw peak-to-peak, 106.857 counts/g:
+//
+//     N     settling       jitter in the last digit
+//     8     ~100 ms        +/-0.7 g
+//    16     ~200 ms        +/-0.5 g
+//    32     ~400 ms        +/-0.3 g
+//    64     ~810 ms        +/-0.2 g
+//   128     ~1.6 s         +/-0.17 g
+//
+// The gains are shrinking and the wait is not, which is why 128 is the top of
+// the range rather than the start of one.
+//
+// There is a second effect that looks like a coincidence and is not: a
+// slower-moving number changes its rendered digits less often, and every digit
+// change on this panel costs a repaint. Averaging harder makes the screen
+// cheaper as well as steadier, so N and the frame rate move together -- the
+// dashboard went from 11 fps to 13 on this change alone.
+static const uint8_t WINDOW_CHOICES[] = {8, 16, 32, 64, 128};
+static const uint8_t WINDOW_CHOICE_COUNT = 5;
+
+// The ring is sized for the LARGEST choice and only `window()` of it is used, so
+// changing N is a variable assignment rather than a reallocation. 128 int32s per
+// cell is 1 kB of static RAM for both, which is the right thing to spend to keep
+// a user-facing setting out of the heap.
+static const uint8_t WINDOW_MAX = 128;
+
+#ifndef BOWLSTACK_AVG_WINDOW
+#define BOWLSTACK_AVG_WINDOW 64
+#endif
+static_assert(BOWLSTACK_AVG_WINDOW >= 4 && BOWLSTACK_AVG_WINDOW <= 128,
+              "BOWLSTACK_AVG_WINDOW must be between 4 and 128");
+
+// Samples currently averaged, and the setter. setWindow() snaps to the nearest
+// allowed choice and persists it; the build flag is only the factory default for
+// a unit that has never been told otherwise.
+//
+// CHANGING N CLEARS THE WINDOW rather than reinterpreting what is in it. A
+// window that grew would average new samples against old ones taken under a
+// different setting, and one that shrank would keep the newest N of a ring
+// whose cursor is somewhere else entirely. Both produce a reading that is wrong
+// for exactly one window-length -- which is precisely how long somebody would
+// be looking at it after making the change.
+uint8_t window();
+void setWindow(uint8_t n);
+
+// Steps to the next choice and wraps, for a menu row that is tapped rather than
+// dragged. Returns the new value.
+uint8_t cycleWindow();
+
+// Trim scales with the window rather than being pinned, so it stays a small
+// fraction of the samples instead of becoming a rounding error at 128 or half
+// the data at 8. N/32, floored at 1:
+//
+//     8 -> 1    16 -> 1    32 -> 1    64 -> 2    128 -> 4
+//
+// Its job is to keep ONE knock on the bench out of the reading rather than
+// smeared through it. A plain mean cannot do that; a mean of the middle can.
+uint8_t windowTrim();
 
 struct CellSnapshot {
   CellState state;
@@ -68,6 +129,16 @@ struct CellSnapshot {
   int32_t pp;
   int32_t offset;     // tare, in counts
   float grams;        // this cell's share; meaningless unless `calibrated`
+
+  // The conversion has hit the end of the 24-bit range, so this cell is no
+  // longer measuring -- it is reporting its own ceiling.
+  //
+  // IT HAS TO BE SAID RATHER THAN INFERRED. A saturated cell does not fail; it
+  // returns a large, steady, entirely plausible number, and the weight simply
+  // stops rising as more is added. Everything else on this screen would keep
+  // looking healthy. On a 20 kg cell at this gain the ceiling arrives around
+  // 7 kg, which is well inside what someone would expect to be able to weigh.
+  bool overRange;
 };
 
 struct Snapshot {
@@ -85,8 +156,10 @@ struct Snapshot {
   float countsPerGram;
   bool calibrated;
 
+  uint8_t window;  // samples currently averaged
   uint8_t online;  // cells currently producing conversions
   bool tared;      // a tare has been taken since the offsets were last cleared
+  bool overRange;  // at least one cell is saturated -- the total is not a weight
 
   // Increments on every publish. Lets a reader tell a fresh snapshot from a
   // repeat without comparing floats.
@@ -114,6 +187,19 @@ bool ready();
 // is the other one, and confusing them gives a scale that reads plausibly and
 // wrongly.
 void tare();
+
+// Zero ONE cell. Separate from tare() because the two answer different
+// questions: tare() zeroes the assembly so the next thing placed on it reads
+// its own weight, while this zeroes one corner against the others.
+//
+// It is the setup tool. Two cells under one platform rarely start level -- one
+// mount sits proud, one cell has more of the platform over it -- and the raw
+// counts say so loudly while the total, being a sum, says nothing at all. Being
+// able to zero A and B independently is how you find out whether an uneven
+// split is the mounting or the cell.
+//
+// A tare taken this way is persisted like any other.
+void tareCell(uint8_t index);
 
 // Records that the current load is `knownGrams` and derives countsPerGram from
 // it. Requires a tare first, and a mass large enough to be worth measuring --

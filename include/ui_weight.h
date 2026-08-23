@@ -36,4 +36,18 @@ void buildWeight(lv_obj_t *parent = nullptr);
 // string changed -- and this runs every frame against a value that moves.
 void updateWeight(const State &s);
 
+// Each cell panel carries its own zero button, and this is what it calls --
+// with 0 for A and 1 for B.
+//
+// A BUTTON PER CELL RATHER THAN ONE FOR THE PAIR, because they answer different
+// questions. Zeroing the assembly is what you do before weighing something.
+// Zeroing ONE corner is what you do while setting the platform up, when the two
+// raw counts start far apart and you want to know whether that is the mounting
+// or the cell -- and the total, being a sum, cannot tell you.
+//
+// It sits IN the cell's own panel rather than in a row underneath, so which
+// button belongs to which cell needs no label. A function pointer for the same
+// reason ui_state.h exists: src/ui/ is pure LVGL and cannot reach scale.cpp.
+void weightOnTareCell(void (*cb)(uint8_t cell));
+
 }  // namespace ui

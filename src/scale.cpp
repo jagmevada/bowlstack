@@ -56,12 +56,36 @@ const char *KEY_OFF_A = "offA";
 const char *KEY_OFF_B = "offB";
 const char *KEY_CPG = "cpg";
 const char *KEY_TARED = "tared";
+const char *KEY_WINDOW = "win";
 
-// Below this a calibration is refused. At gain 128 the assembly produces of the
-// order of a hundred counts per gram, so 200 g is tens of thousands of counts
-// -- far above anything noise can fake. Accepting a 5 g "known mass" would let
-// a noise excursion set the factor for every reading afterwards.
-const float MIN_CAL_GRAMS = 200.0f;
+// What a calibration must clear, and the important half is the SECOND test.
+//
+// The first version of this demanded 200 g, which was a guess dressed as a
+// guard: it was derived from an ASSUMED sensitivity of about a hundred counts
+// per gram, and nobody had measured it. A 175 g reference mass -- a perfectly
+// good one, 18,700 counts against 200 of noise -- was refused by a rule that had
+// no idea what the cells were.
+//
+// So the real test is on COUNTS, which is sensitivity-independent: the
+// deflection has to be far enough above the noise floor that the factor derived
+// from it means something. 5,000 counts is twenty-five times the +/-200 measured
+// here and is cleared by the 175 g reference with room to spare. The gram figure
+// stays only as a sanity floor against a fat-fingered zero.
+const float MIN_CAL_GRAMS = 20.0f;
+const int32_t MIN_CAL_COUNTS = 5000;
+
+// A NAU7802 conversion is signed 24-bit. Within a few per cent of the end of
+// that range the part is no longer measuring the bridge, it is reporting its own
+// ceiling -- and it does so as a large, steady, entirely plausible number. The
+// weight just stops rising. Called out rather than left to be noticed.
+const int32_t OVER_RANGE_COUNTS = 8000000;  // 95% of 2^23
+
+// The factory default, overwritten by the first calibration on any unit. See
+// the comment in platformio.ini for where the number came from and for what its
+// size implies about the usable range.
+#ifndef BOWLSTACK_COUNTS_PER_GRAM
+#define BOWLSTACK_COUNTS_PER_GRAM 0.0f
+#endif
 
 // --- the trimmed window ----------------------------------------------------
 class CountWindow {
@@ -70,10 +94,13 @@ class CountWindow {
     count_ = 0;
     next_ = 0;
   }
-  void push(int32_t v) {
+  // The active length is passed in rather than stored, so the one place that
+  // owns the setting is scale::window() and this class cannot disagree with it.
+  void push(int32_t v, uint8_t n) {
+    if (n > WINDOW_MAX) n = WINDOW_MAX;
     ring_[next_] = v;
-    next_ = (uint8_t)((next_ + 1) % WINDOW);
-    if (count_ < WINDOW) count_++;
+    next_ = (uint8_t)((next_ + 1) % n);
+    if (count_ < n) count_++;
   }
   uint8_t size() const { return count_; }
 
@@ -94,14 +121,23 @@ class CountWindow {
   // Discards the WINDOW_TRIM highest and lowest before averaging. Below
   // 2*TRIM+2 samples the trim is skipped rather than applied to almost nothing
   // -- trimming 2 of 3 samples reports the median and calls it an average.
-  int32_t mean() const {
+  int32_t mean(uint8_t trim) const {
     if (count_ == 0) return 0;
-    int32_t sorted[WINDOW];
+    int32_t sorted[WINDOW_MAX];
     for (uint8_t i = 0; i < count_; i++) sorted[i] = ring_[i];
-    // Insertion sort. count_ is 8; anything cleverer is slower here.
+    // Insertion sort, and it stays an insertion sort at 64 samples. Worst case
+    // is ~2,000 comparisons; this runs twice per publish at 20 Hz, so about
+    // 80,000 comparisons a second against a 240 MHz core. Reaching for
+    // something asymptotically better would cost more in code than it saves in
+    // cycles, and on nearly-sorted data -- which a settled load cell produces --
+    // insertion sort is close to linear anyway.
+    //
+    // int16_t, not int8_t: with WINDOW at 64 the index runs to 63 and j to -1,
+    // which int8_t still holds, but the type should not have to be re-checked
+    // every time somebody widens the window.
     for (uint8_t i = 1; i < count_; i++) {
       const int32_t v = sorted[i];
-      int8_t j = (int8_t)i - 1;
+      int16_t j = (int16_t)i - 1;
       while (j >= 0 && sorted[j] > v) {
         sorted[j + 1] = sorted[j];
         j--;
@@ -109,9 +145,9 @@ class CountWindow {
       sorted[j + 1] = v;
     }
     uint8_t lo = 0, hi = count_;
-    if (count_ >= (uint8_t)(2 * WINDOW_TRIM + 2)) {
-      lo = WINDOW_TRIM;
-      hi = (uint8_t)(count_ - WINDOW_TRIM);
+    if (count_ >= (uint8_t)(2 * trim + 2)) {
+      lo = trim;
+      hi = (uint8_t)(count_ - trim);
     }
     int64_t acc = 0;
     for (uint8_t i = lo; i < hi; i++) acc += sorted[i];
@@ -119,7 +155,7 @@ class CountWindow {
   }
 
  private:
-  int32_t ring_[WINDOW] = {0};
+  int32_t ring_[WINDOW_MAX] = {0};
   uint8_t count_ = 0;
   uint8_t next_ = 0;
 };
@@ -130,6 +166,8 @@ CountWindow window_[CELLS];
 int32_t offset_[CELLS] = {0, 0};
 float countsPerGram_ = 0.0f;
 bool tared_ = false;
+uint8_t window_n_ = BOWLSTACK_AVG_WINDOW;
+volatile uint8_t wantWindow_ = 0;  // 0 = no change pending
 
 Preferences prefs_;
 
@@ -143,6 +181,9 @@ TaskHandle_t task_ = nullptr;
 // and calibrate must run where the windows live, or they would read a filtered
 // value that the task is concurrently rewriting.
 volatile bool wantTare_ = false;
+// A BITMASK rather than a flag, so "tare A" and "tare B" arriving in the same
+// task period do not lose one of each other.
+volatile uint8_t wantTareMask_ = 0;
 volatile bool wantClearCal_ = false;
 volatile float wantCalGrams_ = 0.0f;
 volatile bool calResult_ = false;
@@ -152,17 +193,30 @@ void loadPersisted() {
   prefs_.begin(NVS_NS, false);
   offset_[0] = prefs_.getInt(KEY_OFF_A, 0);
   offset_[1] = prefs_.getInt(KEY_OFF_B, 0);
-  countsPerGram_ = prefs_.getFloat(KEY_CPG, 0.0f);
+  // The build-time default is the fallback, so a freshly flashed board reads
+  // kilograms straight away instead of counts. NVS still wins: a unit that has
+  // been calibrated against its own mass keeps that figure across reflashes,
+  // which is the whole reason the factor lives in NVS rather than in the image.
+  countsPerGram_ = prefs_.getFloat(KEY_CPG, BOWLSTACK_COUNTS_PER_GRAM);
   // Stored as its own flag rather than inferred from a non-zero offset. The
   // inference is almost always right and wrong exactly once -- a platform that
   // happened to tare at 0 counts would come back from a reboot claiming it had
   // never been tared.
   tared_ = prefs_.getBool(KEY_TARED, false);
+  window_n_ = prefs_.getUChar(KEY_WINDOW, (uint8_t)BOWLSTACK_AVG_WINDOW);
+  if (window_n_ < 4 || window_n_ > WINDOW_MAX) window_n_ = BOWLSTACK_AVG_WINDOW;
   prefs_.end();
 
   if (countsPerGram_ > 0.0f) {
-    Serial.printf("  restored: %.3f counts/g, tare %ld / %ld\n", countsPerGram_,
-                  (long)offset_[0], (long)offset_[1]);
+    Serial.printf("  %.3f counts/g, tare %ld / %ld, window %u samples\n", countsPerGram_,
+                  (long)offset_[0], (long)offset_[1], window_n_);
+    // THE CEILING, STATED AT BOOT. A signed 24-bit conversion divided by the
+    // measured sensitivity is the most load a single cell can report before it
+    // saturates -- and on this assembly that lands well below the number
+    // printed on the side of the cell. Far better to read it once here than to
+    // meet it as a weight that stopped going up.
+    Serial.printf("  full scale: ~%.2f kg on ONE cell before the ADC saturates\n",
+                  (float)OVER_RANGE_COUNTS / countsPerGram_ / 1000.0f);
   } else {
     // Said out loud rather than left to be inferred from a screen showing
     // counts. An uncalibrated scale is a working ADC, not a broken scale.
@@ -192,6 +246,7 @@ void storeFactor() {
 
 void publish() {
   Snapshot s{};
+  s.window = window_n_;
   s.countsPerGram = countsPerGram_;
   s.calibrated = countsPerGram_ > 0.0f;
   s.tared = tared_;
@@ -202,9 +257,14 @@ void publish() {
     c.state = cell_[i].state();
     c.revision = cell_[i].revision();
     c.rawCounts = cell_[i].counts();
-    c.counts = window_[i].mean();
+    c.counts = window_[i].mean(windowTrim());
     c.samples = window_[i].size();
     c.pp = window_[i].pp();
+    // Tested on the RAW conversion, not the filtered mean. A trimmed average of
+    // saturated samples is still saturated, but it lags -- and the point of this
+    // flag is to fire the moment the part stops measuring.
+    c.overRange = (c.rawCounts > OVER_RANGE_COUNTS) || (c.rawCounts < -OVER_RANGE_COUNTS);
+    if (c.overRange) s.overRange = true;
     c.sps = cell_[i].sps();
     c.offset = offset_[i];
 
@@ -231,24 +291,62 @@ void publish() {
 }
 
 void serviceCommands() {
+  if (wantWindow_) {
+    const uint8_t n = wantWindow_;
+    wantWindow_ = 0;
+    if (n != window_n_) {
+      window_n_ = n;
+      // CLEARED, not reinterpreted. A window that grew would average new
+      // samples against old ones taken under a different setting; one that
+      // shrank would keep the newest N of a ring whose cursor is elsewhere.
+      // Either way the reading is wrong for exactly one window-length, which is
+      // precisely how long somebody stares at it after making the change.
+      for (uint8_t i = 0; i < CELLS; i++) window_[i].clear();
+      prefs_.begin(NVS_NS, false);
+      prefs_.putUChar(KEY_WINDOW, window_n_);
+      prefs_.end();
+      Serial.printf("scale: averaging %u samples (~%u ms at 79 SPS), trim %u\n", window_n_,
+                    (unsigned)((window_n_ * 1000UL) / 79UL), windowTrim());
+    }
+  }
+
   if (wantClearCal_) {
     wantClearCal_ = false;
     countsPerGram_ = 0.0f;
-    storeFactor();
-    Serial.println("scale: calibration cleared -- back to counts");
+    // REMOVED rather than stored as zero, and the difference is not cosmetic.
+    // loadPersisted() takes the build-time default only when the key is ABSENT,
+    // so writing a 0 would pin this unit to "uncalibrated" forever -- a later
+    // reflash with a corrected factor would silently fail to take, and the only
+    // symptom would be a screen still showing counts.
+    prefs_.begin(NVS_NS, false);
+    prefs_.remove(KEY_CPG);
+    prefs_.end();
+    Serial.println("scale: calibration cleared -- back to counts, and the build default");
+    Serial.println("       will apply again at the next boot");
   }
 
-  if (wantTare_) {
+  if (wantTare_ || wantTareMask_) {
+    // wantTare_ means the whole assembly; the mask means named cells. Reading
+    // both here rather than having tare() set an all-ones mask keeps "zero
+    // everything" working even if a cell is offline at the moment it is asked.
+    const uint8_t mask = wantTare_ ? (uint8_t)0xFF : wantTareMask_;
     wantTare_ = false;
+    wantTareMask_ = 0;
+
     for (uint8_t i = 0; i < CELLS; i++) {
+      if (!(mask & (1u << i))) continue;
       // Only a cell that is actually converting can be tared. Zeroing an
       // offline cell against whatever its window last held would bake that
       // stale value in as the platform's weight.
-      if (cell_[i].state() == CellState::Online) offset_[i] = window_[i].mean();
+      if (cell_[i].state() == CellState::Online) offset_[i] = window_[i].mean(windowTrim());
     }
     tared_ = true;
     storeOffsets();
-    Serial.printf("scale: tared at %ld / %ld counts\n", (long)offset_[0], (long)offset_[1]);
+    // Which cells were zeroed, not just that a tare happened. With two buttons
+    // on the dashboard the interesting part of the log line is WHICH one was
+    // pressed.
+    Serial.printf("scale: tared %c%c at %ld / %ld counts\n", (mask & 1) ? 'A' : '-',
+                  (mask & 2) ? 'B' : '-', (long)offset_[0], (long)offset_[1]);
   }
 
   if (!calDone_) {
@@ -259,14 +357,14 @@ void serviceCommands() {
       uint8_t online = 0;
       for (uint8_t i = 0; i < CELLS; i++) {
         if (cell_[i].state() != CellState::Online) continue;
-        sumNet += window_[i].mean() - offset_[i];
+        sumNet += window_[i].mean(windowTrim()) - offset_[i];
         online++;
       }
       // Both cells, or the factor describes half a platform. And a positive
       // deflection, or the mass is not on it -- a negative sum with a mass
       // supposedly loaded means the cells are wired backwards, which is worth
       // catching here rather than as a scale that counts downward.
-      if (online == CELLS && sumNet > 0) {
+      if (online == CELLS && sumNet >= MIN_CAL_COUNTS) {
         countsPerGram_ = (float)sumNet / known;
         storeFactor();
         calResult_ = true;
@@ -290,7 +388,7 @@ void scaleTask(void *) {
     const uint32_t now = millis();
 
     for (uint8_t i = 0; i < CELLS; i++) {
-      if (cell_[i].poll(now)) window_[i].push(cell_[i].counts());
+      if (cell_[i].poll(now)) window_[i].push(cell_[i].counts(), window_n_);
       // A cell that dropped offline must not keep a window that still averages
       // to a plausible weight. Cleared here rather than in publish(), so the
       // sample count on the diagnostics page tells the truth about what is
@@ -417,6 +515,50 @@ bool ready() {
 }
 
 void tare() { wantTare_ = true; }
+
+void tareCell(uint8_t index) {
+  if (index >= CELLS) return;
+  wantTareMask_ = (uint8_t)(wantTareMask_ | (1u << index));
+}
+
+uint8_t window() { return window_n_; }
+
+uint8_t windowTrim() {
+  const uint8_t t = (uint8_t)(window_n_ / 32);
+  return t ? t : (uint8_t)1;
+}
+
+void setWindow(uint8_t n) {
+  // Snapped to the nearest allowed choice rather than accepted verbatim. The
+  // menu and the console can only produce values from the list, but a future
+  // caller -- a config file, a provisioning script -- should not be able to put
+  // the filter somewhere the UI cannot then describe.
+  uint8_t best = WINDOW_CHOICES[0];
+  uint16_t bestErr = 0xFFFF;
+  for (uint8_t i = 0; i < WINDOW_CHOICE_COUNT; i++) {
+    const int16_t d = (int16_t)WINDOW_CHOICES[i] - (int16_t)n;
+    const uint16_t err = (uint16_t)(d < 0 ? -d : d);
+    if (err < bestErr) {
+      bestErr = err;
+      best = WINDOW_CHOICES[i];
+    }
+  }
+  wantWindow_ = best;
+}
+
+uint8_t cycleWindow() {
+  // Reads the PENDING value if one is queued, so two quick taps step twice
+  // rather than both stepping off the same starting point.
+  const uint8_t from = wantWindow_ ? wantWindow_ : window_n_;
+  for (uint8_t i = 0; i < WINDOW_CHOICE_COUNT; i++) {
+    if (WINDOW_CHOICES[i] != from) continue;
+    const uint8_t next = WINDOW_CHOICES[(i + 1) % WINDOW_CHOICE_COUNT];
+    wantWindow_ = next;
+    return next;
+  }
+  wantWindow_ = WINDOW_CHOICES[0];
+  return WINDOW_CHOICES[0];
+}
 
 bool calibrate(float knownGrams) {
   wantCalGrams_ = knownGrams;

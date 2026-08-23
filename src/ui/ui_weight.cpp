@@ -29,6 +29,7 @@ const uint32_t C_MUTED = 0x8B949E;
 const uint32_t C_WARN = 0x9E6A03;
 const uint32_t C_FAULT = 0xB62324;
 const uint32_t C_CELL_FAULT = 0xE05C5C;
+const uint32_t C_KEY = 0x21262D;
 
 lv_obj_t *lblCaption;
 lv_obj_t *lblTotal;
@@ -39,6 +40,13 @@ lv_obj_t *cellName[CELLS];
 lv_obj_t *cellValue[CELLS];
 lv_obj_t *cellSub[CELLS];
 lv_obj_t *lblRate;
+lv_obj_t *cellZero[CELLS];
+void (*onTareCell_)(uint8_t) = nullptr;
+
+void zeroClicked(lv_event_t *e) {
+  const uint8_t i = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
+  if (onTareCell_) onTareCell_(i);
+}
 
 void styleFlat(lv_obj_t *o) {
   lv_obj_set_style_bg_opa(o, LV_OPA_TRANSP, LV_PART_MAIN);
@@ -126,6 +134,28 @@ lv_obj_t *makeCell(lv_obj_t *parent, uint8_t i, const char *name) {
   lv_obj_set_style_text_align(cellSub[i], LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
   lv_label_set_long_mode(cellSub[i], LV_LABEL_LONG_CLIP);
   lv_label_set_text(cellSub[i], "");
+
+  // The cell's own zero button, INSIDE its panel. Which button belongs to which
+  // cell then needs no label, which is the whole reason it is here rather than
+  // in a row of two identical buttons underneath.
+  //
+  // 32 px rather than the 44 the menu rows settled on. It is a deliberate step
+  // down: this is a setup control rather than something touched during a
+  // service, it is 100 px wide which buys back most of what the height gives
+  // up, and the alternative was taking the height out of the readings above it.
+  cellZero[i] = lv_button_create(box);
+  lv_obj_set_width(cellZero[i], LV_PCT(100));
+  lv_obj_set_height(cellZero[i], 32);
+  lv_obj_set_style_radius(cellZero[i], 4, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(cellZero[i], lv_color_hex(C_KEY), LV_PART_MAIN);
+  lv_obj_set_style_margin_top(cellZero[i], 4, LV_PART_MAIN);
+  lv_obj_add_event_cb(cellZero[i], zeroClicked, LV_EVENT_CLICKED,
+                      (void *)(uintptr_t)i);
+  lv_obj_t *zl = lv_label_create(cellZero[i]);
+  lv_obj_set_style_text_font(zl, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_set_style_text_color(zl, lv_color_hex(C_TEXT), LV_PART_MAIN);
+  lv_label_set_text(zl, "TARE 0");
+  lv_obj_center(zl);
 
   cellBox[i] = box;
   return box;
@@ -255,6 +285,8 @@ void buildWeight(lv_obj_t *parent) {
   lv_label_set_text(lblRate, "");
 }
 
+void weightOnTareCell(void (*cb)(uint8_t)) { onTareCell_ = cb; }
+
 void updateWeight(const State &st) {
   const ScaleView &s = st.scale;
   char buf[40];
@@ -287,13 +319,28 @@ void updateWeight(const State &st) {
     setIfChanged(lblCaption, prevCaption_, sizeof(prevCaption_), "total");
   } else {
     if (s.calibrated) {
-      snprintf(buf, sizeof(buf), "%ld", (long)lroundf(s.totalGrams));
+      // KILOGRAMS TO THREE DECIMALS -- so the resolution on the screen is one
+      // gram, which is roughly what the hardware actually delivers. The measured
+      // noise floor is about +/-2 g, so the last digit moves by a couple either
+      // way and that is the measurement rather than a rendering artefact.
+      //
+      // Not grams-as-an-integer, which would read "6820" and make a kitchen
+      // quantity look like a part number, and not two decimals, which would
+      // throw away a digit the cells can genuinely resolve.
+      //
+      // lroundf on the GRAM value before dividing, rather than "%.3f" on the
+      // float: printf rounds in binary and 1.0005 is not representable, so the
+      // last digit could disagree with the per-cell figures derived from the
+      // same counts.
+      const long mg = (long)lroundf(s.totalGrams);
+      snprintf(buf, sizeof(buf), "%s%ld.%03ld", mg < 0 ? "-" : "",
+               (long)(mg < 0 ? -mg : mg) / 1000L, (long)(mg < 0 ? -mg : mg) % 1000L);
     } else {
       snprintf(buf, sizeof(buf), "%ld", (long)s.totalCounts);
     }
     setIfChanged(lblTotal, prevTotal_, sizeof(prevTotal_), buf);
-    setIfChanged(lblUnit, prevUnit_, sizeof(prevUnit_), s.calibrated ? "g" : "cts");
-    setTotalColor(C_TEXT);
+    setIfChanged(lblUnit, prevUnit_, sizeof(prevUnit_), s.calibrated ? "kg" : "cts");
+    setTotalColor(s.overRange ? C_CELL_FAULT : C_TEXT);
 
     // "AT LEAST", NOT "TOTAL", WHEN A CELL IS MISSING -- the same word the bowl
     // page uses for a degraded count, and for the same reason. The sum of the
@@ -319,7 +366,13 @@ void updateWeight(const State &st) {
 
   const char *flag = "";
   uint32_t flagColor = C_WARN;
-  if (s.online == 0 && anyWarming) {
+  if (s.overRange) {
+    // ABOVE the calibration and tare warnings, because it invalidates the
+    // number rather than qualifying it. A saturated converter has stopped
+    // measuring; everything below is about a reading that is merely unproven.
+    flag = "OVER RANGE";
+    flagColor = C_FAULT;
+  } else if (s.online == 0 && anyWarming) {
     // Configured and not yet converting. Distinct from silence, and it resolves
     // itself within a sample period -- telling someone to check their wiring
     // for a second and a half is how a working device gets taken apart.
@@ -327,9 +380,13 @@ void updateWeight(const State &st) {
   } else if (s.online < CELLS) {
     flag = (s.online == 0) ? "no cell talking" : "one cell down";
     flagColor = C_FAULT;
-  } else if (!s.calibrated) {
-    flag = "no calibration";
   } else if (!s.tared) {
+    // NO "no calibration" CHIP. The caption under the number already reads
+    // "total, uncalibrated" and the unit already reads "cts" rather than "kg",
+    // so a badge saying it a third time was noise -- and a chip that is lit in
+    // the ordinary state teaches people to stop reading the area, which is the
+    // opposite of what a chip is for. The two remaining ones both mean
+    // something is WRONG.
     flag = "not tared";
   }
   if (strncmp(prevFlag_, flag, sizeof(prevFlag_) - 1) != 0) {
@@ -358,8 +415,21 @@ void updateWeight(const State &st) {
     }
 
     if (c.state == Cell::Online) {
-      if (s.calibrated) snprintf(buf, sizeof(buf), "%ld g", (long)lroundf(c.grams));
-      else snprintf(buf, sizeof(buf), "%ld", (long)c.counts);
+      if (c.overRange) {
+        // The number this cell would print is its own ceiling, so it does not
+        // get printed. One unit on the screen, and no figure that looks like a
+        // weight when it is not one.
+        snprintf(buf, sizeof(buf), "OVER");
+      } else if (s.calibrated) {
+        // The same unit as the total, deliberately. Two units on one screen is
+        // how a 3 kg reading gets read as 3 g, and these two figures are meant
+        // to be added up by eye against the number above them.
+        const long mg = (long)lroundf(c.grams);
+        snprintf(buf, sizeof(buf), "%s%ld.%03ld", mg < 0 ? "-" : "",
+                 (long)(mg < 0 ? -mg : mg) / 1000L, (long)(mg < 0 ? -mg : mg) % 1000L);
+      } else {
+        snprintf(buf, sizeof(buf), "%ld", (long)c.counts);
+      }
       setIfChanged(cellValue[i], prevCellValue_[i], sizeof(prevCellValue_[i]), buf);
 
       // The MEASURED rate, not the configured one. On a bit-banged bus polled

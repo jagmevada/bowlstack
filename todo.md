@@ -4,19 +4,31 @@
 
 ## Resume here — `loadcell` branch
 
-**Two NAU7802 on two buses, feeding the same UI. RUNNING ON HARDWARE.** Both
-cells read, both respond to load, the dashboard holds 11 fps. Not yet
-calibrated, and nothing is published upstream.
+**Two NAU7802 on two buses, feeding the same UI. RUNNING AND CALIBRATED.** Both
+cells read, both respond to load, the dashboard shows kilograms. Nothing is
+published upstream.
 
 ### Measured on the board
 
 | | |
 | --- | --- |
-| cells | both `rev 0x0F`, 79 SPS each against 80 configured |
-| raw, unloaded | A ~119,400, B ~110,000 counts; p-p 200–500 |
-| dashboard | **11 fps, ui 74%** (flush 8%, touch 0%), worst frame 88 ms |
-| free heap | ~126 kB; LVGL pool 51k/89k, 1% fragmentation |
+| cells | 79 SPS each against 80 configured; p-p 200–500 counts |
+| **sensitivity** | **106.857 counts/g** — 18,700 counts for a 175 g reference |
+| dashboard | **13 fps, ui 62%**; `ui 2%` when the reading is steady |
+| free heap | ~126 kB; LVGL pool 52k/89k, 1–3% fragmentation |
 | scale task | 2.8 kB of stack still free of 4 kB |
+
+**The sensitivity agrees with the datasheet to half a per cent**, which is what
+makes it trustworthy rather than merely fitted. A YZC-133 is 1.0 mV/V, the
+internal LDO excites at 3.0 V, so 20 kg gives 3.0 mV; full scale at gain 128 is
+±11.7 mV, so 20 kg on one cell is 2.15 M counts = 107.4 counts/g. A load split
+between two cells gives that same figure on the **sum** whatever the split,
+which is why one constant describes the assembly.
+
+It also settles the range question: a signed 24-bit conversion reaches **~75 kg
+on a single cell**, so the ADC is not the limit — the cell's own 20 kg rating is,
+and it arrives first by a factor of four. The over-range flag stays as a
+backstop rather than as something normal use will meet.
 
 ### Two faults this cost, both now fixed
 
@@ -37,7 +49,7 @@ instrumented perf line is what settled it: `ui 86% (flush 3% touch 0%)` with
 11,574 px and a 250 ms frame is not the bus, not the touch chip, and cannot be
 blitting cost. Fixed widths with right-aligned digits took it to 11 fps.
 
-### Next: calibrate it
+### Driving it
 
 The board is on **COM10** (`USB VID:PID=303A:1001`) — native USB-Serial-JTAG,
 not a CP210x. The COM6 in older docs is a *Bluetooth* port on this machine.
@@ -46,25 +58,54 @@ not a CP210x. The COM6 in older docs is a *Bluetooth* port on this machine.
 pio run -e ws-s3-loadcell -t upload --upload-port COM10
 ```
 
-With a terminal on the console, `t` / `c` / `x` / `?` do exactly what the
-Settings → Scale rows do:
+Every action exists in two places, and they call the same function:
 
-1. **Empty the platform.** Press `t`. Both cells should then read within a few
-   hundred counts of zero.
-2. Put the known mass on — `BOWLSTACK_CAL_MASS_G` in platformio.ini, presently
-   1000 g — centred, and let it settle.
-3. Press `c`. The screen switches from `cts` to `g`.
+| console | screen | does |
+|---|---|---|
+| `t` | Settings → Scale → Tare | zero both cells |
+| `a` / `b` | **TARE 0** inside each cell panel | zero one cell |
+| `c` | Settings → Scale → Calibrate 175 g | declare the current load |
+| `x` | Settings → Scale → Clear calibration | back to counts |
+| `w` | Settings → Scale → Average | step 8→16→32→64→128 |
+| `?` | — | help |
 
-**Expect roughly 215 counts per gram** for the assembly, if the cells are the
-usual 20 kg / 2 mV/V: full scale at gain 128 off a 3.0 V LDO is about ±11.7 mV,
-a 20 kg cell gives 6.0 mV at full load, so 20 kg is ~4.3 M counts. A 1 kg mass
-should move the **sum** by ~215,000 counts wherever it sits on the platform.
-Half that means 1 mV/V cells; wildly off means the factor is wrong and every
-reading after it will be too.
+To recalibrate against a different mass: set `BOWLSTACK_CAL_MASS_G`, empty the
+platform, `t`, put the mass on centred, let it settle, `c`. The factor lands in
+NVS and survives reflashing; **Clear calibration removes the key** rather than
+writing a zero, so the build default applies again at the next boot.
 
-Calibration refuses a mass under 200 g, and refuses outright if the sum does not
-go *positive* — which is the check for a cell wired backwards, where the two
-would subtract instead of add.
+Calibration refuses a mass under 20 g, and refuses a deflection under 5,000
+counts — the second is the real guard, since it scales with whatever the cells
+actually produce. A sum that does not go *positive* is refused outright, which
+is the check for a cell wired backwards, where the two would subtract instead of
+add.
+
+### The averaging window
+
+`Settings → Scale → Average`, or `w` on the console. Persisted in NVS; the build
+default is `BOWLSTACK_AVG_WINDOW`. Noise falls with the **square root** of the
+window and latency rises **linearly**, so the useful range runs out quickly:
+
+| N | settling | jitter in the last digit |
+|---|---|---|
+| 8 | ~100 ms | ±0.7 g |
+| 16 | ~200 ms | ±0.5 g |
+| 32 | ~400 ms | ±0.3 g |
+| 64 | ~810 ms | ±0.2 g |
+| 128 | ~1.6 s | ±0.17 g |
+
+Sweep it with the reference mass on and watch the last digit against how long
+the number takes to settle after the mass lands. It also moves the frame rate:
+a slower-changing number repaints less, which is what took the dashboard from
+11 fps to 13.
+
+### The Device page
+
+`Menu → Device`. Raw conversions with nothing done to them, the filtered net
+beside them, peak-to-peak, the tare being subtracted, the delivered sample rate,
+and the two settings that turn one into the other. Read top to bottom it
+explains the dashboard's number completely — which the dashboard, being one
+smoothed tared figure, deliberately does not.
 
 ### Known open
 

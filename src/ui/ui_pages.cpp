@@ -5,6 +5,7 @@
 
 #include "ui_battery.h"
 #include "ui_demo.h"
+#include "ui_device.h"
 #include "ui_menu.h"
 #include "ui_perf.h"
 #include "ui_scope.h"
@@ -63,6 +64,7 @@ uint8_t depth_ = 0;
 void (*onTare_)(void) = nullptr;
 void (*onCalibrate_)(void) = nullptr;
 void (*onClearCal_)(void) = nullptr;
+void (*onCycleAvg_)(void) = nullptr;
 
 lv_obj_t *settingsMenu_ = nullptr;
 lv_obj_t *scaleMenu_ = nullptr;
@@ -70,6 +72,7 @@ lv_obj_t *scaleMenu_ = nullptr;
 void doTare() { if (onTare_) onTare_(); }
 void doCalibrate() { if (onCalibrate_) onCalibrate_(); }
 void doClearCal() { if (onClearCal_) onClearCal_(); }
+void doCycleAvg() { if (onCycleAvg_) onCycleAvg_(); }
 
 // The known mass used by the Calibrate row. A build constant rather than an
 // on-screen number pad: this is done once per assembly, with a mass someone
@@ -198,6 +201,12 @@ void buildPages() {
     menuAddRow(scaleMenu_, calLabel, nullptr, doCalibrate);
   }
   menuAddRow(scaleMenu_, "Clear calibration", nullptr, doClearCal);
+  // A ROW THAT CYCLES rather than a sub-page of five radio buttons. There are
+  // five values, they are ordered, and the whole point of the setting is to
+  // flip between two of them with a mass on the platform and watch which reads
+  // better -- which a tap-to-advance row does in one gesture and a sub-page
+  // does in four. The current value is the hint on the right.
+  menuAddRow(scaleMenu_, "Average", nullptr, doCycleAvg);
 
   detailWifi_ = makeDetail(scr);
   buildWifiPage(detailWifi_);
@@ -212,15 +221,8 @@ void buildPages() {
   scopeOnClose(back);
 
   detailDevice_ = makeDetail(scr);
-  lv_obj_t *device = menuCreate(detailDevice_, "Device", back);
-  lv_obj_t *soon = lv_label_create(device);
-  lv_obj_set_style_text_font(soon, &lv_font_montserrat_16, LV_PART_MAIN);
-  lv_obj_set_style_text_color(soon, lv_color_hex(C_MUTED), LV_PART_MAIN);
-  lv_obj_set_width(soon, LV_PCT(100));
-  lv_label_set_long_mode(soon, LV_LABEL_LONG_WRAP);
-  lv_label_set_text(soon,
-                    "Nothing here yet. Device id, firmware, uptime, MAC and the "
-                    "installation's area and slot belong on this page.");
+  buildDevicePage(detailDevice_);
+  deviceOnClose(back);
 
   // Start on the weight view -- what someone walking up to the station wants to
   // see. The menu is one swipe away.
@@ -239,6 +241,7 @@ void pagesBack() { back(); }
 void pagesOnScaleTare(void (*cb)(void)) { onTare_ = cb; }
 void pagesOnScaleCalibrate(void (*cb)(void)) { onCalibrate_ = cb; }
 void pagesOnScaleClearCal(void (*cb)(void)) { onClearCal_ = cb; }
+void pagesOnScaleCycleAvg(void (*cb)(void)) { onCycleAvg_ = cb; }
 
 void pagesTick(uint32_t nowMs) {
   // --- data: always, for every page, visible or not ------------------------
@@ -268,6 +271,14 @@ void pagesTick(uint32_t nowMs) {
     // The Scale row carries the one fact that decides what the whole dashboard
     // can say: with no calibration there are no grams anywhere in the product.
     menuSetHint(settingsMenu_, 2, s.scale.calibrated ? "" : "uncal");
+  }
+  if (scaleMenu_) {
+    // The Average row shows the value it will change, which is what makes a
+    // tap-to-cycle row usable at all -- otherwise you are guessing where in the
+    // sequence you are.
+    static char avg[8];
+    snprintf(avg, sizeof(avg), "%u", s.scale.window);
+    menuSetHint(scaleMenu_, 3, avg);
   }
 
   wifiTick();
@@ -313,8 +324,10 @@ void pagesTick(uint32_t nowMs) {
     if (top == detailBatt_) {
       updateBatteryPage(s);
     } else if (top == detailScale_) {
-      // Nothing to render: the rows are static and their one live value is the
-      // hint on the Settings row above, which is written every tick regardless.
+      // Nothing to render: the rows are static and their live values are the
+      // hints, which are written below regardless of which page is up.
+    } else if (top == detailDevice_) {
+      updateDevicePage(s);
     } else if (top == detailSensor_) {
       scopeRender();
       if (perfFresh) scopeShowPerf();

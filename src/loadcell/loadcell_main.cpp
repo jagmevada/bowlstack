@@ -223,6 +223,9 @@ void publishScale(uint32_t nowMs) {
   s.scale.tared = sn.tared;
   s.scale.online = sn.online;
   s.scale.totalGrams = sn.totalGrams;
+  s.scale.overRange = sn.overRange;
+  s.scale.countsPerGram = sn.countsPerGram;
+  s.scale.window = sn.window;
 
   int32_t totalCounts = 0;
   for (uint8_t i = 0; i < ui::CELLS; i++) {
@@ -235,6 +238,13 @@ void publishScale(uint32_t nowMs) {
     c.counts = sn.cell[i].counts - sn.cell[i].offset;
     c.grams = sn.cell[i].grams;
     c.sps = sn.cell[i].sps;
+    c.overRange = sn.cell[i].overRange;
+    // The unprocessed figures, for the Device page. Deliberately NOT tared and
+    // NOT filtered: that page exists to show what the dashboard's number was
+    // made from, and a pre-chewed copy of it would show nothing.
+    c.rawCounts = sn.cell[i].rawCounts;
+    c.pp = sn.cell[i].pp;
+    c.offset = sn.cell[i].offset;
     if (c.state == ui::Cell::Online) totalCounts += c.counts;
   }
   s.scale.totalCounts = totalCounts;
@@ -278,6 +288,15 @@ void onCalibrate() {
   Serial.printf("ui: calibration %s\n", ok ? "accepted" : "REFUSED (see the line above)");
 }
 
+void onTareCell(uint8_t i) {
+  Serial.printf("ui: tare cell %c requested\n", 'A' + i);
+  scale::tareCell(i);
+}
+
+void onCycleAvg() {
+  Serial.printf("ui: averaging -> %u samples\n", scale::cycleWindow());
+}
+
 void onClearCal() {
   Serial.println("ui: calibration cleared");
   scale::clearCalibration();
@@ -301,8 +320,18 @@ void serviceConsole() {
     switch (c) {
       case 't':
       case 'T':
-        Serial.println("\n> tare");
+        Serial.println("\n> tare both");
         scale::tare();
+        break;
+      case 'a':
+      case 'A':
+        Serial.println("\n> tare cell A");
+        scale::tareCell(0);
+        break;
+      case 'b':
+      case 'B':
+        Serial.println("\n> tare cell B");
+        scale::tareCell(1);
         break;
       case 'c':
       case 'C':
@@ -316,13 +345,22 @@ void serviceConsole() {
         Serial.println("\n> clear calibration");
         scale::clearCalibration();
         break;
+      case 'w':
+      case 'W':
+        Serial.printf("\n> averaging -> %u samples\n", scale::cycleWindow());
+        break;
       case '?':
         Serial.println(
-            "\n  t  tare -- zero both cells at whatever is on the platform NOW\n"
+            "\n  t  tare BOTH cells at whatever is on the platform NOW\n"
+            "  a  tare cell A only      b  tare cell B only\n"
             "  c  calibrate -- declares that the current load is the known mass\n"
             "  x  clear the calibration and go back to counts\n"
+            "  w  step the moving average 8 -> 16 -> 32 -> 64 -> 128 -> 8\n"
             "\n  Order matters: tare on an EMPTY platform, then put the mass on,\n"
-            "  wait for the reading to settle, then calibrate.\n");
+            "  wait for the reading to settle, then calibrate.\n"
+            "\n  a and b are the SETUP tools: zeroing one corner against the other\n"
+            "  is how you tell an uneven mounting from an uneven pair of cells,\n"
+            "  which the total -- being a sum -- cannot show you.\n");
         break;
       default:
         break;  // newlines and stray bytes from a terminal are not errors
@@ -460,11 +498,13 @@ void setup() {
   }
 
   ui::pagesOnScaleTare(onTare);
+  ui::weightOnTareCell(onTareCell);
   ui::pagesOnScaleCalibrate(onCalibrate);
   ui::pagesOnScaleClearCal(onClearCal);
+  ui::pagesOnScaleCycleAvg(onCycleAvg);
 
   ui::buildPages();
-  Serial.println("  console: t = tare, c = calibrate, x = clear, ? = help");
+  Serial.println("  console: t = tare both, a/b = tare one, c = calibrate, x = clear, ? = help");
   Serial.println("  home = weight; swipe LEFT for the menu:");
   Serial.println("    Settings -> WiFi, Battery, Scale (tare / calibrate)");
   Serial.println("    Sensors  -> live cell scope, both traces + frame rate");
@@ -567,7 +607,16 @@ void loop() {
           (long)c.offset, c.sps, c.samples);
     }
     if (sn.calibrated) {
-      Serial.printf("  total  %.0f g   (%.3f counts/g)\n", sn.totalGrams, sn.countsPerGram);
+      // Formatted the SAME WAY the screen formats it -- rounded to whole grams
+      // first, then split into kg and the remainder -- so the console and the
+      // panel cannot disagree about the last digit. "%.0f" of a value a
+      // fraction below zero also prints "-0", which reads as a bug rather than
+      // as a tared platform sitting a few tenths of a gram low.
+      const long mg = (long)lroundf(sn.totalGrams);
+      const long amg = mg < 0 ? -mg : mg;
+      Serial.printf("  total  %s%ld.%03ld kg   (%.3f counts/g, %u-sample window)\n",
+                    mg < 0 ? "-" : "", amg / 1000L, amg % 1000L, sn.countsPerGram,
+                    sn.window);
     } else {
       Serial.printf("  total  %ld counts   UNCALIBRATED -- Menu > Settings > Scale\n",
                     (long)(sn.cell[0].counts - sn.cell[0].offset + sn.cell[1].counts -

@@ -62,6 +62,22 @@ struct CellView {
   // number whose unit it cannot name.
   float grams;
   uint16_t sps;  // conversions per second actually delivered
+
+  // THE THREE FIGURES THE DEVICE PAGE EXISTS FOR, and none of them belongs on
+  // the dashboard. `raw` is the last single conversion with nothing done to it,
+  // `pp` is how far the raw signal moved across the window, and `offset` is the
+  // tare being subtracted. Together they answer "is this cell alive and what is
+  // being taken off it" -- which the smoothed, tared kilogram figure above is
+  // specifically designed not to show.
+  int32_t rawCounts;
+  int32_t pp;
+  int32_t offset;
+
+  // The converter has hit the end of its 24-bit range, so this cell has stopped
+  // measuring and is reporting its own ceiling. Said rather than inferred: a
+  // saturated cell returns a large, steady, plausible number and the weight
+  // simply stops rising.
+  bool overRange;
 };
 
 struct ScaleView {
@@ -75,6 +91,12 @@ struct ScaleView {
   // screen says counts rather than inventing a factor.
   bool calibrated;
   bool tared;
+  bool overRange;  // at least one cell saturated -- the total is not a weight
+
+  // Carried so the Device page can state them rather than the reader having to
+  // remember what the build was flashed with.
+  float countsPerGram;
+  uint8_t window;  // samples in the moving average
 
   uint8_t online;
 };

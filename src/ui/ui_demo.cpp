@@ -62,10 +62,21 @@ State stacked(uint8_t n) {
 // written in the unit a person thinks in, and the counts follow from a plausible
 // sensitivity so the UNCALIBRATED display has something realistic to show.
 //
-// ~110 counts/g is the order a 20 kg cell at 2 mV/V produces through a NAU7802
-// at gain 128, which is what makes the uncalibrated scenario look like the real
-// thing rather than like a small number with the wrong label on it.
-const float DEMO_COUNTS_PER_G = 110.0f;
+// 106.857 counts/g -- the MEASURED sensitivity of the bench assembly, not an
+// estimate: 18,700 counts for a 175 g reference mass on two YZC-133 cells. The
+// same number platformio.ini hands the firmware as its default factor.
+//
+// Using the real figure rather than a plausible one is what makes the
+// heavy scenario below sit where a real one would. It also agrees with the
+// datasheet arithmetic to half a per cent -- see platformio.ini -- which is what
+// makes it trustworthy rather than merely fitted.
+const float DEMO_COUNTS_PER_G = 106.857f;
+
+// Where a signed 24-bit conversion stops being a measurement. Mirrors
+// OVER_RANGE_COUNTS in scale.cpp; restated here because ui_demo may not include
+// a driver header, and duplicated deliberately rather than shared through a
+// third file that neither target would naturally own.
+const int32_t DEMO_OVER_RANGE = 8000000;
 
 void withScale(State &s, float aG, float bG, bool calibrated, bool tared, uint8_t online) {
   s.scale.calibrated = calibrated;
@@ -83,10 +94,37 @@ void withScale(State &s, float aG, float bG, bool calibrated, bool tared, uint8_
     // gives back, and the fixture says so rather than showing a round number
     // the device will never quite reach.
     c.sps = (c.state == Cell::Online) ? (uint16_t)(79 - i) : 0;
+    // FALLS OUT OF THE ARITHMETIC rather than being set by hand. At the real
+    // sensitivity a 20 kg platform load puts a cell past 2^23 long before the
+    // number on the side of the cell is reached, so the heavy scenario becomes
+    // an over-range one on its own -- which is the point. A fixture that had to
+    // be told to saturate would not have caught that the ceiling is nearer than
+    // it looks.
+    c.overRange = (c.state == Cell::Online) && (c.counts > DEMO_OVER_RANGE);
+    if (c.overRange) s.scale.overRange = true;
     if (c.state == Cell::Online) total += c.counts;
+
+    // The raw figures the Device page shows. Fabricated the way the real ones
+    // arrive rather than as round numbers: a TARE of order a hundred thousand
+    // counts, because that is the platform's own weight sitting on the cells
+    // before anything is put on it; a RAW reading that is the tare plus the
+    // load plus a few counts of wander; and a peak-to-peak of a few hundred,
+    // which is what a live bridge at gain 128 actually does.
+    //
+    // A preview that showed a clean zero tare and a raw equal to the net would
+    // make the Device page look like it had nothing to say, which is the
+    // opposite of true.
+    const int32_t fakeTare = (int32_t)(118000 + i * 9000);
+    c.offset = (c.state == Cell::Online) ? fakeTare : 0;
+    c.pp = (c.state == Cell::Online) ? (int32_t)(430 + i * 87) : 0;
+    c.rawCounts = (c.state == Cell::Online) ? (c.counts + fakeTare + (int32_t)(i * 53) - 26) : 0;
   }
   s.scale.totalCounts = total;
   s.scale.totalGrams = calibrated ? (aG + (online > 1 ? bG : 0.0f)) : 0.0f;
+  s.scale.countsPerGram = calibrated ? DEMO_COUNTS_PER_G : 0.0f;
+  // The default the firmware ships with, so the preview and the panel agree
+  // about what the Average row says before anyone touches it.
+  s.scale.window = (uint8_t)BOWLSTACK_AVG_WINDOW;
 }
 
 State sEmpty() {

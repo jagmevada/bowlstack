@@ -50,6 +50,13 @@ void pagesOnScaleTare(void (*cb)(void));
 void pagesOnScaleCalibrate(void (*cb)(void));
 void pagesOnScaleClearCal(void (*cb)(void));
 
+// Steps the moving-average length to the next of 8/16/32/64/128 and wraps. A
+// runtime setting rather than a build flag because the right value is a
+// judgement about the gesture -- how long a bowl may take to settle against how
+// much the last digit may wander -- and a judgement is far easier to make by
+// flipping between two of them with a mass on the platform than by reflashing.
+void pagesOnScaleCycleAvg(void (*cb)(void));
+
 // How long without a touch before the UI returns to the stock page.
 //
 // A device left on the WiFi page is a device whose primary readout -- the bowl
