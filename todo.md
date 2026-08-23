@@ -1,7 +1,55 @@
 # TODO
 
-Deferred work on the `touch-ui` branch (Waveshare ESP32-S3-Touch-LCD-2 port).
-Rationale for each is in [docs/waveshare_port.md](docs/waveshare_port.md).
+---
+
+## Resume here — `loadcell` branch
+
+**First code for the weighing station: two NAU7802 on two buses, feeding the
+same UI.** Both images build clean with `-Wall`; nothing below has been run
+against real hardware yet, because there was none attached.
+
+### What to do with a board in hand
+
+1. **Fit the pull-ups on bus B first.** GPIO11/12 have none. 4.7 k from each to
+   3V3; 3V3 and GND are both on header P2. Without them the bit-banged bus runs
+   on the ESP32's ~45 kΩ internal pull-ups, which works on a short bench lead and
+   fails intermittently on anything longer — as NAKs that read like a bad part.
+2. `pio run -e ws-s3-loadcell -t upload --upload-port COM6`, then watch the
+   console. The boot block says, per cell: whether 0x2A answered, the silicon
+   revision, and whether the internal offset calibration passed. `CAL_ERR` there
+   means the bridge wiring, not the code — check E+/E−/A+/A−.
+3. **Tap the screen.** Cell A shares the touch controller's I²C port. lgfx takes
+   a per-port mutex so this *should* be safe, but only a finger closes that loop.
+   If touch dies once cells are attached, that sharing is the first suspect and
+   moving cell A to a second bit-banged pair is the fallback.
+4. Watch the `n/s` figures on the dashboard. They are MEASURED, not the
+   configured 80 SPS. Bus B well under bus A points at the pull-ups.
+5. Menu → Settings → Scale → **Tare**, put a known mass on, **Calibrate**. The
+   mass is `-DBOWLSTACK_CAL_MASS_G` in platformio.ini, currently 1000 g.
+6. Menu → Sensors for the live scope: two traces, auto-ranged, in counts before
+   calibration and grams after. Press on one corner and one trace should move.
+
+### Known open
+
+- **Nothing is published upstream.** No Supabase, no telemetry, no `weights`
+  table. The device weighs and displays; that is all.
+- **The gram split assumes matched cells.** One factor is applied to the sum,
+  which makes the TOTAL right regardless of where the load sits, and the
+  per-cell shares right only if the two cells have equal sensitivity. Per-corner
+  calibration is the fix if that turns out to matter.
+- **`src/ui/ui_screens.cpp` is dead weight here** except for `unknownState()` —
+  its bowl page is no longer built. Worth moving that one function out and
+  dropping the file if this branch outlives the port.
+- **`buildPages()` would strand change-detection state if called twice** —
+  inherited from `touch-ui`, still true, still only one call site.
+
+---
+
+## Inherited from `touch-ui`
+
+Deferred work on the Waveshare ESP32-S3-Touch-LCD-2 port. Rationale for each is
+in [docs/waveshare_port.md](docs/waveshare_port.md). Everything below predates
+the load-cell work and describes the ToF build.
 
 ---
 

@@ -68,4 +68,14 @@ uint16_t perfFlushesPerFrame();
 // Writes "fps 14  busy 22%  worst 41ms  lvgl 38k/64k frag 12%" into buf.
 void perfFormat(char *buf, uint32_t len);
 
+// The same window, cut to what fits ON THE PANEL: "fps 12  ui 4%  worst 8ms".
+//
+// Two formats rather than one, because the two readers are different. The
+// console line is read by someone diagnosing, with a scrollback and a terminal
+// as wide as they like; the on-screen line has 184 px beside a back button, and
+// the full string wrapped to three 14 px rows there -- which pushed the top of
+// it out of a 30 px header, so the fps figure, the one number the line exists
+// for, was the part that got clipped.
+void perfFormatShort(char *buf, uint32_t len);
+
 }  // namespace ui

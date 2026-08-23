@@ -1,6 +1,7 @@
 #include "ui_pages.h"
 
 #include <lvgl.h>
+#include <stdio.h>
 
 #include "ui_battery.h"
 #include "ui_demo.h"
@@ -9,6 +10,7 @@
 #include "ui_scope.h"
 #include "ui_screens.h"
 #include "ui_status.h"
+#include "ui_weight.h"
 #include "ui_wifi.h"
 
 namespace ui {
@@ -19,17 +21,18 @@ const uint32_t C_MUTED = 0x8B949E;
 
 lv_obj_t *tv_ = nullptr;
 lv_obj_t *tileMenu_ = nullptr;
-lv_obj_t *tileStock_ = nullptr;
+lv_obj_t *tileHome_ = nullptr;
 lv_obj_t *lastActive_ = nullptr;
 lv_obj_t *menuRoot_ = nullptr;
 
 // --- the navigation tree ---------------------------------------------------
 //
-//   [menu] <-swipe-> [stock]          two pages; stock is home
+//   [menu] <-swipe-> [weight]         two pages; weight is home
 //     |
 //     +-- Settings --+-- WiFi
 //     |              +-- Battery
-//     +-- Sensors  (the live scope)
+//     |              +-- Scale    (tare, calibrate, clear)
+//     +-- Sensors  (the live cell scope)
 //     +-- Device   (empty, deliberately)
 //
 // Sub-pages are OVERLAYS rather than more tiles, because a tileview is a flat
@@ -44,6 +47,7 @@ lv_obj_t *menuRoot_ = nullptr;
 lv_obj_t *detailSettings_ = nullptr;
 lv_obj_t *detailWifi_ = nullptr;
 lv_obj_t *detailBatt_ = nullptr;
+lv_obj_t *detailScale_ = nullptr;
 lv_obj_t *detailSensor_ = nullptr;
 lv_obj_t *detailDevice_ = nullptr;
 
@@ -54,10 +58,31 @@ lv_obj_t *detailDevice_ = nullptr;
 lv_obj_t *stack_[4] = {nullptr, nullptr, nullptr, nullptr};
 uint8_t depth_ = 0;
 
+// Installed by the firmware; absent in the desktop preview, where there are no
+// cells to tare. A null handler leaves the row inert rather than pretending.
+void (*onTare_)(void) = nullptr;
+void (*onCalibrate_)(void) = nullptr;
+void (*onClearCal_)(void) = nullptr;
+
+lv_obj_t *settingsMenu_ = nullptr;
+lv_obj_t *scaleMenu_ = nullptr;
+
+void doTare() { if (onTare_) onTare_(); }
+void doCalibrate() { if (onCalibrate_) onCalibrate_(); }
+void doClearCal() { if (onClearCal_) onClearCal_(); }
+
+// The known mass used by the Calibrate row. A build constant rather than an
+// on-screen number pad: this is done once per assembly, with a mass someone
+// physically owns, and typing digits on a 2" panel to describe it is the wrong
+// trade. Override per bench from platformio.ini.
+#ifndef BOWLSTACK_CAL_MASS_G
+#define BOWLSTACK_CAL_MASS_G 1000
+#endif
+
 void showOnly(lv_obj_t *which) {
-  lv_obj_t *all[] = {detailSettings_, detailWifi_, detailBatt_, detailSensor_,
-                     detailDevice_};
-  for (uint8_t i = 0; i < 5; i++) {
+  lv_obj_t *all[] = {detailSettings_, detailWifi_,   detailBatt_,
+                     detailScale_,    detailSensor_, detailDevice_};
+  for (uint8_t i = 0; i < 6; i++) {
     if (!all[i]) continue;
     if (all[i] == which) lv_obj_remove_flag(all[i], LV_OBJ_FLAG_HIDDEN);
     else lv_obj_add_flag(all[i], LV_OBJ_FLAG_HIDDEN);
@@ -92,6 +117,7 @@ void back() {
 void openSettings() { push(detailSettings_); }
 void openWifi() { push(detailWifi_); }
 void openBattery() { push(detailBatt_); }
+void openScale() { push(detailScale_); }
 void openSensor() { push(detailSensor_); }
 void openDevice() { push(detailDevice_); }
 
@@ -148,15 +174,30 @@ void buildPages() {
   menuAddRow(menuRoot_, "Sensors", nullptr, openSensor);
   menuAddRow(menuRoot_, "Device", nullptr, openDevice);
 
-  tileStock_ = lv_tileview_add_tile(tv_, 1, 0, LV_DIR_LEFT);
-  lv_obj_set_style_pad_all(tileStock_, 0, LV_PART_MAIN);
-  build(tileStock_);
+  tileHome_ = lv_tileview_add_tile(tv_, 1, 0, LV_DIR_LEFT);
+  lv_obj_set_style_pad_all(tileHome_, 0, LV_PART_MAIN);
+  buildWeight(tileHome_);
 
   // Overlays, created AFTER the tileview so they stack above it.
   detailSettings_ = makeDetail(scr);
-  lv_obj_t *settings = menuCreate(detailSettings_, "Settings", back);
-  menuAddRow(settings, "WiFi", nullptr, openWifi);
-  menuAddRow(settings, "Battery", nullptr, openBattery);
+  settingsMenu_ = menuCreate(detailSettings_, "Settings", back);
+  menuAddRow(settingsMenu_, "WiFi", nullptr, openWifi);
+  menuAddRow(settingsMenu_, "Battery", nullptr, openBattery);
+  menuAddRow(settingsMenu_, "Scale", nullptr, openScale);
+
+  // The Scale page is three rows rather than a screen of its own, which is the
+  // whole reason ui_menu exists: adding a setting is adding a row. Tare is
+  // first because it is the one done every service; calibration is done once
+  // per assembly and clearing it almost never.
+  detailScale_ = makeDetail(scr);
+  scaleMenu_ = menuCreate(detailScale_, "Scale", back);
+  menuAddRow(scaleMenu_, "Tare", nullptr, doTare);
+  {
+    static char calLabel[24];
+    snprintf(calLabel, sizeof(calLabel), "Calibrate %d g", (int)BOWLSTACK_CAL_MASS_G);
+    menuAddRow(scaleMenu_, calLabel, nullptr, doCalibrate);
+  }
+  menuAddRow(scaleMenu_, "Clear calibration", nullptr, doClearCal);
 
   detailWifi_ = makeDetail(scr);
   buildWifiPage(detailWifi_);
@@ -181,25 +222,29 @@ void buildPages() {
                     "Nothing here yet. Device id, firmware, uptime, MAC and the "
                     "installation's area and slot belong on this page.");
 
-  // Start on the stock view -- what someone walking up to the station wants to
+  // Start on the weight view -- what someone walking up to the station wants to
   // see. The menu is one swipe away.
-  lv_tileview_set_tile(tv_, tileStock_, LV_ANIM_OFF);
+  lv_tileview_set_tile(tv_, tileHome_, LV_ANIM_OFF);
   lastActive_ = nullptr;
   depth_ = 0;
 }
 
 void pagesGoHome() {
   closeAll();
-  if (tv_ && tileStock_) lv_tileview_set_tile(tv_, tileStock_, LV_ANIM_OFF);
+  if (tv_ && tileHome_) lv_tileview_set_tile(tv_, tileHome_, LV_ANIM_OFF);
 }
 
 void pagesBack() { back(); }
 
+void pagesOnScaleTare(void (*cb)(void)) { onTare_ = cb; }
+void pagesOnScaleCalibrate(void (*cb)(void)) { onCalibrate_ = cb; }
+void pagesOnScaleClearCal(void (*cb)(void)) { onClearCal_ = cb; }
+
 void pagesTick(uint32_t nowMs) {
   // --- data: always, for every page, visible or not ------------------------
   // Neither touches an LVGL object nor invalidates anything, so both stay cheap
-  // however many pages exist. In the shipping firmware the sensors do not stop
-  // ranging because someone swiped, and a page that only collected while
+  // however many pages exist. In the shipping firmware the converters do not
+  // stop sampling because someone swiped, and a page that only collected while
   // visible would show a gap on return.
   demoTick(nowMs);
   scopeSample(nowMs);
@@ -210,9 +255,20 @@ void pagesTick(uint32_t nowMs) {
   // unchanged values, so a steady state costs comparisons rather than a redraw.
   updateStatus(s);
 
-  // A hint on the Sensors row, so the menu answers something at a glance
-  // instead of being a list of nouns you must open to learn anything from.
-  if (menuRoot_) menuSetHint(menuRoot_, 1, s.sensorsOnline ? "" : "offline");
+  // Hints, so the menu answers something at a glance instead of being a list of
+  // nouns you must open to learn anything from. menuSetHint compares before
+  // writing, so a steady state costs two string compares a frame.
+  if (menuRoot_) {
+    const char *cells = "";
+    if (s.scale.online == 0) cells = "no cells";
+    else if (s.scale.online < CELLS) cells = "1 of 2";
+    menuSetHint(menuRoot_, 1, cells);
+  }
+  if (settingsMenu_) {
+    // The Scale row carries the one fact that decides what the whole dashboard
+    // can say: with no calibration there are no grams anywhere in the product.
+    menuSetHint(settingsMenu_, 2, s.scale.calibrated ? "" : "uncal");
+  }
 
   wifiTick();
   // Return value CAPTURED, not discarded. perfTick() is true only when a fresh
@@ -232,7 +288,7 @@ void pagesTick(uint32_t nowMs) {
       onScope = !onScope;
       closeAll();
       if (onScope) openSensor();
-      else if (tv_) lv_tileview_set_tile(tv_, tileStock_, LV_ANIM_OFF);
+      else if (tv_) lv_tileview_set_tile(tv_, tileHome_, LV_ANIM_OFF);
     }
   }
 #else
@@ -243,7 +299,7 @@ void pagesTick(uint32_t nowMs) {
   // would be a permanent redraw for no change.
   if (lv_display_get_inactive_time(NULL) > IDLE_HOME_MS) {
     const bool home =
-        (depth_ == 0) && (!tv_ || lv_tileview_get_tile_active(tv_) == tileStock_);
+        (depth_ == 0) && (!tv_ || lv_tileview_get_tile_active(tv_) == tileHome_);
     if (!home) pagesGoHome();
   }
 #endif
@@ -256,6 +312,9 @@ void pagesTick(uint32_t nowMs) {
     lv_obj_t *top = stack_[depth_ - 1];
     if (top == detailBatt_) {
       updateBatteryPage(s);
+    } else if (top == detailScale_) {
+      // Nothing to render: the rows are static and their one live value is the
+      // hint on the Settings row above, which is written every tick regardless.
     } else if (top == detailSensor_) {
       scopeRender();
       if (perfFresh) scopeShowPerf();
@@ -265,7 +324,7 @@ void pagesTick(uint32_t nowMs) {
 
   lv_obj_t *active = lv_tileview_get_tile_active(tv_);
   if (active != lastActive_) lastActive_ = active;
-  if (active == tileStock_) update(s);
+  if (active == tileHome_) updateWeight(s);
 }
 
 }  // namespace ui

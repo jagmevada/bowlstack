@@ -94,6 +94,10 @@ uint16_t perfWorstMs() { return worstReported_; }
 uint32_t perfPxPerFrame() { return pxPerFrame_; }
 uint16_t perfFlushesPerFrame() { return flushPerFrame_; }
 
+void perfFormatShort(char *buf, uint32_t len) {
+  snprintf(buf, len, "fps %u  ui %u%%  worst %ums", fps_, uiPct_, worstReported_);
+}
+
 void perfFormat(char *buf, uint32_t len) {
   // SPI time is derivable from the pixel count: 2 bytes per pixel, 8 bits per
   // byte, 40 MHz. Printing it beside the frame time says immediately whether a

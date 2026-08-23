@@ -57,9 +57,61 @@ State stacked(uint8_t n) {
   return s;
 }
 
-State sEmpty() { return stacked(0); }
-State sTwo() { return stacked(2); }
-State sFull() { return stacked(4); }
+// --- the weighing fixture --------------------------------------------------
+// Grams in, counts derived, rather than the other way round: the scenarios are
+// written in the unit a person thinks in, and the counts follow from a plausible
+// sensitivity so the UNCALIBRATED display has something realistic to show.
+//
+// ~110 counts/g is the order a 20 kg cell at 2 mV/V produces through a NAU7802
+// at gain 128, which is what makes the uncalibrated scenario look like the real
+// thing rather than like a small number with the wrong label on it.
+const float DEMO_COUNTS_PER_G = 110.0f;
+
+void withScale(State &s, float aG, float bG, bool calibrated, bool tared, uint8_t online) {
+  s.scale.calibrated = calibrated;
+  s.scale.tared = tared;
+  s.scale.online = online;
+
+  const float g[CELLS] = {aG, bG};
+  int32_t total = 0;
+  for (uint8_t i = 0; i < CELLS; i++) {
+    CellView &c = s.scale.cell[i];
+    c.state = (i < online) ? Cell::Online : Cell::Offline;
+    c.counts = (c.state == Cell::Online) ? (int32_t)(g[i] * DEMO_COUNTS_PER_G) : 0;
+    c.grams = (c.state == Cell::Online) ? g[i] : 0.0f;
+    // 80 SPS configured; 78-79 delivered is what a real bus behind a real loop
+    // gives back, and the fixture says so rather than showing a round number
+    // the device will never quite reach.
+    c.sps = (c.state == Cell::Online) ? (uint16_t)(79 - i) : 0;
+    if (c.state == Cell::Online) total += c.counts;
+  }
+  s.scale.totalCounts = total;
+  s.scale.totalGrams = calibrated ? (aG + (online > 1 ? bG : 0.0f)) : 0.0f;
+}
+
+State sEmpty() {
+  State s = stacked(0);
+  // A tared, calibrated, empty platform. Not exactly zero: two 20 kg cells
+  // drift a gram or two with temperature within minutes of a tare, and a screen
+  // that shows a perfect 0 forever is showing a constant rather than a
+  // measurement.
+  withScale(s, 1.0f, -2.0f, true, true, CELLS);
+  return s;
+}
+
+State sTwo() {
+  State s = stacked(2);
+  // A bowl placed slightly off-centre: the shares differ, the total does not
+  // care. That asymmetry is the entire reason both cells are on the screen.
+  withScale(s, 612.0f, 638.0f, true, true, CELLS);
+  return s;
+}
+
+State sFull() {
+  State s = stacked(4);
+  withScale(s, 4180.0f, 4241.0f, true, true, CELLS);
+  return s;
+}
 
 State sDegraded() {
   // A dead sensor sandwiched between the top bowl and the first absent level
@@ -71,6 +123,11 @@ State sDegraded() {
   s.sensorOnline[2] = false;
   s.sensorsOnline = 3;
   s.stack = Stack::Degraded;
+  // ONE CELL DOWN. The total is not "half the weight", it is not a weight at
+  // all -- the missing cell's share is unknown, not zero. The dashboard shows
+  // what the surviving cell reports and flags the assembly, rather than adding
+  // a number that would read as a light bowl.
+  withScale(s, 640.0f, 0.0f, true, true, 1);
   return s;
 }
 
@@ -82,6 +139,10 @@ State sDiscontiguous() {
   s.levels[1] = Level::Present;
   s.stack = Stack::Discontiguous;
   s.stackCount = 0;
+  // Never calibrated: both cells converting, no known mass ever applied, so
+  // there is no gram figure and the page shows counts. This is the state every
+  // unit is in the first time it boots.
+  withScale(s, 604.0f, 631.0f, false, false, CELLS);
   return s;
 }
 
@@ -93,6 +154,7 @@ State sNoCell() {
   // -1, not 0. "0%" is a claim that the cell is empty; this state is that
   // nothing is known about it, which is a different statement entirely.
   s.batteryPercent = -1;
+  withScale(s, 1902.0f, 1874.0f, true, true, CELLS);
   return s;
 }
 
@@ -104,12 +166,20 @@ State sCritical() {
   s.batteryPinMv = 1104;
   s.wifiConnected = false;
   s.wifiRssi = 0;
+  // NEITHER CONVERTER ANSWERING -- the state of a board with no cells wired,
+  // which is what this branch's first flash will actually look like. Dashes,
+  // not zero.
+  withScale(s, 0.0f, 0.0f, false, false, 0);
   return s;
 }
 
 State sWeakSignal() {
   State s = stacked(2);
   s.wifiRssi = -82;  // associated but marginal: one bar
+  // Calibrated but never tared: the factor is known, so grams are real, but
+  // they include the platform. A number that is right about the change and
+  // wrong about the absolute, which is worth being told.
+  withScale(s, 1240.0f, 1198.0f, true, false, CELLS);
   return s;
 }
 
@@ -121,6 +191,7 @@ State sCharging() {
   s.batteryPinMv = 1274;
   s.chargingKnown = true;
   s.charging = true;
+  withScale(s, 9840.0f, 10120.0f, true, true, CELLS);
   return s;
 }
 
@@ -130,15 +201,15 @@ struct Scenario {
 };
 
 const Scenario SCENARIOS[] = {
-    {"empty", sEmpty},
-    {"2 bowls", sTwo},
-    {"full", sFull},
-    {"degraded", sDegraded},
-    {"DISCONTIGUOUS", sDiscontiguous},
-    {"no cell", sNoCell},
-    {"critical + offline", sCritical},
-    {"charging", sCharging},
-    {"weak signal", sWeakSignal},
+    {"empty platform", sEmpty},
+    {"one bowl, off-centre", sTwo},
+    {"loaded", sFull},
+    {"ONE CELL DOWN", sDegraded},
+    {"uncalibrated (counts)", sDiscontiguous},
+    {"no battery", sNoCell},
+    {"NO CELLS + critical", sCritical},
+    {"heavy + charging", sCharging},
+    {"not tared, weak signal", sWeakSignal},
 };
 
 // Fabricated scan results. Real ones arrive when net.cpp joins this image; the

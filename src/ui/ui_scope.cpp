@@ -1,5 +1,7 @@
 #include "ui_scope.h"
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "ui_perf.h"
@@ -12,11 +14,12 @@ const uint32_t C_BG = 0x000000;
 const uint32_t C_TEXT = 0xE6EDF3;
 const uint32_t C_MUTED = 0x8B949E;
 const uint32_t C_GRID = 0x232A31;
+const uint32_t C_ZERO = 0x3A424B;  // the zero line, brighter than the thirds
 const uint32_t C_CURSOR = 0x4A5058;
 
-// One colour per level, matched to the order used everywhere else: index 0 is
-// f1, the bottom bowl.
-const uint32_t C_SERIES[LEVELS] = {0x3FB950, 0x58A6FF, 0xD29922, 0xF85149};
+// One colour per cell, matched to the order used everywhere else: index 0 is A.
+const uint32_t C_SERIES[CELLS] = {0x3FB950, 0x58A6FF};
+const char *SERIES_NAME[CELLS] = {"A", "B"};
 
 lv_obj_t *canvas_ = nullptr;
 lv_obj_t *lblFps_ = nullptr;
@@ -35,22 +38,25 @@ uint32_t lastSampleMs_ = 0;
 // runs again -- real data outranks fixtures, and a scope that mixes the two is
 // worse than either.
 bool fedReal_ = false;
-int16_t feedMm_[LEVELS] = {0, 0, 0, 0};
-bool feedValid_[LEVELS] = {false, false, false, false};
-
-// Stored for a level with no usable reading. Distinct from any real distance so
-// drawColumn can leave a gap instead of plotting it.
-const int16_t NO_READING = -1;
+int32_t feedValue_[CELLS] = {0, 0};
+bool feedValid_[CELLS] = {false, false};
+const char *unit_ = "cts";
 
 // The ring holds the DATA; the canvas holds the PICTURE. They exist separately
 // because they answer different questions -- the ring is what lets sampling
 // continue while the page is hidden, and the canvas is what lets a redraw touch
 // one column instead of the whole plot.
-int16_t ring_[LEVELS][SCOPE_W];
+//
+// Validity is a SEPARATE array rather than a sentinel value. The ToF version
+// used -1 for "no reading", which was safe because a distance is never
+// negative; a converter count is signed and -1 is an ordinary value, so a
+// sentinel here would silently blank a real sample.
+int32_t ring_[CELLS][SCOPE_W];
+bool ringOk_[CELLS][SCOPE_W];
 uint16_t sweep_ = 0;     // column the NEXT sample will occupy
 uint16_t filled_ = 0;    // columns written since boot, capped at SCOPE_W
-int16_t prevY_[LEVELS];  // last plotted row per series, for joining segments
-bool havePrevCh_[LEVELS] = {false, false, false, false};
+int16_t prevY_[CELLS];   // last plotted row per series, for joining segments
+bool havePrevCh_[CELLS] = {false, false};
 bool havePrev_ = false;
 bool pendingDraw_ = false;
 
@@ -58,15 +64,96 @@ bool pendingDraw_ = false;
 // rather than as a discontinuity in the trace.
 const uint16_t GAP = 4;
 
-int16_t yForMm(int32_t mm) {
-  if (mm < 0) mm = 0;
-  if (mm > SCOPE_MAX_MM) mm = SCOPE_MAX_MM;
-  // Inverted: 0 mm at the top. A bowl close to the sensor is a SMALL reading
-  // and should sit high; getting this the wrong way up would make a filling
-  // stack look like an emptying one.
-  return (int16_t)((int32_t)(SCOPE_H - 1) * mm / SCOPE_MAX_MM);
+// --- the auto-range --------------------------------------------------------
+int32_t rangeLo_ = -100;
+int32_t rangeHi_ = 100;
+uint32_t nextRefitMs_ = 0;
+bool needFullRepaint_ = false;
+
+// A floor on the window height, so a perfectly still trace does not get
+// magnified until the converter's last bit fills the screen. Below this the
+// range is padded out symmetrically instead.
+const int32_t MIN_SPAN = 40;
+
+// How often a settled trace is allowed to zoom back IN. Zooming out happens
+// immediately -- a sample off the top of the screen is not something to sit on
+// -- but zooming in costs a full repaint for a purely cosmetic gain, so it is
+// rate-limited and conditional on the trace actually having shrunk a lot.
+const uint32_t REFIT_MS = 5000;
+
+int16_t yForValue(int32_t v) {
+  const int32_t span = rangeHi_ - rangeLo_;
+  if (span <= 0) return SCOPE_H / 2;
+  if (v < rangeLo_) v = rangeLo_;
+  if (v > rangeHi_) v = rangeHi_;
+  // Inverted: the largest value at the top, which is the direction every plot
+  // is read in. The ToF version was inverted the other way on purpose, because
+  // there a SMALL number meant a bowl close to the sensor; weight has no such
+  // reversal, and copying it across would have drawn a filling platform as an
+  // emptying one.
+  return (int16_t)((int32_t)(SCOPE_H - 1) - (int32_t)(SCOPE_H - 1) * (v - rangeLo_) / span);
 }
 
+// What the window WOULD be if it were fitted to the ring right now. Kept
+// separate from applying it, because two of the three callers want to look at
+// the answer before deciding whether it is worth a full repaint.
+bool computeFit(int32_t *outLo, int32_t *outHi) {
+  int32_t lo = 0, hi = 0;
+  bool any = false;
+  for (uint8_t i = 0; i < CELLS; i++) {
+    for (uint16_t x = 0; x < SCOPE_W; x++) {
+      if (!ringOk_[i][x]) continue;
+      const int32_t v = ring_[i][x];
+      if (!any) {
+        lo = hi = v;
+        any = true;
+      } else {
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+      }
+    }
+  }
+  if (!any) return false;
+
+  int32_t span = hi - lo;
+  if (span < MIN_SPAN) {
+    const int32_t pad = (MIN_SPAN - span) / 2 + 1;
+    lo -= pad;
+    hi += pad;
+    span = hi - lo;
+  }
+  // 10% of headroom above and below, so a trace that is merely wobbling at the
+  // top of its range does not retrigger a refit on every other sample.
+  const int32_t margin = span / 10 + 1;
+  *outLo = lo - margin;
+  *outHi = hi + margin;
+  return true;
+}
+
+// Widen only, never narrow. Used on the out-of-range path, where the point is
+// to get the sample on screen without also re-scaling for a transient.
+bool growRange() {
+  int32_t lo, hi;
+  if (!computeFit(&lo, &hi)) return false;
+  const bool wider = lo < rangeLo_ || hi > rangeHi_;
+  if (!wider) return false;
+  if (lo < rangeLo_) rangeLo_ = lo;
+  if (hi > rangeHi_) rangeHi_ = hi;
+  return true;
+}
+
+// Fit exactly, in both directions. Only called where a full repaint is already
+// acceptable: entering the page, or the settled-trace timer below.
+bool fitRange() {
+  int32_t lo, hi;
+  if (!computeFit(&lo, &hi)) return false;
+  if (lo == rangeLo_ && hi == rangeHi_) return false;
+  rangeLo_ = lo;
+  rangeHi_ = hi;
+  return true;
+}
+
+// --- direct pixel writes ---------------------------------------------------
 // PIXELS ARE WRITTEN DIRECTLY, not through lv_draw_* on a canvas layer.
 //
 // That is not a micro-optimisation, it is the only way this works.
@@ -106,24 +193,33 @@ void drawColumn(uint16_t x, bool joinToPrev) {
   }
 
   // Grid, redrawn per column because the clear above wiped it. Two interior
-  // lines at 1/3 and 2/3 -- one pixel each, so effectively free.
+  // lines at 1/3 and 2/3, one pixel each, so effectively free.
   for (uint8_t g = 1; g < 3; g++) {
     const int32_t gy = (int32_t)SCOPE_H * g / 3;
     vline(x, gy, gy, rgb565(C_GRID));
   }
 
+  // ZERO GETS ITS OWN LINE, brighter than the thirds, whenever it is inside the
+  // window. On a scale it is the only y value that means anything by itself --
+  // drift away from it is the whole reason to look at this page -- and with an
+  // auto-ranging axis there is otherwise no fixed reference at all.
+  if (rangeLo_ <= 0 && rangeHi_ >= 0) {
+    const int16_t zy = yForValue(0);
+    vline(x, zy, zy, rgb565(C_ZERO));
+  }
+
   // The traces. A vertical run from the previous sample's row to this one, so a
   // step reads as a connected edge rather than two unrelated dots.
-  for (uint8_t i = 0; i < LEVELS; i++) {
-    // A level with no reading draws NOTHING. Clamping it to 0 mm would put a
-    // solid line at the top of the plot, which reads as "bowl pressed against
-    // the sensor" -- the most alarming possible misreport of "this sensor is
-    // not talking". A gap is the honest mark.
-    if (ring_[i][x] == NO_READING) {
+  for (uint8_t i = 0; i < CELLS; i++) {
+    // A cell with no reading draws NOTHING. Clamping it into the window would
+    // put a line somewhere plausible, which reads as a measurement -- the most
+    // alarming possible misreport of "this cell is not talking". A gap is the
+    // honest mark.
+    if (!ringOk_[i][x]) {
       havePrevCh_[i] = false;
       continue;
     }
-    const int16_t y = yForMm(ring_[i][x]);
+    const int16_t y = yForValue(ring_[i][x]);
     int16_t y0 = y, y1 = y;
     if (joinToPrev && havePrev_ && havePrevCh_[i]) {
       y0 = prevY_[i] < y ? prevY_[i] : y;
@@ -136,10 +232,30 @@ void drawColumn(uint16_t x, bool joinToPrev) {
   havePrev_ = true;
 }
 
-// --- fabricated sensor data ------------------------------------------------
+void repaintAll() {
+  if (!px_ || !canvas_) return;
+  for (uint16_t y = 0; y < SCOPE_H; y++) {
+    uint16_t *row = px_ + (uint32_t)y * stridePx_;
+    for (uint16_t x = 0; x < SCOPE_W; x++) row[x] = rgb565(C_BG);
+  }
+  havePrev_ = false;
+  const uint16_t start = (uint16_t)((sweep_ + SCOPE_W - filled_) % SCOPE_W);
+  for (uint16_t n = 0; n < filled_; n++) {
+    drawColumn((uint16_t)((start + n) % SCOPE_W), n > 0);
+  }
+  lv_obj_invalidate(canvas_);
+}
+
+// --- fabricated cell data ---------------------------------------------------
 // A deterministic LCG rather than rand(): the sim and the device must produce
 // the same trace, or comparing what they render means comparing two different
 // signals.
+//
+// Shaped like a LOAD CELL rather than a rangefinder: a noisy baseline that
+// steps when something is put on the platform and steps back when it is taken
+// off, with a short settle rather than a slew. Counts, at roughly the order of
+// magnitude a 20 kg cell at gain 128 actually produces -- about a hundred per
+// gram, so a 500 g bowl is ~50,000.
 uint32_t rnd_ = 0x1234567u;
 uint16_t nextRand() {
   rnd_ = rnd_ * 1103515245u + 12345u;
@@ -147,46 +263,39 @@ uint16_t nextRand() {
 }
 
 struct Channel {
-  int32_t baseline;
+  int32_t value;
   int32_t target;
   uint32_t nextStepMs;
 };
-Channel ch_[LEVELS];
+Channel ch_[CELLS];
 bool armed_ = false;
 
 void armChannels(uint32_t nowMs) {
-  // Staggered so all four do not step together, which would look like a
-  // rendering artefact rather than four independent sensors.
-  for (uint8_t i = 0; i < LEVELS; i++) {
-    ch_[i].baseline = 380 - i * 20;
-    ch_[i].target = ch_[i].baseline;
-    ch_[i].nextStepMs = nowMs + 1200 + i * 700;
+  // Staggered so both do not step together, which would look like a rendering
+  // artefact rather than two independent converters.
+  for (uint8_t i = 0; i < CELLS; i++) {
+    ch_[i].value = 0;
+    ch_[i].target = 0;
+    ch_[i].nextStepMs = nowMs + 2000 + i * 900;
   }
   armed_ = true;
 }
 
 int32_t sampleChannel(uint8_t i, uint32_t nowMs) {
   Channel &c = ch_[i];
-
-  // Bowl arrives or leaves: a step between "near" (present, well under
-  // PRESENT_BELOW_MM) and "far" (absent, above ABSENT_ABOVE_MM). Real data does
-  // this and does not slew.
   if ((int32_t)(nowMs - c.nextStepMs) >= 0) {
-    c.nextStepMs = nowMs + 1500 + (nextRand() % 3000);
-    c.target = (c.target > 250) ? (60 + (int32_t)(nextRand() % 30))
-                                : (360 + (int32_t)(nextRand() % 60));
+    c.nextStepMs = nowMs + 2500 + (nextRand() % 4000);
+    // Loaded or empty. The two cells take unequal shares, which is what a bowl
+    // sitting off-centre looks like and is the reason both are drawn.
+    c.target = c.target > 10000 ? 0 : (int32_t)(20000 + (nextRand() % 40000) + i * 9000);
   }
+  const int32_t delta = c.target - c.value;
+  const int32_t step = (delta > 0) ? 1 : -1;
+  const int32_t mag = (delta < 0 ? -delta : delta);
+  c.value += (mag > 12000) ? step * 12000 : delta;
 
-  const int32_t delta = c.target - c.baseline;
-  if (delta > 0) c.baseline += (delta > 40) ? 40 : delta;
-  else if (delta < 0) c.baseline += (delta < -40) ? -40 : delta;
-
-  // Ranging noise. The real part measures ~2.5 mm stdev at 1 m in the
-  // RESPONSIVE preset, so +/-4 is the right order.
-  int32_t v = c.baseline + ((int32_t)(nextRand() % 9) - 4);
-  if (v < 0) v = 0;
-  if (v > SCOPE_MAX_MM) v = SCOPE_MAX_MM;
-  return v;
+  // Converter noise, at the order a NAU7802 at gain 128 shows on a quiet bench.
+  return c.value + ((int32_t)(nextRand() % 121) - 60);
 }
 
 }  // namespace
@@ -269,7 +378,13 @@ void buildScope(lv_obj_t *parent) {
   lblVals_ = lv_label_create(parent);
   lv_obj_set_style_text_font(lblVals_, &lv_font_montserrat_14, LV_PART_MAIN);
   lv_obj_set_style_text_color(lblVals_, lv_color_hex(C_MUTED), LV_PART_MAIN);
-  lv_label_set_text(lblVals_, "0-500 mm");
+  // Width-bound and wrapping. Counts run to seven digits and a sign, so a
+  // single-line readout of two of them plus the range is 40 characters -- which
+  // does not fit in 232 px at 14 px and, without a width, does not wrap either:
+  // it just runs off the right edge.
+  lv_obj_set_width(lblVals_, LV_PCT(100));
+  lv_label_set_long_mode(lblVals_, LV_LABEL_LONG_WRAP);
+  lv_label_set_text(lblVals_, "waiting for a sample");
 
   lv_obj_t *legend = lv_obj_create(parent);
   lv_obj_set_size(legend, LV_PCT(100), 20);
@@ -278,56 +393,87 @@ void buildScope(lv_obj_t *parent) {
   lv_obj_set_style_pad_all(legend, 0, LV_PART_MAIN);
   lv_obj_remove_flag(legend, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_flex_flow(legend, LV_FLEX_FLOW_ROW);
-  lv_obj_set_flex_align(legend, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+  lv_obj_set_flex_align(legend, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER,
                         LV_FLEX_ALIGN_CENTER);
-  for (uint8_t i = 0; i < LEVELS; i++) {
+  for (uint8_t i = 0; i < CELLS; i++) {
     lv_obj_t *l = lv_label_create(legend);
     lv_obj_set_style_text_font(l, &lv_font_montserrat_16, LV_PART_MAIN);
     lv_obj_set_style_text_color(l, lv_color_hex(C_SERIES[i]), LV_PART_MAIN);
-    lv_label_set_text_fmt(l, "f%u", i + 1);
+    lv_label_set_text(l, SERIES_NAME[i]);
   }
 }
 
-void scopeFeed(const int16_t mm[LEVELS], const bool valid[LEVELS]) {
+void scopeFeed(const int32_t value[CELLS], const bool valid[CELLS], const char *unit) {
   fedReal_ = true;
-  for (uint8_t i = 0; i < LEVELS; i++) {
-    feedMm_[i] = mm[i];
+  for (uint8_t i = 0; i < CELLS; i++) {
+    feedValue_[i] = value[i];
     feedValid_[i] = valid[i];
   }
+  if (unit) unit_ = unit;
 }
 
 void scopeSample(uint32_t nowMs) {
   if (!armed_) {
     armChannels(nowMs);
     lastSampleMs_ = nowMs;
+    nextRefitMs_ = nowMs + REFIT_MS;
   }
 
-  // 10 Hz, matching what the real VL53L0X array produces in the RESPONSIVE
-  // preset. The previous 50 Hz existed only to keep a scrolling chart
-  // permanently dirty for measurement; with a sweeping cursor each sample costs
-  // one column, so oversampling buys nothing and a real sensor rate is what the
-  // page should be showing anyway.
-  if ((int32_t)(nowMs - lastSampleMs_) < 100) return;
+  // 20 Hz, matching the rate scale.cpp publishes at. The converters run at
+  // 80 SPS underneath; sampling the scope faster than the publish rate would
+  // draw the same value four times and call it history.
+  if ((int32_t)(nowMs - lastSampleMs_) < 50) return;
   lastSampleMs_ = nowMs;
 
-  for (uint8_t i = 0; i < LEVELS; i++) {
-    ring_[i][sweep_] = fedReal_ ? (feedValid_[i] ? feedMm_[i] : NO_READING)
-                                : (int16_t)sampleChannel(i, nowMs);
+  bool outside = false;
+  for (uint8_t i = 0; i < CELLS; i++) {
+    const bool ok = fedReal_ ? feedValid_[i] : true;
+    const int32_t v = fedReal_ ? feedValue_[i] : sampleChannel(i, nowMs);
+    ring_[i][sweep_] = v;
+    ringOk_[i][sweep_] = ok;
+    if (ok && (v < rangeLo_ || v > rangeHi_)) outside = true;
   }
   if (filled_ < SCOPE_W) filled_++;
 
   // ADVANCED HERE, NOT IN scopeRender(). It used to advance during rendering,
   // which early-returns when the page is hidden -- so every sample landed in
-  // column 0 while the stock page was up, and entering the scope after 23 s
-  // painted 231 columns of zeros as a solid line pinned to 0 mm. The header of
-  // this file promises data stays current whether or not anyone is looking;
-  // that promise was only true of the ring's CONTENTS, not its cursor.
+  // column 0 while the home page was up, and entering the scope after twelve
+  // seconds painted 231 columns of one value as a flat line. The header of this
+  // file promises data stays current whether or not anyone is looking; that
+  // promise was only true of the ring's CONTENTS, not its cursor.
   sweep_ = (uint16_t)((sweep_ + 1) % SCOPE_W);
   pendingDraw_ = true;
+
+  // Zoom OUT at once: a sample off the top of the plot is not something to sit
+  // on for five seconds. Zoom IN only on the timer, and only when the trace has
+  // settled into less than half the window -- each refit repaints every column,
+  // so a range that chased the data would give back exactly what the sweep
+  // buys.
+  bool ranged = false;
+  if (outside) {
+    ranged = growRange();
+  } else if ((int32_t)(nowMs - nextRefitMs_) >= 0) {
+    nextRefitMs_ = nowMs + REFIT_MS;
+    // Asked BEFORE it is applied. A trace that has settled into more than half
+    // the window is close enough; rescaling it would repaint 232 columns for a
+    // cosmetic gain, which is exactly the cost the sweep exists to avoid.
+    int32_t lo, hi;
+    if (computeFit(&lo, &hi) && (hi - lo) * 2 < (rangeHi_ - rangeLo_)) ranged = fitRange();
+  }
+  if (ranged) needFullRepaint_ = true;
 }
 
 void scopeRender() {
-  if (!canvas_ || !visible_ || !pendingDraw_) return;
+  if (!canvas_ || !visible_) return;
+
+  if (needFullRepaint_) {
+    needFullRepaint_ = false;
+    pendingDraw_ = false;
+    repaintAll();
+    return;
+  }
+
+  if (!pendingDraw_) return;
   pendingDraw_ = false;
 
   // sweep_ points at the column the NEXT sample will use, so the one just
@@ -360,9 +506,22 @@ void scopeRender() {
   static uint32_t nextVals = 0;
   const uint32_t now = lv_tick_get();
   if (lblVals_ && (int32_t)(now - nextVals) >= 0) {
-    nextVals = now + 1000;
-    lv_label_set_text_fmt(lblVals_, "f1 %d  f2 %d  f3 %d  f4 %d mm", ring_[0][x],
-                          ring_[1][x], ring_[2][x], ring_[3][x]);
+    nextVals = now + 500;
+    // The window is printed alongside the values, because an auto-ranging plot
+    // whose scale is not stated is a shape rather than a measurement -- the
+    // same trace can be a gram of drift or a kilogram of bowl.
+    char buf[80];
+    char aTxt[16], bTxt[16];
+    if (ringOk_[0][x]) snprintf(aTxt, sizeof(aTxt), "%ld", (long)ring_[0][x]);
+    else snprintf(aTxt, sizeof(aTxt), "--");
+    if (ringOk_[1][x]) snprintf(bTxt, sizeof(bTxt), "%ld", (long)ring_[1][x]);
+    else snprintf(bTxt, sizeof(bTxt), "--");
+    // The window on its own line, because an auto-ranging plot whose scale is
+    // not stated is a shape rather than a measurement -- the same trace can be
+    // a gram of drift or a kilogram of bowl.
+    snprintf(buf, sizeof(buf), "A %s   B %s %s\nscale %ld .. %ld", aTxt, bTxt, unit_,
+             (long)rangeLo_, (long)rangeHi_);
+    if (strcmp(lv_label_get_text(lblVals_), buf) != 0) lv_label_set_text(lblVals_, buf);
   }
 }
 
@@ -371,29 +530,20 @@ void scopeSetVisible(bool visible) {
   visible_ = visible;
   if (!visible || !canvas_) return;
 
-  // Repaint every column that holds data. This is the one expensive thing the
-  // scope does, and it happens on a page TRANSITION rather than per sample --
-  // the difference between paying it once and paying it ten times a second.
-  if (px_) {
-    for (uint16_t y = 0; y < SCOPE_H; y++) {
-      uint16_t *row = px_ + (uint32_t)y * stridePx_;
-      for (uint16_t x = 0; x < SCOPE_W; x++) row[x] = rgb565(C_BG);
-    }
-  }
-  havePrev_ = false;
-  const uint16_t start = (uint16_t)((sweep_ + SCOPE_W - filled_) % SCOPE_W);
-  for (uint16_t n = 0; n < filled_; n++) {
-    drawColumn((uint16_t)((start + n) % SCOPE_W), n > 0);
-  }
-  lv_obj_invalidate(canvas_);
+  // Fit before repainting, so entering the page shows the history at a scale
+  // that suits it rather than at whatever the range happened to be when it was
+  // last looked at.
+  fitRange();
+  needFullRepaint_ = false;
+  repaintAll();
 }
 
 uint16_t scopeFps() { return perfFps(); }
 
 void scopeShowPerf() {
   if (!visible_ || !lblFps_) return;
-  char buf[128];
-  perfFormat(buf, sizeof(buf));
+  char buf[64];
+  perfFormatShort(buf, sizeof(buf));
   // Compared before writing, like every other update path here. The caller
   // already gates this to once a second; this makes a future caller that
   // forgets cost nothing rather than 60% of a core.

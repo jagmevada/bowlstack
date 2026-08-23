@@ -40,6 +40,45 @@ enum class Stack : uint8_t { Ok, Discontiguous, Degraded };
 // does not have.
 enum class Battery : uint8_t { Unknown, Critical, Low, Medium, Good };
 
+// --- the weighing assembly --------------------------------------------------
+// Two cells under one platform. See scale.h for why the total is a SUM and why
+// there is one gain constant rather than two.
+static const uint8_t CELLS = 2;
+
+// Mirrors CellState in nau7802.h, restated here because ui_state.h may not
+// include a driver header -- that restriction is the whole point of this file.
+// The three-way split is the same one the ToF array uses and exists for the
+// same reason: "configured but has not measured yet" is not "not working", and
+// on a scale it is emphatically not zero, because zero is a real weight.
+enum class Cell : uint8_t { Offline, Warming, Online };
+
+struct CellView {
+  Cell state;
+  // Trimmed mean of the raw conversions with the tare already subtracted, so
+  // this is the cell's own contribution and not an absolute converter reading.
+  int32_t counts;
+  // This cell's share of the load. Only meaningful when the assembly is
+  // calibrated; the UI is expected to show counts otherwise rather than a
+  // number whose unit it cannot name.
+  float grams;
+  uint16_t sps;  // conversions per second actually delivered
+};
+
+struct ScaleView {
+  CellView cell[CELLS];
+
+  int32_t totalCounts;
+  float totalGrams;
+
+  // FALSE MEANS THERE IS NO GRAM FIGURE, not that the figure is poor. A scale
+  // that has never seen a known mass cannot convert counts to grams, and the
+  // screen says counts rather than inventing a factor.
+  bool calibrated;
+  bool tared;
+
+  uint8_t online;
+};
+
 struct State {
   Level levels[LEVELS];
   uint8_t stackCount;
@@ -101,6 +140,11 @@ struct State {
   uint32_t uptimeSec;
   const char *deviceId;
   const char *firmware;
+
+  // Carried in the same snapshot as everything else rather than plumbed
+  // separately, so one struct still describes the whole screen and a page can
+  // never render half of one instant beside half of another.
+  ScaleView scale;
 };
 
 // A sensible zero value: everything unknown, nothing claimed. Used as the

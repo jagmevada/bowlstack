@@ -1,7 +1,13 @@
 // The two pages, swipeable.
 //
-//   1  stock view -- the shipping screen
-//   2  scope      -- four live ToF traces and a frame-rate readout
+//   1  menu   -- settings tree, unchanged from the touch-ui branch
+//   2  weight -- the shipping screen, and home
+//
+// The menu tree keeps its shape. What changed on this branch is what the pages
+// UNDER it are about: Sensors is the load-cell scope rather than four ToF
+// traces, and Settings gained a Scale entry for tare and calibration, which are
+// the two things a weighing device cannot work without and which have no home
+// on a readout-only dashboard.
 //
 // Replaces the earlier six-page gallery. Those pages existed to settle
 // questions -- which type sizes are legible on this panel, how big a touch
@@ -28,6 +34,21 @@ void pagesGoHome();
 
 // Up one level in the menu tree. Wired to every sub-page's back button.
 void pagesBack();
+
+// --- what the Scale page does ----------------------------------------------
+// Function pointers rather than direct calls, for the same reason ui_state.h
+// exists: src/ui/ is pure LVGL and cannot reach scale.cpp, which needs
+// Arduino, FreeRTOS and NVS. The firmware installs the real handlers; the
+// desktop preview installs none and the rows are inert, which is the honest
+// behaviour for a machine with no cells attached.
+//
+// The calibration mass is a build constant rather than an on-screen entry.
+// Typing a number on a 2" panel to do a thing that is done once per assembly is
+// the wrong trade -- put the known mass on the platform, tap the row, and the
+// factor follows.
+void pagesOnScaleTare(void (*cb)(void));
+void pagesOnScaleCalibrate(void (*cb)(void));
+void pagesOnScaleClearCal(void (*cb)(void));
 
 // How long without a touch before the UI returns to the stock page.
 //

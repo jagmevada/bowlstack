@@ -207,4 +207,48 @@ static const uint8_t FREE_GPIOS[] = {
 static const int8_t CAM_SCCB_SDA = 21;
 static const int8_t CAM_SCCB_SCL = 16;
 
+// ---------------------------------------------------------------------------
+// 8. Load cells -- two NAU7802, and why they cannot share a bus
+// ---------------------------------------------------------------------------
+// THE NAU7802 HAS NO ADDRESS PINS. Every part answers at 0x2A and there is no
+// strap, no OTP field and no software way to move it. Two of them is therefore
+// two BUSES, and that is a property of the part rather than a layout choice --
+// a mux or a bus switch would be the only other answer, and this board has
+// neither fitted.
+//
+//   A   GPIO47/48, the on-board bus, hardware I2C port 0
+//   B   GPIO11/12, bit-banged, no peripheral involved
+//
+// BUS A IS THE TOUCH AND IMU BUS, which section 3 above argues should stay
+// clear of off-board parts. That argument was about FOUR VL53L0X CLONES, whose
+// documented failure mode is latching SDA low and taking the touchscreen down
+// with them. It does not transfer wholesale to one NAU7802: it is a single
+// first-party part, it is read-mostly, and it sits on a short lead rather than
+// a metre of cable up a pipe. The risk is real but it is one device, and the
+// alternative -- two bit-banged buses -- costs CPU on the exact loop whose
+// frame rate is the point of this build.
+//
+// Worth stating plainly so nobody has to rediscover it: if the screen ever goes
+// unresponsive on a unit with cells attached, THIS is the first thing to
+// suspect, and moving cell A to a third bit-banged pair is the fallback.
+//
+// GPIO47/48 already carry R29/R30 (4.7k). Do not add more.
+static const int8_t CELL_A_SDA = 48;  // == TP_SDA, deliberately
+static const int8_t CELL_A_SCL = 47;  // == TP_SCL
+
+// BUS B HAS NO PULL-UPS ANYWHERE. Section 7 says so of the whole second bus and
+// it is worth repeating at the point of use: GPIO11 and GPIO12 are plain
+// broken-out pins on header P2 with nothing fitted to them. The bit-bang driver
+// enables the ESP32's internal pull-ups (~45 kohm), which is enough to make a
+// bus work on a bench with short leads and NOT enough to hold a real edge --
+// the rise time goes soft, and the symptom is intermittent NAKs that look like
+// a flaky device rather than a missing resistor.
+//
+// FIT 4.7k FROM EACH LINE TO 3V3. 3V3 and GND are both on P2.
+static const int8_t CELL_B_SDA = 12;
+static const int8_t CELL_B_SCL = 11;
+
+// Fixed and unchangeable -- see above.
+static const uint8_t NAU7802_ADDR = 0x2A;
+
 }  // namespace board

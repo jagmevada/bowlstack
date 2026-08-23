@@ -6,6 +6,28 @@ a resume section.
 
 ---
 
+## What branch you are on
+
+`loadcell`. **The measurement here is WEIGHT, not bowl count.** Same Waveshare
+board, same 240×320 panel, same UI framework and the same status bar — two
+NAU7802 bridge converters under one platform instead of four VL53L0X up a pipe.
+
+| | |
+| --- | --- |
+| cell A | GPIO47/48, hardware I²C port 0, **shared with the touch chip and IMU** |
+| cell B | GPIO11/12, bit-banged (lgfx soft port −1), **needs external 4.7 k pull-ups** |
+| why two buses | the NAU7802's address is fixed at 0x2A and cannot be moved |
+
+The ToF branch is `touch-ui` and is untouched; the discrete ToF product is
+`main`. `src/bringup/bringup_display.cpp` and `bringup_sensors.cpp` were removed
+here rather than left half-compiling — see the note in `platformio.ini`.
+
+**A unit reports COUNTS until somebody calibrates it.** That is deliberate, not
+unfinished: with no known mass there is no counts-to-gram factor, so there are no
+grams. Menu → Settings → Scale → Tare, put the known mass on, then Calibrate.
+
+---
+
 ## Touch-UI development: iterate in the simulator
 
 **`pio run -e sim` is the loop. Flashing is the check, not the loop.**
@@ -21,14 +43,14 @@ two minutes. Use it.
 
 ```
 pio run -e sim                                          # builds + opens a window
-pio run -e ws-s3-bringup -t upload --upload-port COM6   # only when it matters
+pio run -e ws-s3-loadcell -t upload --upload-port COM6   # only when it matters
 ```
 
 ### The rule that makes the simulator worth trusting
 
 **Both targets must compile the same UI source.** `src/ui/` is pure LVGL — no
 board, driver or framework headers — and `build_src_filter` includes `+<ui/>` in
-both the `sim` and `ws-s3-bringup` environments. A preview that renders its own
+both the `sim` and `ws-s3-loadcell` environments. A preview that renders its own
 copy of the screens is a picture that resembles the product; one that renders
 the product's own code is evidence about it.
 
@@ -74,7 +96,7 @@ as done on the strength of an exit code has already happened once in this repo.
 | Environment | Builds |
 | --- | --- |
 | `sim` | desktop preview, MSYS2 mingw64 + SDL2 |
-| `ws-s3-bringup` | Waveshare ESP32-S3 board bring-up |
+| `ws-s3-loadcell` | Waveshare ESP32-S3 + 2x NAU7802 -- the image this branch ships |
 | `esp32dev`, `esp32dev-debug` | the discrete board — **need `include/secret.h`, absent here** |
 
 `default_envs` is `esp32dev-debug`, so a bare `pio run` builds the discrete
