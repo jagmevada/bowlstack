@@ -97,10 +97,17 @@ as done on the strength of an exit code has already happened once in this repo.
 | --- | --- |
 | `sim` | desktop preview, MSYS2 mingw64 + SDL2 |
 | `ws-s3-loadcell` | Waveshare ESP32-S3 + 2x NAU7802 -- the image this branch ships |
-| `esp32dev`, `esp32dev-debug` | the discrete board — **need `include/secret.h`, absent here** |
+| `esp32dev`, `esp32dev-debug` | the discrete board — need `include/secret.h`, which is gitignored but **is** present in this checkout, so both build |
 
 `default_envs` is `esp32dev-debug`, so a bare `pio run` builds the discrete
 image. Always pass `-e`.
+
+**A bare `pio run` therefore compiles the DISCRETE image against whatever is new
+under `src/`.** That is how this branch's load-cell files first reached a build
+that links no LVGL: `[env]`'s filter is a deny-list behind a `+<*>`, so anything
+added to `src/` joins the discrete images until it is explicitly excluded. If you
+add a file that belongs only to the panel build, exclude it there — the comment
+above that filter lists what each entry is preventing.
 
 The simulator holds `program.exe` open while running; stop it before a rebuild
 or the link fails with `Access is denied`.
