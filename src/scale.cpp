@@ -55,7 +55,8 @@ const char *NVS_NS = "bowlscale";
 const char *KEY_OFF_A = "offA";
 const char *KEY_OFF_B = "offB";
 const char *KEY_CPG = "cpg";
-const char *KEY_TARED = "tared";
+const char *KEY_TARED_A = "tarA";
+const char *KEY_TARED_B = "tarB";
 const char *KEY_WINDOW = "win";
 const char *KEY_CALMASS = "calmass";
 
@@ -80,6 +81,48 @@ const int32_t MIN_CAL_COUNTS = 5000;
 // ceiling -- and it does so as a large, steady, entirely plausible number. The
 // weight just stops rising. Called out rather than left to be noticed.
 const int32_t OVER_RANGE_COUNTS = 8000000;  // 95% of 2^23
+
+// The readout cadence, and how often each cell is checked for a finished
+// conversion. Both follow from the converter rate rather than being independent
+// dials -- see the note in nau7802.cpp for why that rate is 10 SPS.
+const uint32_t PUBLISH_MS = 100;  // 10 Hz, the fastest readout this product wants
+const uint32_t POLL_MS = 10;
+
+// --- step detection, and why it is not a PID -------------------------------
+//
+// A moving average has exactly one behaviour and it is the wrong one for half
+// of what a scale does. At 128 samples and 10 SPS the window is 12.8 seconds,
+// so putting a bowl down makes the reading CRAWL to the new value over a full
+// window -- and taking it off crawls back. The old samples are not noise to be
+// averaged away; they are a measurement of a platform that no longer exists.
+//
+// A PID would not help. There is no loop here and nothing to actuate: the
+// reading is not chasing a setpoint, it is lagging because it is still averaging
+// history. Derivative gain on a noisy load cell would amplify exactly the noise
+// the window exists to remove.
+//
+// What a bench scale actually does, and what this does: WATCH FOR A STEP. When
+// consecutive samples land far outside the current average, that is not noise,
+// it is the load changing -- so throw the window away and restart from the new
+// level. The reading jumps at once and then re-settles at the chosen averaging.
+// Quiet when nothing is happening, immediate when something is.
+//
+// FIVE GRAMS, expressed in grams so it means something. Measured noise is about
+// 150 counts peak-to-peak, or 1.4 g, so five is comfortably clear of it while
+// being far below anything anybody puts on a platform on purpose. A slow drift
+// of four grams never triggers -- correct, that is what the average is for.
+const float STEP_GRAMS = 5.0f;
+
+// The threshold before any calibration exists, in raw counts. ~9 g at the
+// measured sensitivity, which is the same order as the calibrated figure.
+const int32_t STEP_COUNTS_UNCAL = 1000;
+
+// Consecutive samples beyond the threshold before the window is discarded.
+// THREE, not one: a single sample outside the band is what noise looks like,
+// and restarting the average on it would make the filter useless in exactly the
+// conditions it exists for. Three at 10 SPS is 300 ms of detection latency,
+// which is well inside the time it takes a hand to let go of a bowl.
+const uint8_t STEP_CONFIRM = 3;
 
 // The factory default, overwritten by the first calibration on any unit. See
 // the comment in platformio.ini for where the number came from and for what its
@@ -173,8 +216,16 @@ Nau7802 cell_[CELLS];
 CountWindow window_[CELLS];
 int32_t offset_[CELLS] = {0, 0};
 float countsPerGram_ = 0.0f;
-bool tared_ = false;
+// PER CELL, not one flag for the assembly. The old single flag was set at the
+// end of a block that handles both a global tare and a per-cell one -- so
+// taring cell A alone marked the whole platform tared, the "not tared" chip
+// disappeared, and a calibration taken then absorbed cell B's full absolute
+// reading into the factor. It also survived a reboot, so a global tare taken
+// while one cell was offline came back claiming both were zeroed.
+bool cellTared_[CELLS] = {false, false};
 uint8_t window_n_ = BOWLSTACK_AVG_WINDOW;
+// Consecutive samples outside the step band, per cell.
+uint8_t stepRun_[CELLS] = {0, 0};
 float calMass_ = (float)BOWLSTACK_CAL_MASS_G;
 volatile uint8_t wantWindow_ = 0;  // 0 = no change pending
 
@@ -195,8 +246,43 @@ volatile bool wantTare_ = false;
 volatile uint8_t wantTareMask_ = 0;
 volatile bool wantClearCal_ = false;
 volatile float wantCalGrams_ = 0.0f;
-volatile bool calResult_ = false;
+volatile uint8_t calCode_ = 0;    // a CalResult
+volatile float calFactor_ = 0.0f;
 volatile bool calDone_ = true;
+volatile bool wantRestore_ = false;
+
+// Every cell's filter is full, so a tare or a calibration is taken against the
+// averaging the operator actually selected.
+//
+// WITHOUT THIS BOTH USE WHATEVER HAPPENS TO BE IN THE WINDOW. Straight after a
+// boot, after a cell recovers, or -- most reachably -- immediately after
+// stepping the Average row, the window holds a handful of samples and the mean
+// carries several times its settled noise. A tare taken then bakes that error
+// into the zero and persists it; a calibration taken then derives the factor
+// from it. Both look completely normal.
+// The step threshold in raw counts, derived from the calibration when there is
+// one so the figure means five grams rather than an arbitrary number of counts.
+int32_t stepCounts() {
+  if (countsPerGram_ > 0.0f) {
+    const int32_t c = (int32_t)(STEP_GRAMS * countsPerGram_);
+    return c > 0 ? c : STEP_COUNTS_UNCAL;
+  }
+  return STEP_COUNTS_UNCAL;
+}
+
+bool windowsFull() {
+  for (uint8_t i = 0; i < CELLS; i++) {
+    if (cell_[i].state() != CellState::Online) continue;
+    if (window_[i].size() < window_n_) return false;
+  }
+  return true;
+}
+
+bool allCellsTared() {
+  for (uint8_t i = 0; i < CELLS; i++)
+    if (!cellTared_[i]) return false;
+  return true;
+}
 
 void loadPersisted() {
   prefs_.begin(NVS_NS, false);
@@ -211,7 +297,24 @@ void loadPersisted() {
   // inference is almost always right and wrong exactly once -- a platform that
   // happened to tare at 0 counts would come back from a reboot claiming it had
   // never been tared.
-  tared_ = prefs_.getBool(KEY_TARED, false);
+  cellTared_[0] = prefs_.getBool(KEY_TARED_A, false);
+  cellTared_[1] = prefs_.getBool(KEY_TARED_B, false);
+
+  // AN UNTARED CELL HAS NO OFFSET, and the two are made to agree here rather
+  // than left to drift apart. They can disagree for a real reason -- this
+  // firmware replaced a single assembly-wide `tared` key with one per cell, so
+  // the first boot after the update finds offsets stored and no flag vouching
+  // for them -- and the result was a display quietly subtracting a tare while
+  // the chip said "not tared". Believing the flag and dropping the offset is
+  // the safe direction: it shows the platform's true absolute reading, which is
+  // obviously not zero, instead of a plausible number nothing stands behind.
+  for (uint8_t i = 0; i < CELLS; i++) {
+    if (!cellTared_[i] && offset_[i] != 0) {
+      Serial.printf("  cell %c: offset %ld discarded -- nothing recorded taring it\n",
+                    'A' + i, (long)offset_[i]);
+      offset_[i] = 0;
+    }
+  }
   window_n_ = prefs_.getUChar(KEY_WINDOW, (uint8_t)BOWLSTACK_AVG_WINDOW);
   if (window_n_ < 4 || window_n_ > WINDOW_MAX) window_n_ = BOWLSTACK_AVG_WINDOW;
   calMass_ = prefs_.getFloat(KEY_CALMASS, (float)BOWLSTACK_CAL_MASS_G);
@@ -245,7 +348,8 @@ void storeOffsets() {
   prefs_.begin(NVS_NS, false);
   prefs_.putInt(KEY_OFF_A, offset_[0]);
   prefs_.putInt(KEY_OFF_B, offset_[1]);
-  prefs_.putBool(KEY_TARED, tared_);
+  prefs_.putBool(KEY_TARED_A, cellTared_[0]);
+  prefs_.putBool(KEY_TARED_B, cellTared_[1]);
   prefs_.end();
 }
 
@@ -266,7 +370,7 @@ void publish() {
   s.calMassG = calMass_;
   s.countsPerGram = countsPerGram_;
   s.calibrated = countsPerGram_ > 0.0f;
-  s.tared = tared_;
+  s.tared = allCellsTared();
 
   int32_t sumNet = 0;
   for (uint8_t i = 0; i < CELLS; i++) {
@@ -327,22 +431,19 @@ void serviceCommands() {
     }
   }
 
-  if (wantClearCal_) {
-    wantClearCal_ = false;
-    countsPerGram_ = 0.0f;
-    // REMOVED rather than stored as zero, and the difference is not cosmetic.
-    // loadPersisted() takes the build-time default only when the key is ABSENT,
-    // so writing a 0 would pin this unit to "uncalibrated" forever -- a later
-    // reflash with a corrected factor would silently fail to take, and the only
-    // symptom would be a screen still showing counts.
-    prefs_.begin(NVS_NS, false);
-    prefs_.remove(KEY_CPG);
-    prefs_.end();
-    Serial.println("scale: calibration cleared -- back to counts, and the build default");
-    Serial.println("       will apply again at the next boot");
-  }
-
-  if (wantTare_ || wantTareMask_) {
+  // A tare is refused on a half-filled window for the same reason a calibration
+  // is -- it would bake the filter's start-up error into the zero and persist
+  // it. Left pending rather than dropped, so the tap is honoured a moment later
+  // instead of being silently lost.
+  if ((wantTare_ || wantTareMask_) && !windowsFull()) {
+    static uint32_t nextSayMs = 0;
+    const uint32_t now = millis();
+    if ((int32_t)(now - nextSayMs) >= 0) {
+      nextSayMs = now + 1000;
+      Serial.printf("scale: tare pending -- filter %u/%u samples\n", window_[0].size(),
+                    window_n_);
+    }
+  } else if (wantTare_ || wantTareMask_) {
     // wantTare_ means the whole assembly; the mask means named cells. Reading
     // both here rather than having tare() set an all-ones mask keeps "zero
     // everything" working even if a cell is offline at the moment it is asked.
@@ -355,9 +456,15 @@ void serviceCommands() {
       // Only a cell that is actually converting can be tared. Zeroing an
       // offline cell against whatever its window last held would bake that
       // stale value in as the platform's weight.
-      if (cell_[i].state() == CellState::Online) offset_[i] = window_[i].mean(windowTrim());
+      // The flag is set HERE, inside the Online branch, beside the assignment it
+      // describes -- so a cell that was skipped is not marked zeroed, and the
+      // per-cell buttons cannot claim the assembly is ready when only one
+      // corner has been done.
+      if (cell_[i].state() == CellState::Online) {
+        offset_[i] = window_[i].mean(windowTrim());
+        cellTared_[i] = true;
+      }
     }
-    tared_ = true;
     storeOffsets();
     // Which cells were zeroed, not just that a tare happened. With two buttons
     // on the dashboard the interesting part of the log line is WHICH one was
@@ -368,35 +475,100 @@ void serviceCommands() {
 
   if (!calDone_) {
     const float known = wantCalGrams_;
-    calResult_ = false;
-    if (tared_ && known >= MIN_CAL_GRAMS) {
-      int32_t sumNet = 0;
-      uint8_t online = 0;
-      for (uint8_t i = 0; i < CELLS; i++) {
-        if (cell_[i].state() != CellState::Online) continue;
-        sumNet += window_[i].mean(windowTrim()) - offset_[i];
-        online++;
-      }
-      // Both cells, or the factor describes half a platform. And a positive
-      // deflection, or the mass is not on it -- a negative sum with a mass
-      // supposedly loaded means the cells are wired backwards, which is worth
-      // catching here rather than as a scale that counts downward.
-      if (online == CELLS && sumNet >= MIN_CAL_COUNTS) {
-        countsPerGram_ = (float)sumNet / known;
-        calMass_ = known;
-        storeFactor();
-        calResult_ = true;
-        Serial.printf("scale: calibrated -- %ld counts for %.0f g = %.3f counts/g\n",
-                      (long)sumNet, known, countsPerGram_);
-      } else {
-        Serial.printf("scale: calibration refused (online %u/%u, net %ld counts)\n", online,
-                      CELLS, (long)sumNet);
-      }
-    } else {
-      Serial.printf("scale: calibration refused (tared %d, mass %.0f g, minimum %.0f g)\n",
-                    (int)tared_, known, MIN_CAL_GRAMS);
+    CalResult r = CalResult::Ok;
+    float derived = 0.0f;
+
+    int32_t sumNet = 0;
+    uint8_t online = 0;
+    for (uint8_t i = 0; i < CELLS; i++) {
+      if (cell_[i].state() != CellState::Online) continue;
+      sumNet += window_[i].mean(windowTrim()) - offset_[i];
+      online++;
     }
+
+    // ORDERED MOST SPECIFIC FIRST, so the reason names the thing the operator
+    // has to change. Every rung here is a condition this code can actually
+    // test; nothing falls through to a catch-all that has to guess.
+    if (online < CELLS) {
+      r = CalResult::CellsOffline;
+    } else if (!allCellsTared()) {
+      r = CalResult::NotTared;
+    } else if (known < MIN_CAL_GRAMS) {
+      // ITS OWN RUNG. This used to fall through to the deflection case and be
+      // reported as "no load" with the real deflection printed beside it --
+      // which told the operator to fix the platform when what needed fixing was
+      // the number they typed.
+      r = CalResult::MassTooSmall;
+    } else if (!windowsFull()) {
+      r = CalResult::Settling;
+    } else if (sumNet < MIN_CAL_COUNTS) {
+      // A negative sum lands here too, and it should: the cells wired to
+      // subtract rather than add is the same "this is not a usable deflection"
+      // answer, and the count is printed so the sign is visible.
+      r = CalResult::NoDeflection;
+    } else {
+      derived = (float)sumNet / known;
+      // A PLAUSIBILITY BAND, because every guard above is one-sided and a
+      // mistyped mass sails through all of them. Typing 1750 for a 175 g
+      // reference gives a tenth of the right factor and a confident green tick;
+      // typing 20 with a 2 kg mass gives a hundred times too much. Both persist,
+      // and nothing else on the screen contradicts them.
+      //
+      // Banded against the BUILD DEFAULT rather than absolute numbers, so it
+      // travels: an image built for 5 kg cells carries a different default and
+      // the band moves with it. An order of magnitude either way is far wider
+      // than part-to-part spread and still catches every decimal-place slip.
+      const float ref = (float)BOWLSTACK_COUNTS_PER_GRAM;
+      if (ref > 0.0f && (derived < ref * 0.1f || derived > ref * 10.0f)) {
+        r = CalResult::Implausible;
+        Serial.printf("scale: %.3f counts/g is outside %.1f..%.1f -- check the mass\n",
+                      derived, ref * 0.1f, ref * 10.0f);
+      }
+    }
+
+    if (r == CalResult::Ok) {
+      countsPerGram_ = derived;
+      calMass_ = known;
+      storeFactor();
+      Serial.printf("scale: calibrated -- %ld counts for %.0f g = %.3f counts/g\n",
+                    (long)sumNet, known, countsPerGram_);
+    } else {
+      Serial.printf("scale: calibration refused -- %s (online %u/%u, net %ld counts, %.0f g)\n",
+                    calResultText(r), online, CELLS, (long)sumNet, known);
+    }
+
+    // The FACTOR travels back with the verdict. The caller cannot read it from
+    // a snapshot -- see the note on calibrate() in scale.h.
+    calFactor_ = derived;
+    calCode_ = (uint8_t)r;
     calDone_ = true;
+  }
+
+  // SERVICED AFTER THE CALIBRATION, not before. When both are pending in one
+  // pass a clear must win, or a request that was still in flight when somebody
+  // tapped "Clear calibration" would resurrect the factor that tap just removed.
+  if (wantClearCal_) {
+    wantClearCal_ = false;
+    countsPerGram_ = 0.0f;
+    // STORED AS ZERO, not removed. Removing the key made "cleared" and "never
+    // calibrated" the same state, and loadPersisted() resolves that state to the
+    // build default -- so a unit cleared deliberately came back from its next
+    // power cycle showing kilograms again from a factor nobody on that assembly
+    // had derived. Zero is a state of its own and it sticks. Restore default is
+    // now the deliberate way back.
+    prefs_.begin(NVS_NS, false);
+    prefs_.putFloat(KEY_CPG, 0.0f);
+    prefs_.end();
+    Serial.println("scale: calibration cleared -- counts, and it stays cleared");
+  }
+
+  if (wantRestore_) {
+    wantRestore_ = false;
+    countsPerGram_ = (float)BOWLSTACK_COUNTS_PER_GRAM;
+    calMass_ = (float)BOWLSTACK_CAL_MASS_G;
+    storeFactor();
+    Serial.printf("scale: restored the built-in default -- %.3f counts/g from %d g\n",
+                  countsPerGram_, (int)BOWLSTACK_CAL_MASS_G);
   }
 }
 
@@ -406,7 +578,37 @@ void scaleTask(void *) {
     const uint32_t now = millis();
 
     for (uint8_t i = 0; i < CELLS; i++) {
-      if (cell_[i].poll(now)) window_[i].push(cell_[i].counts(), window_n_);
+      if (cell_[i].poll(now)) {
+        const int32_t v = cell_[i].counts();
+
+        // Only meaningful once the window is full -- a filling window is
+        // already tracking the input as fast as it can, and every early sample
+        // would look like a step against a mean built from two others.
+        if (window_[i].size() >= window_n_) {
+          const int32_t m = window_[i].mean(windowTrim());
+          const int32_t d = (v > m) ? (v - m) : (m - v);
+          if (d > stepCounts()) {
+            if (++stepRun_[i] >= STEP_CONFIRM) {
+              // THE WINDOW IS THROWN AWAY, not blended out of. Its contents
+              // describe a load that is gone; averaging them against the new
+              // one is what produced the long crawl. Pushing v into an empty
+              // window makes the mean equal to v, so the reading arrives at the
+              // new level on this sample and then re-settles as the window
+              // refills at whatever averaging is selected.
+              window_[i].clear();
+              stepRun_[i] = 0;
+              Serial.printf("scale: cell %c step %+ld counts -- filter restarted\n",
+                            'A' + i, (long)(v - m));
+            }
+          } else {
+            // A run has to be CONSECUTIVE. One sample back inside the band means
+            // the excursion was noise, and the count starts again.
+            stepRun_[i] = 0;
+          }
+        }
+
+        window_[i].push(v, window_n_);
+      }
       // A cell that dropped offline must not keep a window that still averages
       // to a plausible weight. Cleared here rather than in publish(), so the
       // sample count on the diagnostics page tells the truth about what is
@@ -416,22 +618,25 @@ void scaleTask(void *) {
 
     serviceCommands();
 
-    // 20 Hz. The panel cannot show more than about fifteen distinct values a
-    // second, and every publish costs the UI task a mutex it would rather not
-    // contend for -- so anything faster is work whose result nobody sees. The
-    // converters keep running at their own 80 SPS underneath, which is what the
-    // window averages.
+    // 10 Hz, matching the converters. That is the fastest readout this product
+    // wants, and publishing faster than samples arrive would republish the same
+    // averaged value while costing the UI task a mutex it would rather not
+    // contend for.
     if ((int32_t)(now - nextPublishMs) >= 0) {
-      nextPublishMs = now + 50;
+      nextPublishMs = now + PUBLISH_MS;
       publish();
     }
 
-    // 2 ms. At 80 SPS a conversion lands every 12.5 ms, so this polls each cell
-    // six times per sample -- enough that a completed conversion is picked up
-    // within a couple of milliseconds of being ready, which is what keeps the
-    // measured rate equal to the configured one rather than some beat frequency
-    // between the two.
-    vTaskDelay(pdMS_TO_TICKS(2));
+    // 10 ms. At 10 SPS a conversion lands every 100 ms, so this still checks
+    // each cell ten times per sample -- enough that a completed conversion is
+    // picked up promptly, which is what keeps the MEASURED rate equal to the
+    // configured one rather than some beat frequency between the two.
+    //
+    // It was 2 ms when the converters ran at 80 SPS. Five times fewer polls is
+    // five times less I2C traffic on both buses, and the bit-banged one costs
+    // real CPU per transaction -- it busy-waits through delayMicroseconds at
+    // priority 3, above the UI.
+    vTaskDelay(pdMS_TO_TICKS(POLL_MS));
   }
 }
 
@@ -580,19 +785,49 @@ uint8_t cycleWindow() {
   return WINDOW_CHOICES[0];
 }
 
-bool calibrate(float knownGrams) {
+const char *calResultText(CalResult r) {
+  switch (r) {
+    case CalResult::Ok: return "ok";
+    case CalResult::Timeout: return "no answer from the scale";
+    case CalResult::NotTared: return "tare both cells first";
+    case CalResult::CellsOffline: return "a cell is not converting";
+    case CalResult::MassTooSmall: return "mass too small to calibrate";
+    case CalResult::NoDeflection: return "the platform did not move";
+    case CalResult::Implausible: return "factor way off -- check the mass";
+    case CalResult::Settling: return "still settling -- wait for the filter";
+  }
+  return "?";
+}
+
+CalResult calibrate(float knownGrams, float *factorOut) {
+  if (factorOut) *factorOut = 0.0f;
   wantCalGrams_ = knownGrams;
   calDone_ = false;
-  // Bounded wait for the task to act. The caller is the UI task and a hung wait
-  // here would freeze the screen; 500 ms is far longer than one task iteration
-  // and short enough that a stalled scale task shows up as a refused
-  // calibration rather than a dead panel.
-  const uint32_t deadline = millis() + 500;
+
+  // THREE SECONDS, not the half a second this started at, and the reason is
+  // what happens inside the acknowledged window. The task takes the request,
+  // may first service a pending tare (an NVS write), prints several lines to a
+  // USB-CDC endpoint that BLOCKS when no host is draining it, then commits the
+  // factor to NVS -- all before it can answer. Half a second was inside that
+  // envelope, so a perfectly good calibration could report failure while
+  // succeeding, which is the worst of the possible outcomes.
+  //
+  // Three seconds cannot be reached by any of that. Reaching it means the task
+  // is genuinely stuck, in which case nothing on this device is working and
+  // saying so is right.
+  const uint32_t deadline = millis() + 3000;
   while (!calDone_ && (int32_t)(millis() - deadline) < 0) delay(5);
-  return calDone_ && calResult_;
+
+  if (!calDone_) return CalResult::Timeout;
+  if (factorOut) *factorOut = calFactor_;
+  return (CalResult)calCode_;
 }
 
 void clearCalibration() { wantClearCal_ = true; }
+
+void restoreDefault() { wantRestore_ = true; }
+
+float defaultCountsPerGram() { return (float)BOWLSTACK_COUNTS_PER_GRAM; }
 
 uint32_t stackFreeBytes() { return task_ ? uxTaskGetStackHighWaterMark(task_) : 0; }
 

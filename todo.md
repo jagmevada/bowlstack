@@ -90,6 +90,25 @@ actually produce. A sum that does not go *positive* is refused outright, which
 is the check for a cell wired backwards, where the two would subtract instead of
 add.
 
+### Converter rate
+
+**10 SPS**, set by `BOWLSTACK_SPS` (10/20/40/80/320). **The rate is the filter** —
+a NAU7802 has no separate low-pass; the sigma-delta's decimation filter is it,
+and its length is the output rate. 10 SPS buys two things over the 80 this
+started at:
+
+- **~2.8× less noise per sample** from eight times the integration. Measured
+  peak-to-peak fell from 400–700 counts to 120–180.
+- **Mains rejection.** A sinc filter at 10 Hz has nulls at every multiple of
+  10 Hz, which includes 50 and 60. Hum on a metre of unshielded bridge cable is
+  rejected by the converter itself. Firmware averaging cannot do this — to notch
+  50 Hz it would have to average an exact multiple of the mains period, and the
+  sample clock does not track it.
+
+The readout publishes at **10 Hz**, the fastest this product wants, so the
+converter feeds it exactly one fresh sample per displayed value. `n/s` on the
+dashboard and the Device page is the **measured** rate and now reads 9–10.
+
 ### The averaging window
 
 `Settings → Scale → Average`, or `w` on the console. Persisted in NVS; the build
@@ -108,6 +127,20 @@ Sweep it with the reference mass on and watch the last digit against how long
 the number takes to settle after the mass lands. It also moves the frame rate:
 a slower-changing number repaints less, which is what took the dashboard from
 11 fps to 13.
+
+**Step detection keeps a long window from feeling slow.** A plain moving average
+at N=128 takes a full 12.8 s to work through a bowl being placed or removed —
+the old samples are not noise, they describe a platform that no longer exists.
+So when three consecutive samples land more than 5 g from the current average,
+the window is *discarded* and the reading restarts from the new level: it jumps
+at once, then re-settles at whatever averaging is selected. Quiet when nothing
+is happening, immediate when something is. The console logs each one
+(`cell A step +18342 counts -- filter restarted`).
+
+This is deliberately **not** a PID. There is no loop and nothing to actuate —
+the reading lags because it is averaging history, not because it is chasing a
+setpoint, and derivative gain on a noisy load cell would amplify exactly the
+noise the window exists to remove.
 
 ### The Device page
 

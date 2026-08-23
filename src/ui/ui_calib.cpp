@@ -31,6 +31,9 @@ void (*onApply_)(float) = nullptr;
 char entry_[8] = "";
 const uint8_t ENTRY_MAX = 6;  // 999999 g is a tonne; nothing here weighs more
 
+// True while the field still holds a prefill nobody has edited. See onDigit().
+bool fresh_ = true;
+
 char prevEntry_[16] = {0};
 char prevLive_[40] = {0};
 uint32_t nextLiveMs_ = 0;
@@ -53,19 +56,49 @@ void clearResult() {
 
 void onDigit(lv_event_t *e) {
   const char d = (char)(uintptr_t)lv_event_get_user_data(e);
+
+  // THE FIRST DIGIT AFTER ARRIVING REPLACES THE PREFILL. It used to append, and
+  // that is the single worst bug this page had: the field opens showing the last
+  // mass used -- 175 -- so an operator with a 500 g weight taps 5, 0, 0 and the
+  // field reads 175500. Six characters is exactly ENTRY_MAX, so nothing
+  // truncates and nothing complains, and the derived factor is a THOUSANDTH of
+  // the right one. Every guard passes; the tick goes green.
+  //
+  // It compounds too: 175500 is then persisted as the mass, so the next visit
+  // opens with six digits already in the field and every further keypress is
+  // silently ignored for being at the limit.
+  //
+  // Editing still works -- backspace clears the flag, so you can shorten the
+  // prefill and keep typing when that is what you meant.
+  if (fresh_) {
+    fresh_ = false;
+    entry_[0] = 0;
+  }
+
+  // Cleared BEFORE the length check, so a tap that is then ignored for being at
+  // the limit still takes the previous verdict off the screen. Leaving it up
+  // makes a dead key look like a key that re-confirmed something.
+  clearResult();
+
   const size_t n = strlen(entry_);
   // A leading zero is dropped rather than accepted: "0500" is not a number
   // anybody means to type, and allowing it costs a digit of the six.
-  if (n == 1 && entry_[0] == '0') entry_[0] = '\0';
-  if (strlen(entry_) >= ENTRY_MAX) return;
+  if (n == 1 && entry_[0] == '0') entry_[0] = 0;
+  if (strlen(entry_) >= ENTRY_MAX) {
+    refreshEntry();
+    return;
+  }
   const size_t m = strlen(entry_);
   entry_[m] = d;
-  entry_[m + 1] = '\0';
-  clearResult();
+  entry_[m + 1] = 0;
   refreshEntry();
 }
 
 void onBack(lv_event_t *) {
+  // Backspace is EDITING, so it takes ownership of the prefill rather than
+  // wiping it. Shortening 175 to 17 and typing 5 is a legitimate way to reach
+  // 175, and clearing on the first backspace would make that impossible.
+  fresh_ = false;
   const size_t n = strlen(entry_);
   if (n) entry_[n - 1] = '\0';
   clearResult();
@@ -114,12 +147,22 @@ void calibOnClose(void (*cb)(void)) { onClose_ = cb; }
 void calibOnApply(void (*cb)(float)) { onApply_ = cb; }
 
 void calibSetMass(float grams) {
-  if (grams <= 0.0f) {
-    entry_[0] = '\0';
-  } else {
-    snprintf(entry_, sizeof(entry_), "%ld", (long)(grams + 0.5f));
-  }
+  // BOUNDED, because this arrives from NVS and a corrupt or absurd stored float
+  // would otherwise be printed straight into a six-character buffer. Anything
+  // outside what a person could put on this platform becomes no prefill at all,
+  // which is a safe state: the field reads "---" and OK refuses until something
+  // is typed.
+  const long g = (grams > 0.0f && grams < 1000000.0f) ? (long)(grams + 0.5f) : 0;
+  if (g <= 0 || g > 999999L) entry_[0] = '\0';
+  else snprintf(entry_, sizeof(entry_), "%ld", g);
+  // A fresh prefill, so the next digit replaces it rather than appending.
+  fresh_ = true;
   if (lblEntry_) refreshEntry();
+  // AND THE VERDICT GOES WITH IT. This is called on every entry to the page, so
+  // without it a green "ok -- 104.331 counts/g" from ten minutes ago is still
+  // sitting under a field that has since been re-prefilled -- a page asserting
+  // something about a calibration the numbers above it no longer describe.
+  clearResult();
 }
 
 void calibSetResult(const char *msg, bool ok) {

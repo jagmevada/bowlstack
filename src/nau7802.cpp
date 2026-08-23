@@ -73,24 +73,58 @@ const uint8_t GAIN_128 = 0b111;
 // close.
 const uint8_t LDO_3V0 = 0b101;
 
-// 80 SPS, and it is deliberately not 320.
+// --- conversion rate, and why SLOWER is the accuracy setting ---------------
 //
-// The screen refreshes at 10-15 fps. 80 SPS is already five to eight samples
-// per displayed frame -- enough to average and still show a value from the
-// current frame -- while 320 SPS would deliver samples nobody can see and cost
-// four times the noise per sample, since converter noise falls with integration
-// time. "Maximum refresh rate" is a property of the panel here; the converter
-// stopped being the limit two settings ago.
+// THE RATE IS THE FILTER. There is no separate low-pass in a NAU7802 to turn
+// on: the sigma-delta's decimation filter IS the anti-noise mechanism, and its
+// length is set by the output rate. Halving the rate doubles the integration
+// window, and converter noise falls with the square root of integration time.
 //
-// Raise it if a future feature actually consumes samples faster than the panel:
-// 0b111 is 320 SPS.
-const uint8_t RATE_80SPS = 0b011;
-const uint16_t RATE_80SPS_HZ = 80;
+// 10 SPS rather than the 80 this started at, which buys two things:
+//
+//   NOISE. Eight times the integration is about 2.8x less noise per sample,
+//   before any averaging on top.
+//
+//   MAINS REJECTION, and this is the part that is free and cannot be had any
+//   other way. A sinc decimation filter running at 10 Hz has NULLS at every
+//   multiple of 10 Hz -- which includes 50 and 60. Hum picked up on a metre of
+//   unshielded bridge cable next to a kitchen is rejected by the converter
+//   itself. A boxcar average in firmware cannot do that: to notch 50 Hz it
+//   would have to average an exact multiple of the mains period, which the
+//   sample clock does not track.
+//
+// The cost is latency, and there is none to spare here: the readout is wanted
+// at 10 Hz, so a 10 SPS converter feeds it exactly one fresh sample per
+// displayed value and the moving average on top decides the rest.
+//
+// Sweep it with -DBOWLSTACK_SPS. The part offers exactly these five.
+#ifndef BOWLSTACK_SPS
+#define BOWLSTACK_SPS 10
+#endif
+
+#if BOWLSTACK_SPS == 10
+const uint8_t RATE_BITS = 0b000;
+#elif BOWLSTACK_SPS == 20
+const uint8_t RATE_BITS = 0b001;
+#elif BOWLSTACK_SPS == 40
+const uint8_t RATE_BITS = 0b010;
+#elif BOWLSTACK_SPS == 80
+const uint8_t RATE_BITS = 0b011;
+#elif BOWLSTACK_SPS == 320
+const uint8_t RATE_BITS = 0b111;
+#else
+#error "BOWLSTACK_SPS must be one of 10, 20, 40, 80, 320 -- the NAU7802 has no others"
+#endif
+const uint16_t RATE_HZ = BOWLSTACK_SPS;
 
 // A cell that acknowledged at boot but has completed no conversion in this long
 // has stopped converting. Same failure the ToF array needs SENSOR_STALE_MS for:
 // the registers still answer, so the read path cannot see it.
-const uint32_t CELL_STALE_MS = 2000;
+// Must comfortably outlive one conversion period. At 10 SPS a sample lands
+// every 100 ms, so 2 s is twenty periods -- but the constant is derived rather
+// than written down, because dropping the rate to 10 without moving this would
+// have been fine and dropping it further would not.
+const uint32_t CELL_STALE_MS = (RATE_HZ >= 10) ? 2000u : (30000u / RATE_HZ);
 
 const uint8_t IO_FAILURES_TO_OFFLINE = 5;
 
@@ -190,7 +224,7 @@ bool Nau7802::begin() {
 
   // CTRL2: conversion rate in bits 6:4. The low bits are calibration control
   // and must stay clear here -- CALS is set deliberately, further down.
-  if (!write(REG_CTRL2, (uint8_t)(RATE_80SPS << 4))) return false;
+  if (!write(REG_CTRL2, (uint8_t)(RATE_BITS << 4))) return false;
 
   // Disable the ADC chopper (bits 5:4 = 11 in register 0x15). The chopper
   // suppresses low-frequency offset drift and injects its own switching
@@ -224,7 +258,7 @@ bool Nau7802::begin() {
   sps_ = 0;
 
   Serial.printf("  %s: rev 0x%02X, gain 128, LDO 3.0 V, %u SPS, i2c port %d\n", name_,
-                revision_, RATE_80SPS_HZ, port_);
+                revision_, RATE_HZ, port_);
   return true;
 }
 

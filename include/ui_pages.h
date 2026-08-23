@@ -55,6 +55,13 @@ void pagesOnScaleClearCal(void (*cb)(void));
 // flipping between two of them with a mass on the platform than by reflashing.
 void pagesOnScaleCycleAvg(void (*cb)(void));
 
+// Loads the factor the firmware was built with and persists it as this unit's
+// own. It is what lets "Clear calibration" mean cleared: without a deliberate
+// route back to the built-in figure, clearing had to leave the stored key
+// absent so a reflash could still take effect -- and a unit cleared on purpose
+// then came back from its next power cycle showing kilograms again.
+void pagesOnScaleRestore(void (*cb)(void));
+
 // How long without a touch before the UI returns to the stock page.
 //
 // A device left on the WiFi page is a device whose primary readout -- the bowl

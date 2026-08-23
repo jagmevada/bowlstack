@@ -292,27 +292,35 @@ void onTare() {
 // -- which rather defeats the point of putting calibration on the device.
 void onCalibApply(float grams) {
   Serial.printf("ui: calibrate against %.0f g requested\n", grams);
-  const bool ok = scale::calibrate(grams);
-  const scale::Snapshot sn = scale::snapshot();
+
+  // THE VERDICT AND THE FACTOR BOTH COME BACK FROM THE MEASURING TASK. This
+  // used to call a bool-returning calibrate() and then reconstruct both from a
+  // snapshot, which was wrong twice over: the snapshot is up to a publish period
+  // stale so the "succeeded" line quoted the factor it had just replaced, and
+  // the reason was guessed from a ladder that had no rung for a below-minimum
+  // mass -- so a typo was reported as "no load" with the real deflection printed
+  // beside it, which sends somebody to re-tare a loaded platform.
+  float factor = 0.0f;
+  const scale::CalResult r = scale::calibrate(grams, &factor);
+  const bool ok = (r == scale::CalResult::Ok);
 
   char msg[48];
-  if (ok) {
-    snprintf(msg, sizeof(msg), "ok -- %.3f counts/g", sn.countsPerGram);
-  } else if (sn.online < scale::CELLS) {
-    snprintf(msg, sizeof(msg), "only %u of %u cells online", sn.online, scale::CELLS);
-  } else if (!sn.tared) {
-    snprintf(msg, sizeof(msg), "tare on an empty platform first");
-  } else {
-    // The remaining case is a deflection too small to derive anything from,
-    // which in practice means the mass is not actually on the platform -- or
-    // the tare was taken with it already there, which comes to the same thing.
-    snprintf(msg, sizeof(msg), "no load: %+ld counts", (long)(sn.cell[0].counts -
-                                                              sn.cell[0].offset +
-                                                              sn.cell[1].counts -
-                                                              sn.cell[1].offset));
-  }
-  Serial.printf("ui: calibration %s\n", ok ? msg : "REFUSED");
+  if (ok) snprintf(msg, sizeof(msg), "ok -- %.3f counts/g", factor);
+  else snprintf(msg, sizeof(msg), "%s", scale::calResultText(r));
+
+  Serial.printf("ui: calibration %s\n", msg);
   ui::calibSetResult(msg, ok);
+
+  // The keypad now opens with the mass that WORKED rather than the one this
+  // board booted with. Without this the page would re-prefill from the
+  // boot-time value on its next visit and quietly discard what was just used.
+  if (ok) ui::calibSetMass(grams);
+}
+
+void onRestoreDefault() {
+  Serial.println("ui: restore built-in calibration requested");
+  scale::restoreDefault();
+  ui::calibSetMass(0.0f);  // re-prefilled from the snapshot on the next entry
 }
 
 void onTareCell(uint8_t i) {
@@ -530,6 +538,7 @@ void setup() {
   ui::weightOnTareCell(onTareCell);
   ui::pagesOnScaleClearCal(onClearCal);
   ui::pagesOnScaleCycleAvg(onCycleAvg);
+  ui::pagesOnScaleRestore(onRestoreDefault);
   ui::calibOnApply(onCalibApply);
   // Opens pre-filled with whatever this unit was last calibrated against, which
   // on a fresh board is the build default.

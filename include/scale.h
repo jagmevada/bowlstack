@@ -49,18 +49,25 @@ static const uint8_t CELLS = 2;
 // between two of them with a mass on the platform than by reflashing.
 //
 // The whole trade is one line: NOISE FALLS WITH THE SQUARE ROOT of the window
-// and LATENCY RISES LINEARLY with it. Measured on this assembly -- 79 SPS,
-// +/-200 counts of raw peak-to-peak, 106.857 counts/g:
+// and LATENCY RISES LINEARLY with it.
 //
-//     N     settling       jitter in the last digit
-//     8     ~100 ms        +/-0.7 g
-//    16     ~200 ms        +/-0.5 g
-//    32     ~400 ms        +/-0.3 g
-//    64     ~810 ms        +/-0.2 g
-//   128     ~1.6 s         +/-0.17 g
+// THE TIMINGS MOVED WHEN THE CONVERTER DID. These were derived at 80 SPS; the
+// part now runs at 10 SPS, because the rate IS the anti-noise filter and 10 Hz
+// puts the decimation nulls on 50 and 60 Hz mains (see nau7802.cpp). Each
+// sample is therefore ~2.8x quieter than it was AND arrives eight times less
+// often, so the same N is eight times the wait:
 //
-// The gains are shrinking and the wait is not, which is why 128 is the top of
-// the range rather than the start of one.
+//     N     settling at 10 SPS
+//     8     ~0.8 s        <- the default, and about right for a bowl
+//    16     ~1.6 s
+//    32     ~3.2 s
+//    64     ~6.4 s
+//   128     ~12.8 s       <- kept for completeness, not for use
+//
+// The gains shrink and the wait does not. Most of the noise reduction now comes
+// from the converter rather than from this window, which is the better place
+// for it to come from: a longer sinc filter rejects mains, and a boxcar average
+// cannot.
 //
 // There is a second effect that looks like a coincidence and is not: a
 // slower-moving number changes its rendered digits less often, and every digit
@@ -202,16 +209,58 @@ void tare();
 // A tare taken this way is persisted like any other.
 void tareCell(uint8_t index);
 
+// Why a calibration was refused, rather than a bare bool.
+//
+// THE REASON HAS TO COME FROM WHERE THE DECISION IS MADE. It used to be
+// reconstructed by the caller from a published snapshot, which was both stale
+// and incomplete: a below-minimum mass fell through to the caller's last rung
+// and was reported as "no load" WITH THE ACTUAL DEFLECTION PRINTED BESIDE IT --
+// a sentence contradicting its own number, and worse, one that names the
+// platform as the fault. An operator who believes it re-tares with the
+// reference mass still sitting there, which writes 175 g into the zero and
+// persists it. A one-digit typo then becomes a destroyed tare.
+enum class CalResult : uint8_t {
+  Ok,
+  Timeout,        // the measuring task did not answer -- distinct from a refusal
+  NotTared,       // no tare, or one cell has never been zeroed
+  CellsOffline,   // fewer than CELLS converting
+  MassTooSmall,   // below MIN_CAL_GRAMS
+  NoDeflection,   // the platform did not move enough to derive anything from
+  Implausible,    // the factor came out nowhere near what this hardware can be
+  Settling,       // the moving average has not filled since boot or a change
+};
+
+// A short line fit for a 240 px screen.
+const char *calResultText(CalResult r);
+
 // Records that the current load is `knownGrams` and derives countsPerGram from
-// it. Requires a tare first, and a deflection large enough to be worth
+// it. Requires every cell tared, and a deflection large enough to be worth
 // measuring -- calibrating against noise would fix a wildly wrong factor.
 //
 // On success the mass is PERSISTED alongside the factor, so the next
 // calibration on this unit opens pre-filled with the weight that was used last
-// time. Recalibrating with the same reference is then one tap.
+// time, and `factorOut` receives the value that was actually computed.
 //
-// Returns false and changes nothing if either condition fails.
-bool calibrate(float knownGrams);
+// factorOut IS NOT OPTIONAL DECORATION. The caller cannot get it from
+// snapshot(): the publish gate is tested against a timestamp latched before
+// serviceCommands() runs, so the iteration that performs a calibration almost
+// never publishes, and a snapshot taken straight afterwards carries the
+// PREVIOUS factor up to 50 ms stale. The "calibrated to X counts/g" line was
+// therefore usually quoting the value it had just replaced.
+CalResult calibrate(float knownGrams, float *factorOut = nullptr);
+
+// Loads the factor the firmware was built with -- the bench figure in
+// platformio.ini -- and persists it as this unit's own.
+//
+// It exists so "clear" can mean CLEARED. Removing the NVS key made "cleared"
+// and "never calibrated" the same stored state, so a unit cleared on purpose
+// came back from its next power cycle showing kilograms again, derived from a
+// factor nobody on that assembly had measured. With an explicit way back to the
+// default, clearing can stick.
+void restoreDefault();
+
+// The build-time factor, for a UI that wants to say what Restore would load.
+float defaultCountsPerGram();
 
 // The reference mass last calibrated against on this unit, or the build default
 // if it has never been calibrated. Grams.

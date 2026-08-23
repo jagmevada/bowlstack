@@ -67,6 +67,11 @@ uint8_t depth_ = 0;
 void (*onTare_)(void) = nullptr;
 void (*onClearCal_)(void) = nullptr;
 void (*onCycleAvg_)(void) = nullptr;
+void (*onRestore_)(void) = nullptr;
+
+// The last mass the snapshot carried, cached so showOnly() can re-prefill the
+// keypad without a State to hand. pagesTick() keeps it current.
+float lastCalMassG_ = 0.0f;
 
 lv_obj_t *settingsMenu_ = nullptr;
 lv_obj_t *scaleMenu_ = nullptr;
@@ -74,6 +79,7 @@ lv_obj_t *scaleMenu_ = nullptr;
 void doTare() { if (onTare_) onTare_(); }
 void doClearCal() { if (onClearCal_) onClearCal_(); }
 void doCycleAvg() { if (onCycleAvg_) onCycleAvg_(); }
+void doRestore() { if (onRestore_) onRestore_(); }
 
 void showOnly(lv_obj_t *which) {
   lv_obj_t *all[] = {detailSettings_, detailWifi_,   detailBatt_,   detailScale_,
@@ -86,6 +92,16 @@ void showOnly(lv_obj_t *which) {
   // The scope repaints its whole trace from the ring on entry, so telling it on
   // TRANSITION rather than polling is what keeps that a once-per-visit cost.
   scopeSetVisible(which == detailSensor_);
+
+  // THE KEYPAD IS RE-PREFILLED ON EVERY ENTRY, and it belongs here rather than
+  // in openCalib() precisely because this is the one function every route goes
+  // through: opening it, coming back to it, closeAll(), and the 60 s idle
+  // timeout that fires pagesGoHome() while somebody is mid-typing.
+  //
+  // Without it the entry is boot-scoped. Type half a mass, get called away, let
+  // the idle timer take the screen home -- and the next person to open the page
+  // finds "17550" sitting there looking like a deliberate value.
+  if (which == detailCalib_) calibSetMass(lastCalMassG_);
 }
 
 void closeAll() {
@@ -202,6 +218,13 @@ void buildPages() {
   // better -- which a tap-to-advance row does in one gesture and a sub-page
   // does in four. The current value is the hint on the right.
   menuAddRow(scaleMenu_, "Average", nullptr, doCycleAvg);
+  // THE WAY BACK. Without it, "Clear calibration" could not be allowed to stick
+  // -- clearing had to leave the NVS key absent so a reflash with a corrected
+  // default could take effect, which meant a unit cleared on purpose came back
+  // from its next power cycle showing kilograms again. With a deliberate route
+  // to the built-in figure, clearing can mean cleared and this row is the
+  // undo.
+  menuAddRow(scaleMenu_, "Restore default", nullptr, doRestore);
 
   detailCalib_ = makeDetail(scr);
   buildCalibPage(detailCalib_);
@@ -240,6 +263,7 @@ void pagesBack() { back(); }
 void pagesOnScaleTare(void (*cb)(void)) { onTare_ = cb; }
 void pagesOnScaleClearCal(void (*cb)(void)) { onClearCal_ = cb; }
 void pagesOnScaleCycleAvg(void (*cb)(void)) { onCycleAvg_ = cb; }
+void pagesOnScaleRestore(void (*cb)(void)) { onRestore_ = cb; }
 
 void pagesTick(uint32_t nowMs) {
   // --- data: always, for every page, visible or not ------------------------
@@ -276,6 +300,7 @@ void pagesTick(uint32_t nowMs) {
     // sequence you are.
     // Row 1 is Calibrate: its hint is the mass it will open pre-filled with, so
     // the row still says what it does now that the label no longer can.
+    lastCalMassG_ = s.scale.calMassG;
     static char mass[12];
     snprintf(mass, sizeof(mass), "%ld g", (long)(s.scale.calMassG + 0.5f));
     menuSetHint(scaleMenu_, 1, s.scale.calMassG > 0.0f ? mass : "");
