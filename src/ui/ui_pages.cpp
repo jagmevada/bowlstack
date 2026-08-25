@@ -68,6 +68,7 @@ void (*onTare_)(void) = nullptr;
 void (*onClearCal_)(void) = nullptr;
 void (*onCycleAvg_)(void) = nullptr;
 void (*onRestore_)(void) = nullptr;
+void (*onPlatformZero_)(void) = nullptr;
 
 // The last mass the snapshot carried, cached so showOnly() can re-prefill the
 // keypad without a State to hand. pagesTick() keeps it current.
@@ -80,6 +81,7 @@ void doTare() { if (onTare_) onTare_(); }
 void doClearCal() { if (onClearCal_) onClearCal_(); }
 void doCycleAvg() { if (onCycleAvg_) onCycleAvg_(); }
 void doRestore() { if (onRestore_) onRestore_(); }
+void doPlatformZero() { if (onPlatformZero_) onPlatformZero_(); }
 
 void showOnly(lv_obj_t *which) {
   lv_obj_t *all[] = {detailSettings_, detailWifi_,   detailBatt_,   detailScale_,
@@ -205,6 +207,12 @@ void buildPages() {
   detailScale_ = makeDetail(scr);
   scaleMenu_ = menuCreate(detailScale_, "Scale", back);
   menuAddRow(scaleMenu_, "Tare", nullptr, doTare);
+  // THE COMMISSIONING ZERO, and it sits directly under the everyday one so the
+  // difference between them is impossible to miss. Tare is volatile and is what
+  // gets pressed before a measurement; this one is written to NVS and describes
+  // the platform bolted to this particular device, which is a thing you do once
+  // and then never think about again.
+  menuAddRow(scaleMenu_, "Set platform zero", nullptr, doPlatformZero);
   // OPENS A PAGE rather than acting. The mass used to be baked into this label
   // from a build flag, which assumed the person calibrating owns the weight the
   // firmware was compiled against -- when what they actually own is whatever is
@@ -264,6 +272,7 @@ void pagesOnScaleTare(void (*cb)(void)) { onTare_ = cb; }
 void pagesOnScaleClearCal(void (*cb)(void)) { onClearCal_ = cb; }
 void pagesOnScaleCycleAvg(void (*cb)(void)) { onCycleAvg_ = cb; }
 void pagesOnScaleRestore(void (*cb)(void)) { onRestore_ = cb; }
+void pagesOnScalePlatformZero(void (*cb)(void)) { onPlatformZero_ = cb; }
 
 void pagesTick(uint32_t nowMs) {
   // --- data: always, for every page, visible or not ------------------------

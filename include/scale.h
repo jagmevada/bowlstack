@@ -7,7 +7,7 @@
 // is why the calibration below has exactly one gain constant, applied to the
 // sum, rather than one per cell:
 //
-//     total_g = (countsA + countsB - offsetA - offsetB) / countsPerGram
+//     total_g = (countsA + countsB - zeroA - zeroB - tareA - tareB) / countsPerGram
 //
 // The per-cell figures the UI shows are that same constant applied to each cell
 // alone, so they are each cell's SHARE of the load and they add up to the
@@ -116,6 +116,29 @@ uint8_t cycleWindow();
 // smeared through it. A plain mean cannot do that; a mean of the middle can.
 uint8_t windowTrim();
 
+// --- the automatic power-up tare -------------------------------------------
+// WHAT IT IS FOR: a serving station is powered up with whatever tray or pot is
+// already sitting on it, and asking somebody to remember to press Tare before
+// every service is asking to be forgotten. So the device watches itself for a
+// few seconds after boot and, if the reading holds still, zeroes to whatever is
+// there. Volatile, like any tare -- the next power cycle looks again.
+//
+// It reports what it is doing rather than only what it did, because a device
+// that quietly failed to zero itself must not look identical to one that
+// succeeded.
+//
+// Waiting   cells not all converting yet, or their filters are not full
+// Observing watching for a steady reading
+// Done      a tare was taken automatically
+// GaveUp    the platform never held still long enough; tare by hand
+// Off       compiled out with -DBOWLSTACK_AUTOTARE=0
+enum class AutoTare : uint8_t { Waiting, Observing, Done, GaveUp, Off };
+
+AutoTare autoTareState();
+
+// A short line fit for the dashboard.
+const char *autoTareText(AutoTare s);
+
 struct CellSnapshot {
   CellState state;
   uint8_t revision;   // 0xFF = never read
@@ -134,7 +157,11 @@ struct CellSnapshot {
   // conversions; an open input sits exactly where the offset calibration
   // parked it. See Nau7802::selfTest().
   int32_t pp;
-  int32_t offset;     // tare, in counts
+  // TWO OFFSETS, NOT ONE, because they are set at different times by different
+  // people for different reasons and only one of them should survive a power
+  // cycle. See the note above tare() below.
+  int32_t platformZero;  // the platform's own weight. NVS. Set once per device.
+  int32_t tare;          // this session's zero. RAM only. Set per measurement.
   float grams;        // this cell's share; meaningless unless `calibrated`
 
   // The conversion has hit the end of the 24-bit range, so this cell is no
@@ -166,7 +193,13 @@ struct Snapshot {
   uint8_t window;   // samples currently averaged
   float calMassG;   // reference mass last calibrated against
   uint8_t online;  // cells currently producing conversions
-  bool tared;      // a tare has been taken since the offsets were last cleared
+  bool zeroed;     // every online cell has a stored platform zero
+  bool tared;      // every online cell has a tare for this session
+
+  // What the automatic power-up tare is doing. The dashboard says so rather
+  // than leaving a device that quietly failed to zero itself looking identical
+  // to one that succeeded.
+  AutoTare autoTare;
   bool overRange;  // at least one cell is saturated -- the total is not a weight
 
   // Increments on every publish. Lets a reader tell a fresh snapshot from a
@@ -190,10 +223,27 @@ Snapshot snapshot();
 // True once the task has published at least once.
 bool ready();
 
-// Zero both cells at whatever is on the platform now, and persist it. This is
-// the PLATFORM's weight, not the converter's offset -- Nau7802::calibrateAfe()
-// is the other one, and confusing them gives a scale that reads plausibly and
-// wrongly.
+// --- the two zeros ---------------------------------------------------------
+//
+// A device is built in three steps and each one leaves a different constant
+// behind. Collapsing them into a single offset -- which this did -- means the
+// wrong one gets overwritten by the wrong person at the wrong time.
+//
+//   counts/g       once per CELL BUILD, against a known mass. NVS.
+//   platform zero  once per DEVICE, after the platform is bolted on. NVS.
+//                  Every unit gets a different platform and its weight is not
+//                  a measurement anybody wants to see; it is a constant of the
+//                  assembly, and it must survive every power cycle.
+//   tare           once per MEASUREMENT. RAM ONLY. Whatever is sitting on the
+//                  platform right now becomes zero, and the next power cycle
+//                  forgets it -- because a tare taken around a bowl that has
+//                  since been carried away is worse than no tare at all.
+//
+// setPlatformZero() is a commissioning action and is the only one that writes.
+// tare() is the everyday one and deliberately does not.
+void setPlatformZero();
+
+// Zero this session at whatever is on the platform now. NOT persisted.
 void tare();
 
 // Zero ONE cell. Separate from tare() because the two answer different

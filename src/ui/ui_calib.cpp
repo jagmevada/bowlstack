@@ -325,8 +325,8 @@ void updateCalibPage(const State &s) {
     // overflow loses characters from BOTH ends. An earlier version read
     // "now %+ld counts on the platform" and rendered as
     // "w +260516 counts on the platfo".
-    snprintf(buf, sizeof(buf), "0 = %ld/%ld   net %+ld", (long)sc.cell[0].offset,
-             (long)sc.cell[1].offset, (long)sc.totalCounts);
+    snprintf(buf, sizeof(buf), "0 = %ld/%ld   net %+ld", (long)sc.cell[0].platformZero,
+             (long)sc.cell[1].platformZero, (long)sc.totalCounts);
   }
   if (strcmp(prevLive_, buf) == 0) return;
   snprintf(prevLive_, sizeof(prevLive_), "%s", buf);

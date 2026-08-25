@@ -115,7 +115,8 @@ void withScale(State &s, float aG, float bG, bool calibrated, bool tared, uint8_
     // make the Device page look like it had nothing to say, which is the
     // opposite of true.
     const int32_t fakeTare = (int32_t)(118000 + i * 9000);
-    c.offset = (c.state == Cell::Online) ? fakeTare : 0;
+    c.platformZero = (c.state == Cell::Online) ? fakeTare : 0;
+    c.tare = 0;
     c.pp = (c.state == Cell::Online) ? (int32_t)(430 + i * 87) : 0;
     c.rawCounts = (c.state == Cell::Online) ? (c.counts + fakeTare + (int32_t)(i * 53) - 26) : 0;
   }
@@ -126,6 +127,7 @@ void withScale(State &s, float aG, float bG, bool calibrated, bool tared, uint8_
   // about what the Average row says before anyone touches it.
   s.scale.window = (uint8_t)BOWLSTACK_AVG_WINDOW;
   s.scale.calMassG = (float)BOWLSTACK_CAL_MASS_G;
+  s.scale.zeroed = (online == CELLS);
 }
 
 State sEmpty() {

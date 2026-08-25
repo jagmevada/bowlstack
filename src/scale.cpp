@@ -128,6 +128,36 @@ const uint8_t STEP_CONFIRM = 3;
 // site for why this is NOT the full window.
 const uint8_t STEP_MIN_SAMPLES = 4;
 
+// --- the automatic power-up tare -------------------------------------------
+// A serving station is switched on with whatever tray or pot is already sitting
+// on it, and asking somebody to remember to press Tare before every service is
+// asking for it to be forgotten. So the device watches itself after boot and,
+// once the reading holds still, zeroes to whatever is there.
+//
+// STABILITY IS PEAK-TO-PEAK OVER A WINDOW OF TIME, not a single comparison. A
+// load cell settles asymptotically -- a pot put down two seconds ago is still
+// creeping -- and a test that only asked "are two consecutive samples close"
+// would pass in the middle of that creep and zero to a value the platform is
+// still moving away from.
+const uint32_t AUTOTARE_STABLE_MS = 3000;
+
+// How still is still. 5 g against a measured 1.4 g of noise: loose enough that
+// an ordinary bench passes in one pass, tight enough that a hand resting on the
+// platform does not.
+const float AUTOTARE_STABLE_G = 5.0f;
+const int32_t AUTOTARE_STABLE_COUNTS_UNCAL = 1000;
+
+// BOUNDED. If the platform never holds still -- somebody is loading it, a fan
+// is blowing on it, a cell is intermittent -- the device says so and stops
+// rather than lying in wait to zero away a real load ten minutes later. That
+// second behaviour is the dangerous one: a silent tare during service would
+// make a full bowl read empty.
+const uint32_t AUTOTARE_DEADLINE_MS = 30000;
+
+#ifndef BOWLSTACK_AUTOTARE
+#define BOWLSTACK_AUTOTARE 1
+#endif
+
 // The factory default, overwritten by the first calibration on any unit. See
 // the comment in platformio.ini for where the number came from and for what its
 // size implies about the usable range.
@@ -218,7 +248,18 @@ class CountWindow {
 // --- owned by the task, touched by nothing else -----------------------------
 Nau7802 cell_[CELLS];
 CountWindow window_[CELLS];
-int32_t offset_[CELLS] = {0, 0};
+// THE PLATFORM'S OWN WEIGHT. Persisted -- it is a constant of the assembly, not
+// a measurement, and every device gets a different platform bolted to it.
+int32_t platformZero_[CELLS] = {0, 0};
+
+// THIS SESSION'S ZERO. Deliberately NOT persisted: a tare taken around a bowl
+// that has since been carried away is worse than no tare at all, so every power
+// cycle starts from the platform zero and re-tares.
+int32_t tare_[CELLS] = {0, 0};
+bool tareSet_[CELLS] = {false, false};
+
+// Everything the reading is measured from.
+inline int32_t offsetOf(uint8_t i) { return platformZero_[i] + tare_[i]; }
 float countsPerGram_ = 0.0f;
 // PER CELL, not one flag for the assembly. The old single flag was set at the
 // end of a block that handles both a global tare and a per-cell one -- so
@@ -226,7 +267,7 @@ float countsPerGram_ = 0.0f;
 // disappeared, and a calibration taken then absorbed cell B's full absolute
 // reading into the factor. It also survived a reboot, so a global tare taken
 // while one cell was offline came back claiming both were zeroed.
-bool cellTared_[CELLS] = {false, false};
+bool cellZeroed_[CELLS] = {false, false};
 uint8_t window_n_ = BOWLSTACK_AVG_WINDOW;
 // Consecutive samples outside the step band, per cell.
 uint8_t stepRun_[CELLS] = {0, 0};
@@ -257,6 +298,18 @@ volatile uint8_t calCode_ = 0;    // a CalResult
 volatile float calFactor_ = 0.0f;
 volatile bool calDone_ = true;
 volatile bool wantRestore_ = false;
+volatile bool wantPlatformZero_ = false;
+
+// --- auto-tare state, owned by the task ------------------------------------
+#if BOWLSTACK_AUTOTARE
+AutoTare autoTare_ = AutoTare::Waiting;
+#else
+AutoTare autoTare_ = AutoTare::Off;
+#endif
+uint32_t autoStartMs_ = 0;     // when the current stable-observation began
+uint32_t autoBootMs_ = 0;      // when the task first ran, for the deadline
+int32_t autoLo_[CELLS] = {0, 0};
+int32_t autoHi_[CELLS] = {0, 0};
 
 // Every cell's filter is full, so a tare or a calibration is taken against the
 // averaging the operator actually selected.
@@ -277,6 +330,14 @@ int32_t stepCounts() {
   return STEP_COUNTS_UNCAL;
 }
 
+int32_t autoTareBandCounts() {
+  if (countsPerGram_ > 0.0f) {
+    const int32_t c = (int32_t)(AUTOTARE_STABLE_G * countsPerGram_);
+    return c > 0 ? c : AUTOTARE_STABLE_COUNTS_UNCAL;
+  }
+  return AUTOTARE_STABLE_COUNTS_UNCAL;
+}
+
 bool windowsFull() {
   for (uint8_t i = 0; i < CELLS; i++) {
     if (cell_[i].state() != CellState::Online) continue;
@@ -285,16 +346,30 @@ bool windowsFull() {
   return true;
 }
 
+// Every ONLINE cell has a stored platform zero. An offline cell is not counted
+// against it: nothing can be zeroed while it is not converting, and refusing a
+// calibration on that basis would be refusing it for a reason the operator
+// cannot act on from this page.
+bool allCellsZeroed() {
+  for (uint8_t i = 0; i < CELLS; i++) {
+    if (cell_[i].state() != CellState::Online) continue;
+    if (!cellZeroed_[i]) return false;
+  }
+  return true;
+}
+
 bool allCellsTared() {
-  for (uint8_t i = 0; i < CELLS; i++)
-    if (!cellTared_[i]) return false;
+  for (uint8_t i = 0; i < CELLS; i++) {
+    if (cell_[i].state() != CellState::Online) continue;
+    if (!tareSet_[i]) return false;
+  }
   return true;
 }
 
 void loadPersisted() {
   prefs_.begin(NVS_NS, false);
-  offset_[0] = prefs_.getInt(KEY_OFF_A, 0);
-  offset_[1] = prefs_.getInt(KEY_OFF_B, 0);
+  platformZero_[0] = prefs_.getInt(KEY_OFF_A, 0);
+  platformZero_[1] = prefs_.getInt(KEY_OFF_B, 0);
   // The build-time default is the fallback, so a freshly flashed board reads
   // kilograms straight away instead of counts. NVS still wins: a unit that has
   // been calibrated against its own mass keeps that figure across reflashes,
@@ -304,8 +379,8 @@ void loadPersisted() {
   // inference is almost always right and wrong exactly once -- a platform that
   // happened to tare at 0 counts would come back from a reboot claiming it had
   // never been tared.
-  cellTared_[0] = prefs_.getBool(KEY_TARED_A, false);
-  cellTared_[1] = prefs_.getBool(KEY_TARED_B, false);
+  cellZeroed_[0] = prefs_.getBool(KEY_TARED_A, false);
+  cellZeroed_[1] = prefs_.getBool(KEY_TARED_B, false);
 
   // AN UNTARED CELL HAS NO OFFSET, and the two are made to agree here rather
   // than left to drift apart. They can disagree for a real reason -- this
@@ -316,10 +391,10 @@ void loadPersisted() {
   // the safe direction: it shows the platform's true absolute reading, which is
   // obviously not zero, instead of a plausible number nothing stands behind.
   for (uint8_t i = 0; i < CELLS; i++) {
-    if (!cellTared_[i] && offset_[i] != 0) {
-      Serial.printf("  cell %c: offset %ld discarded -- nothing recorded taring it\n",
-                    'A' + i, (long)offset_[i]);
-      offset_[i] = 0;
+    if (!cellZeroed_[i] && platformZero_[i] != 0) {
+      Serial.printf("  cell %c: platform zero %ld discarded -- nothing recorded it\n",
+                    'A' + i, (long)platformZero_[i]);
+      platformZero_[i] = 0;
     }
   }
   window_n_ = prefs_.getUChar(KEY_WINDOW, (uint8_t)BOWLSTACK_AVG_WINDOW);
@@ -329,8 +404,8 @@ void loadPersisted() {
   prefs_.end();
 
   if (countsPerGram_ > 0.0f) {
-    Serial.printf("  %.3f counts/g, tare %ld / %ld, window %u samples\n", countsPerGram_,
-                  (long)offset_[0], (long)offset_[1], window_n_);
+    Serial.printf("  %.3f counts/g, platform zero %ld / %ld, window %u samples\n",
+                  countsPerGram_, (long)platformZero_[0], (long)platformZero_[1], window_n_);
     // THE CEILING, STATED AT BOOT. A signed 24-bit conversion divided by the
     // measured sensitivity is the most load a single cell can report before it
     // saturates -- and on this assembly that lands well below the number
@@ -353,10 +428,10 @@ void loadPersisted() {
 // poll loop nor publish() ever touches NVS.
 void storeOffsets() {
   prefs_.begin(NVS_NS, false);
-  prefs_.putInt(KEY_OFF_A, offset_[0]);
-  prefs_.putInt(KEY_OFF_B, offset_[1]);
-  prefs_.putBool(KEY_TARED_A, cellTared_[0]);
-  prefs_.putBool(KEY_TARED_B, cellTared_[1]);
+  prefs_.putInt(KEY_OFF_A, platformZero_[0]);
+  prefs_.putInt(KEY_OFF_B, platformZero_[1]);
+  prefs_.putBool(KEY_TARED_A, cellZeroed_[0]);
+  prefs_.putBool(KEY_TARED_B, cellZeroed_[1]);
   prefs_.end();
 }
 
@@ -378,6 +453,8 @@ void publish() {
   s.countsPerGram = countsPerGram_;
   s.calibrated = countsPerGram_ > 0.0f;
   s.tared = allCellsTared();
+  s.zeroed = allCellsZeroed();
+  s.autoTare = autoTare_;
 
   int32_t sumNet = 0;
   for (uint8_t i = 0; i < CELLS; i++) {
@@ -394,9 +471,10 @@ void publish() {
     c.overRange = (c.rawCounts > OVER_RANGE_COUNTS) || (c.rawCounts < -OVER_RANGE_COUNTS);
     if (c.overRange) s.overRange = true;
     c.sps = cell_[i].sps();
-    c.offset = offset_[i];
+    c.platformZero = platformZero_[i];
+    c.tare = tare_[i];
 
-    const int32_t net = c.counts - offset_[i];
+    const int32_t net = c.counts - offsetOf(i);
     // A cell that is not Online contributes NOTHING, and specifically not its
     // last known value. A stale count added into the total would keep a dead
     // cell's share of the load in the number indefinitely, which is a confident
@@ -474,16 +552,45 @@ void serviceCommands() {
       // per-cell buttons cannot claim the assembly is ready when only one
       // corner has been done.
       if (cell_[i].state() == CellState::Online) {
-        offset_[i] = window_[i].mean(windowTrim());
-        cellTared_[i] = true;
+        // MEASURED FROM THE PLATFORM ZERO, not from raw. A tare of 0 then means
+        // "nothing on top of the platform", which is what anybody reading the
+        // Device page expects it to mean -- and it keeps the two constants
+        // independent, so re-taring never disturbs the stored platform weight.
+        tare_[i] = window_[i].mean(windowTrim()) - platformZero_[i];
+        tareSet_[i] = true;
       }
     }
-    storeOffsets();
-    // Which cells were zeroed, not just that a tare happened. With two buttons
-    // on the dashboard the interesting part of the log line is WHICH one was
-    // pressed.
-    Serial.printf("scale: tared %c%c at %ld / %ld counts\n", (mask & 1) ? 'A' : '-',
-                  (mask & 2) ? 'B' : '-', (long)offset_[0], (long)offset_[1]);
+    // DELIBERATELY NOT PERSISTED -- see the note on tare() in scale.h. The
+    // platform zero is the constant of the assembly; this is the constant of
+    // the next thirty seconds.
+    Serial.printf("scale: tared %c%c at %ld / %ld above the platform\n",
+                  (mask & 1) ? 'A' : '-', (mask & 2) ? 'B' : '-', (long)tare_[0],
+                  (long)tare_[1]);
+  }
+
+  // --- the platform zero, the one that persists ----------------------------
+  if (wantPlatformZero_) {
+    wantPlatformZero_ = false;
+    if (!windowsFull()) {
+      // Same reason a tare waits. Zeroing against a filter that has not settled
+      // bakes its start-up error into a constant that then survives every power
+      // cycle -- the worst possible place for it to live.
+      Serial.println("scale: platform zero deferred -- filter still settling, try again");
+    } else {
+      for (uint8_t i = 0; i < CELLS; i++) {
+        if (cell_[i].state() != CellState::Online) continue;
+        platformZero_[i] = window_[i].mean(windowTrim());
+        cellZeroed_[i] = true;
+        // The session tare goes to zero with it. Both describe the same
+        // reading, and leaving the old tare in place would subtract the
+        // platform twice.
+        tare_[i] = 0;
+        tareSet_[i] = true;
+      }
+      storeOffsets();
+      Serial.printf("scale: platform zero stored at %ld / %ld counts\n",
+                    (long)platformZero_[0], (long)platformZero_[1]);
+    }
   }
 
   if (!calDone_) {
@@ -495,7 +602,7 @@ void serviceCommands() {
     uint8_t online = 0;
     for (uint8_t i = 0; i < CELLS; i++) {
       if (cell_[i].state() != CellState::Online) continue;
-      sumNet += window_[i].mean(windowTrim()) - offset_[i];
+      sumNet += window_[i].mean(windowTrim()) - offsetOf(i);
       online++;
     }
 
@@ -585,6 +692,83 @@ void serviceCommands() {
   }
 }
 
+// --- the automatic power-up tare -------------------------------------------
+// Runs once per boot, before any manual command, and stops for good the moment
+// it succeeds or gives up. It never re-arms: a device that could silently
+// re-zero itself mid-service would turn a full bowl into an empty reading, and
+// that failure is far worse than the inconvenience it would be saving.
+void serviceAutoTare(uint32_t now) {
+  if (autoTare_ == AutoTare::Done || autoTare_ == AutoTare::GaveUp ||
+      autoTare_ == AutoTare::Off) {
+    return;
+  }
+  if (!autoBootMs_) autoBootMs_ = now;
+
+  // Nothing can be judged until every cell is converting AND its filter is
+  // full. Before that the mean is still climbing out of its own start-up and
+  // would look stable while being wrong.
+  uint8_t online = 0;
+  for (uint8_t i = 0; i < CELLS; i++)
+    if (cell_[i].state() == CellState::Online) online++;
+  if (online < CELLS || !windowsFull()) {
+    autoTare_ = AutoTare::Waiting;
+    autoStartMs_ = 0;
+    // The deadline runs from BOOT, not from the first stable-looking moment, so
+    // a board with a dead cell gives up rather than waiting for ever.
+    if ((uint32_t)(now - autoBootMs_) > AUTOTARE_DEADLINE_MS) {
+      autoTare_ = AutoTare::GaveUp;
+      Serial.println("scale: auto-tare gave up -- cells never both settled. Tare by hand.");
+    }
+    return;
+  }
+
+  const int32_t band = autoTareBandCounts();
+  int32_t m[CELLS];
+  for (uint8_t i = 0; i < CELLS; i++) m[i] = window_[i].mean(windowTrim());
+
+  // Start, or restart, the observation.
+  if (autoTare_ != AutoTare::Observing) {
+    autoTare_ = AutoTare::Observing;
+    autoStartMs_ = now;
+    for (uint8_t i = 0; i < CELLS; i++) autoLo_[i] = autoHi_[i] = m[i];
+    return;
+  }
+
+  // PEAK-TO-PEAK ACROSS THE WHOLE OBSERVATION, not sample-to-sample. A load
+  // cell settles asymptotically, so consecutive samples during a slow creep are
+  // always close to each other while the reading as a whole is still moving.
+  // Only the span over time catches that.
+  bool steady = true;
+  for (uint8_t i = 0; i < CELLS; i++) {
+    if (m[i] < autoLo_[i]) autoLo_[i] = m[i];
+    if (m[i] > autoHi_[i]) autoHi_[i] = m[i];
+    if (autoHi_[i] - autoLo_[i] > band) steady = false;
+  }
+
+  if (!steady) {
+    // Begin again from here rather than abandoning: whatever disturbed it may
+    // have been someone putting the pot down, and the next three seconds are
+    // exactly when it will settle.
+    autoStartMs_ = now;
+    for (uint8_t i = 0; i < CELLS; i++) autoLo_[i] = autoHi_[i] = m[i];
+    if ((uint32_t)(now - autoBootMs_) > AUTOTARE_DEADLINE_MS) {
+      autoTare_ = AutoTare::GaveUp;
+      Serial.println("scale: auto-tare gave up -- platform never held still. Tare by hand.");
+    }
+    return;
+  }
+
+  if ((uint32_t)(now - autoStartMs_) < AUTOTARE_STABLE_MS) return;
+
+  for (uint8_t i = 0; i < CELLS; i++) {
+    tare_[i] = m[i] - platformZero_[i];
+    tareSet_[i] = true;
+  }
+  autoTare_ = AutoTare::Done;
+  Serial.printf("scale: auto-tared at %ld / %ld above the platform (steady %lu ms)\n",
+                (long)tare_[0], (long)tare_[1], (unsigned long)AUTOTARE_STABLE_MS);
+}
+
 void scaleTask(void *) {
   uint32_t nextPublishMs = 0;
   for (;;) {
@@ -656,6 +840,7 @@ void scaleTask(void *) {
       if (cell_[i].state() == CellState::Offline) window_[i].clear();
     }
 
+    serviceAutoTare(now);
     serviceCommands();
 
     // 10 Hz, matching the converters. That is the fastest readout this product
@@ -778,6 +963,21 @@ bool ready() {
 }
 
 void tare() { wantTare_ = true; }
+
+void setPlatformZero() { wantPlatformZero_ = true; }
+
+AutoTare autoTareState() { return autoTare_; }
+
+const char *autoTareText(AutoTare s) {
+  switch (s) {
+    case AutoTare::Waiting: return "settling";
+    case AutoTare::Observing: return "auto-taring";
+    case AutoTare::Done: return "";
+    case AutoTare::GaveUp: return "not tared";
+    case AutoTare::Off: return "";
+  }
+  return "";
+}
 
 void tareCell(uint8_t index) {
   if (index >= CELLS) return;

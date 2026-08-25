@@ -62,6 +62,11 @@ void pagesOnScaleCycleAvg(void (*cb)(void));
 // then came back from its next power cycle showing kilograms again.
 void pagesOnScaleRestore(void (*cb)(void));
 
+// Stores the platform's own weight in NVS -- the commissioning zero, done once
+// per device after the platform is bolted on. Distinct from Tare, which is
+// volatile and belongs to the next measurement rather than to the assembly.
+void pagesOnScalePlatformZero(void (*cb)(void));
+
 // How long without a touch before the UI returns to the stock page.
 //
 // A device left on the WiFi page is a device whose primary readout -- the bowl

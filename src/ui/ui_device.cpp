@@ -110,8 +110,13 @@ void updateDevicePage(const State &s) {
     // effect of the tare can be told apart at a glance.
     n += snprintf(buf + n, sizeof(buf) - n, "         net %8ld   p-p %5ld\n", (long)c.counts,
                   (long)c.pp);
-    n += snprintf(buf + n, sizeof(buf) - n, "        tare %8ld   %u/s\n\n", (long)c.offset,
-                  c.sps);
+    // BOTH ZEROS, labelled, because they are set by different people at
+    // different times and only one survives a power cycle. A platform zero of 0
+    // means this device was never commissioned; a tare of 0 means nothing is
+    // sitting on top of the platform right now.
+    n += snprintf(buf + n, sizeof(buf) - n, "        zero %8ld   %u/s\n",
+                  (long)c.platformZero, c.sps);
+    n += snprintf(buf + n, sizeof(buf) - n, "        tare %8ld\n\n", (long)c.tare);
   }
 
   if (sc.calibrated) {

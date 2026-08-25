@@ -227,6 +227,7 @@ void publishScale(uint32_t nowMs) {
   s.scale.overRange = sn.overRange;
   s.scale.countsPerGram = sn.countsPerGram;
   s.scale.window = sn.window;
+  s.scale.zeroed = sn.zeroed;
   s.scale.calMassG = sn.calMassG;
 
   int32_t totalCounts = 0;
@@ -237,7 +238,7 @@ void publishScale(uint32_t nowMs) {
     // absolute converter reading -- which is what the console line and any
     // future diagnostics want -- while the screen shows the cell's own
     // contribution.
-    c.counts = sn.cell[i].counts - sn.cell[i].offset;
+    c.counts = sn.cell[i].counts - sn.cell[i].platformZero - sn.cell[i].tare;
     c.grams = sn.cell[i].grams;
     c.sps = sn.cell[i].sps;
     c.overRange = sn.cell[i].overRange;
@@ -246,7 +247,8 @@ void publishScale(uint32_t nowMs) {
     // made from, and a pre-chewed copy of it would show nothing.
     c.rawCounts = sn.cell[i].rawCounts;
     c.pp = sn.cell[i].pp;
-    c.offset = sn.cell[i].offset;
+    c.platformZero = sn.cell[i].platformZero;
+    c.tare = sn.cell[i].tare;
     if (c.state == ui::Cell::Online) totalCounts += c.counts;
   }
   s.scale.totalCounts = totalCounts;
@@ -315,6 +317,11 @@ void onCalibApply(float grams) {
   // board booted with. Without this the page would re-prefill from the
   // boot-time value on its next visit and quietly discard what was just used.
   if (ok) ui::calibSetMass(grams);
+}
+
+void onPlatformZero() {
+  Serial.println("ui: store platform zero requested");
+  scale::setPlatformZero();
 }
 
 void onRestoreDefault() {
@@ -539,6 +546,7 @@ void setup() {
   ui::pagesOnScaleClearCal(onClearCal);
   ui::pagesOnScaleCycleAvg(onCycleAvg);
   ui::pagesOnScaleRestore(onRestoreDefault);
+  ui::pagesOnScalePlatformZero(onPlatformZero);
   ui::calibOnApply(onCalibApply);
   // Opens pre-filled with whatever this unit was last calibrated against, which
   // on a fresh board is the build default.
@@ -643,9 +651,10 @@ void loop() {
       // bridge at gain 128 wanders by tens to hundreds of counts between
       // conversions, and an open input does not move at all.
       Serial.printf(
-          "  cell %c  %-7s rev 0x%02X  raw %8ld  filt %8ld  p-p %6ld  tare %8ld  %u/s (%u)\n",
+          "  cell %c  %-7s rev 0x%02X  raw %8ld  filt %8ld  p-p %6ld  zero %8ld  tare %8ld  "
+          "%u/s (%u)\n",
           'A' + i, st, c.revision, (long)c.rawCounts, (long)c.counts, (long)c.pp,
-          (long)c.offset, c.sps, c.samples);
+          (long)c.platformZero, (long)c.tare, c.sps, c.samples);
     }
     if (sn.calibrated) {
       // Formatted the SAME WAY the screen formats it -- rounded to whole grams
@@ -660,8 +669,8 @@ void loop() {
                     sn.window);
     } else {
       Serial.printf("  total  %ld counts   UNCALIBRATED -- Menu > Settings > Scale\n",
-                    (long)(sn.cell[0].counts - sn.cell[0].offset + sn.cell[1].counts -
-                           sn.cell[1].offset));
+                    (long)(sn.cell[0].counts - sn.cell[0].platformZero - sn.cell[0].tare +
+                           sn.cell[1].counts - sn.cell[1].platformZero - sn.cell[1].tare));
     }
     Serial.printf("  stacks: scale %lu B free\n", (unsigned long)scale::stackFreeBytes());
   }

@@ -71,7 +71,11 @@ struct CellView {
   // specifically designed not to show.
   int32_t rawCounts;
   int32_t pp;
-  int32_t offset;
+  // TWO OFFSETS. The platform's own weight, stored once per device and restored
+  // every boot; and this session's tare, which is deliberately forgotten at
+  // power-off. See scale.h for why collapsing them into one was wrong.
+  int32_t platformZero;
+  int32_t tare;
 
   // The converter has hit the end of its 24-bit range, so this cell has stopped
   // measuring and is reporting its own ceiling. Said rather than inferred: a
@@ -90,7 +94,8 @@ struct ScaleView {
   // that has never seen a known mass cannot convert counts to grams, and the
   // screen says counts rather than inventing a factor.
   bool calibrated;
-  bool tared;
+  bool zeroed;   // every online cell has a stored platform zero
+  bool tared;    // every online cell has a tare for this session
   bool overRange;  // at least one cell saturated -- the total is not a weight
 
   // Carried so the Device page can state them rather than the reader having to
