@@ -725,16 +725,28 @@ void loop() {
           (long)c.platformZero, (long)c.tare, c.sps, c.samples);
     }
     if (sn.calibrated) {
-      // Formatted the SAME WAY the screen formats it -- rounded to whole grams
-      // first, then split into kg and the remainder -- so the console and the
-      // panel cannot disagree about the last digit. "%.0f" of a value a
-      // fraction below zero also prints "-0", which reads as a bug rather than
-      // as a tared platform sitting a few tenths of a gram low.
+      // ALWAYS THREE PLACES HERE, WHATEVER THE PANEL IS SET TO -- and the
+      // parenthetical says which setting the panel is on, so the two can be
+      // reconciled instead of merely looking inconsistent.
+      //
+      // This used to claim it formatted the number "the same way the screen
+      // does, so the console and the panel cannot disagree about the last
+      // digit". That stopped being true the moment precision became a setting,
+      // and the console is the wrong place to follow it: it is a diagnostic
+      // channel, like the Diagnose page, read by somebody who wants the figure
+      // the display is rounding rather than the rounded one. Truncating the
+      // evidence to match the dashboard would remove the only view that can
+      // show why the dashboard reads as it does.
+      //
+      // Still rounded to whole grams and split with integers rather than
+      // printed with "%.3f": "%.0f" of a value a fraction below zero prints
+      // "-0", which reads as a bug rather than as a tared platform sitting a
+      // few tenths of a gram low.
       const long mg = (long)lroundf(sn.totalGrams);
       const long amg = mg < 0 ? -mg : mg;
-      Serial.printf("  total  %s%ld.%03ld kg   (%.3f counts/g, %u-sample window)\n",
-                    mg < 0 ? "-" : "", amg / 1000L, amg % 1000L, sn.countsPerGram,
-                    sn.window);
+      Serial.printf("  total  %s%ld.%03ld kg   (%.3f counts/g, %u-sample window, panel 0.%0*d)\n",
+                    mg < 0 ? "-" : "", amg / 1000L, amg % 1000L, sn.countsPerGram, sn.window,
+                    (int)(sn.decimals ? sn.decimals : 3), 0);
     } else {
       Serial.printf("  total  %ld counts   UNCALIBRATED -- Menu > Settings > Scale\n",
                     (long)(sn.cell[0].counts - sn.cell[0].platformZero - sn.cell[0].tare +

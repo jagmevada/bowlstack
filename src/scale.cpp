@@ -417,6 +417,15 @@ void loadPersisted() {
   if (countsPerGram_ > 0.0f) {
     Serial.printf("  %.3f counts/g, platform zero %ld / %ld, window %u samples\n",
                   countsPerGram_, (long)platformZero_[0], (long)platformZero_[1], window_n_);
+    // THE RESTORED PRECISION, SAID OUT LOUD, for the same reason the window and
+    // the platform zero above it are: everything in this namespace survives a
+    // power cycle, and a value that survives silently cannot be told apart from
+    // one that reset to its default. Confirming this setting had come back
+    // meant power-cycling the board and pressing the cycle key to see what it
+    // stepped FROM -- which is detective work to answer a question the boot
+    // line should simply have answered.
+    Serial.printf("  reading 0.%0*d kg (%u decimals, %ld g per step)\n", (int)decimals_, 0,
+                  decimals_, (decimals_ == 1) ? 100L : (decimals_ == 2) ? 10L : 1L);
     // THE CEILING, STATED AT BOOT. A signed 24-bit conversion divided by the
     // measured sensitivity is the most load a single cell can report before it
     // saturates -- and on this assembly that lands well below the number
