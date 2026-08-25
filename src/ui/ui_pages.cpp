@@ -217,24 +217,32 @@ void buildPages() {
   menuAddRow(menuRoot_, "Settings", nullptr, openSettings);
   menuAddRow(menuRoot_, "Sensors", nullptr, openSensor);
 
-  // HOME, AT EXACTLY THE COORDINATES THE GEAR OCCUPIES ON THE DASHBOARD, so one
-  // corner of the panel toggles between the two pages and the thumb never has
-  // to move. The dashboard's action row is 64 px tall against the bottom
-  // padding, and the gear is the right-hand 64 px of it:
+  // HOME, ON THE GEAR'S ROW BUT MIRRORED TO THE LEFT MARGIN. The dashboard's
+  // action row is 64 px tall against the bottom padding, and the gear is the
+  // right-hand 64 px of it:
   //
-  //     x = 8 (page pad) + 152 (TARE) + 8 (gap) = 168, w = 64
-  //     y = 294 - 8 (page pad) - 64               = 222, h = 64
+  //     gear   x = 8 (page pad) + 152 (TARE) + 8 (gap) = 168, w = 64
+  //     home   x = 8 (the same page pad, from the left)
+  //     both   y = 294 - 8 (page pad) - 64             = 222, h = 64
+  //
+  // SAME BAND, OPPOSITE END. Sharing the exact coordinates put both buttons
+  // under one thumb, which is quick but means the pixel that leaves a page is
+  // the pixel that returns to it -- a mis-timed double tap goes out and back
+  // and looks like the tap did nothing. At opposite ends of the same row the
+  // travel is still one movement, and the two directions can never be confused
+  // for each other. x = 8 is the dashboard's own page padding, so the home
+  // button lines up with the left edge of TARE rather than against the bezel.
   //
   // IGNORE_LAYOUT takes it out of the menu's flex column so those numbers mean
   // what they say. It sits below both rows -- the list ends at 162 -- so it
   // covers nothing, and a third row would still clear it.
   //
   // AND THE TILE'S PADDING IS SUBTRACTED, because lv_obj_set_pos is relative to
-  // the CONTENT box rather than the border box. Passing the gear's coordinates
-  // straight in put the button at (174,228) -- six pixels down and right of the
-  // gear, which is exactly the tile's padding and exactly the kind of near-miss
-  // nothing reports. Both positions were read back with lv_obj_get_coords in
-  // the simulator rather than derived on paper; they now agree at (168,222).
+  // the CONTENT box rather than the border box. Passing dashboard coordinates
+  // straight in put the button six pixels down and right of where they said,
+  // which is exactly the tile's padding and exactly the kind of near-miss
+  // nothing reports. The positions are read back with lv_obj_get_coords in the
+  // simulator rather than derived on paper.
   //
   // A HOUSE, not the wordmark it briefly carried. DBF is Dadabhagwan
   // Foundation; it names who made the device, which is not what a navigation
@@ -244,7 +252,7 @@ void buildPages() {
     const int32_t padT = lv_obj_get_style_pad_top(tileMenu_, LV_PART_MAIN);
     lv_obj_t *home = lv_button_create(tileMenu_);
     lv_obj_add_flag(home, LV_OBJ_FLAG_IGNORE_LAYOUT);
-    lv_obj_set_pos(home, 168 - padL, 222 - padT);
+    lv_obj_set_pos(home, 8 - padL, 222 - padT);
     lv_obj_set_size(home, 64, 64);
     lv_obj_set_style_radius(home, 8, LV_PART_MAIN);
     lv_obj_set_style_bg_color(home, lv_color_hex(0x21262D), LV_PART_MAIN);

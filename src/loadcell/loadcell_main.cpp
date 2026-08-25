@@ -221,23 +221,27 @@ void bootSplash() {
   // so the splash cannot disagree with what the console prints or with what the
   // Diagnose page reports.
   //
-  // DejaVu18, because LovyanGFX ships DejaVu at 9/12/18/24/40/56/72 and there is
-  // no 20. 18 is the neighbour below it.
+  // FONT2 RATHER THAN A DEJAVU, because 16 px is what is wanted and DejaVu is
+  // shipped at 9/12/18/24/40/56/72 -- 12 is a long way down from 18 and 18 is
+  // not 16. Font2 is lgfx/Fonts/Font16.h: chr_hgt 16, baseline 13, proportional
+  // widths from its own table. It is a different family from DejaVu but it is a
+  // real 16 px face, which is the point -- NOT Font0 scaled up, which is the
+  // 5x7 GLCD bitmap that made this screen read as dot matrix in the first place.
   //
   // THE BLOCK IS ANCHORED TO THE BOTTOM EDGE, not hung off the logo. Growing it
   // downward from the logo pushed the text toward the panel edge as lines were
   // added and crowded the artwork as they were removed; anchoring it to the
   // bottom instead means the logo keeps its air whatever the block does, and a
   // fourth line would eat into the gap rather than run off the screen. With
-  // three lines the text starts at y=257 and the logo ends at y=212, so there
-  // are 45 px of black between them.
-  gfx.setFont(&fonts::DejaVu18);
+  // three lines the text starts at y=262 and the logo ends at y=212, so there
+  // are 50 px of black between them.
+  gfx.setFont(&fonts::Font2);
   gfx.setTextDatum(middle_center);
   {
     const char *const lines[] = {"Unodari", BOWLSTACK_DEVICE_ID,
                                  BOWLSTACK_FW_VERSION};
     const int32_t nLines = (int32_t)(sizeof(lines) / sizeof(lines[0]));
-    const int32_t LINE_H = 22;   // 18 px of glyph plus 4 of leading
+    const int32_t LINE_H = 20;   // 16 px of glyph plus 4 of leading
     const int32_t MARGIN = 8;    // black below the last line
     const int32_t cx = gfx.width() / 2;
     // middle_center, so this is the CENTRE of the first line: the last line's
