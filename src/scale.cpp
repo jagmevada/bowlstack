@@ -124,6 +124,10 @@ const int32_t STEP_COUNTS_UNCAL = 1000;
 // which is well inside the time it takes a hand to let go of a bowl.
 const uint8_t STEP_CONFIRM = 3;
 
+// The fewest samples a step can be judged against. See the note at the call
+// site for why this is NOT the full window.
+const uint8_t STEP_MIN_SAMPLES = 4;
+
 // The factory default, overwritten by the first calibration on any unit. See
 // the comment in platformio.ini for where the number came from and for what its
 // size implies about the usable range.
@@ -226,6 +230,9 @@ bool cellTared_[CELLS] = {false, false};
 uint8_t window_n_ = BOWLSTACK_AVG_WINDOW;
 // Consecutive samples outside the step band, per cell.
 uint8_t stepRun_[CELLS] = {0, 0};
+// The samples that tripped the detector, kept so the restarted window can be
+// seeded with them instead of starting from one raw conversion.
+int32_t stepBuf_[CELLS][3] = {{0, 0, 0}, {0, 0, 0}};
 float calMass_ = (float)BOWLSTACK_CAL_MASS_G;
 volatile uint8_t wantWindow_ = 0;  // 0 = no change pending
 
@@ -426,8 +433,14 @@ void serviceCommands() {
       prefs_.begin(NVS_NS, false);
       prefs_.putUChar(KEY_WINDOW, window_n_);
       prefs_.end();
-      Serial.printf("scale: averaging %u samples (~%u ms at 79 SPS), trim %u\n", window_n_,
-                    (unsigned)((window_n_ * 1000UL) / 79UL), windowTrim());
+      // The settling time is derived from the cell's MEASURED rate, not from a
+      // number typed into a format string. It said "at 79 SPS" for a while
+      // after the converter was dropped to 10, which quietly understated every
+      // settling time it printed by a factor of eight -- the one figure this
+      // line exists to give.
+      const uint16_t sps = cell_[0].sps() ? cell_[0].sps() : 10;
+      Serial.printf("scale: averaging %u samples (~%u ms at %u SPS), trim %u\n", window_n_,
+                    (unsigned)((window_n_ * 1000UL) / sps), sps, windowTrim());
     }
   }
 
@@ -581,24 +594,51 @@ void scaleTask(void *) {
       if (cell_[i].poll(now)) {
         const int32_t v = cell_[i].counts();
 
-        // Only meaningful once the window is full -- a filling window is
-        // already tracking the input as fast as it can, and every early sample
-        // would look like a step against a mean built from two others.
-        if (window_[i].size() >= window_n_) {
+        // FROM FOUR SAMPLES, NOT FROM A FULL WINDOW, and that distinction is
+        // the whole bug this replaced.
+        //
+        // Detecting a step CLEARS the window. Gating detection on the window
+        // being full therefore switched the detector off for a whole window
+        // immediately after every step it caught -- 12.8 s at N=128. So putting
+        // a bowl down was caught and taking it off again a few seconds later
+        // was not, and the reading crawled back over the refill exactly as if
+        // no detector existed. The first window after boot was blind for the
+        // same reason.
+        //
+        // Four is the floor at which a mean means anything. Below it the "mean"
+        // is essentially the previous sample and every reading looks like a
+        // step against it.
+        if (window_[i].size() >= STEP_MIN_SAMPLES) {
           const int32_t m = window_[i].mean(windowTrim());
           const int32_t d = (v > m) ? (v - m) : (m - v);
           if (d > stepCounts()) {
+            // Kept so the restart can be seeded with them rather than with one
+            // raw sample -- see below.
+            if (stepRun_[i] < STEP_CONFIRM) stepBuf_[i][stepRun_[i]] = v;
             if (++stepRun_[i] >= STEP_CONFIRM) {
               // THE WINDOW IS THROWN AWAY, not blended out of. Its contents
               // describe a load that is gone; averaging them against the new
-              // one is what produced the long crawl. Pushing v into an empty
-              // window makes the mean equal to v, so the reading arrives at the
-              // new level on this sample and then re-settles as the window
-              // refills at whatever averaging is selected.
+              // one is what produced the long crawl.
               window_[i].clear();
+              // SEEDED WITH THE THREE SAMPLES THAT TRIGGERED IT, not left empty
+              // for the next push alone. All three are already measurements of
+              // the NEW load, so using them makes the value the reading jumps to
+              // a three-sample mean rather than one raw conversion -- about
+              // 1.7x quieter at the instant somebody is looking hardest.
+              for (uint8_t k = 0; k < STEP_CONFIRM; k++)
+                window_[i].push(stepBuf_[i][k], window_n_);
               stepRun_[i] = 0;
-              Serial.printf("scale: cell %c step %+ld counts -- filter restarted\n",
-                            'A' + i, (long)(v - m));
+              // RATE LIMITED, because a slow pour is a continuous step. Liquid
+              // going into a bowl crosses the threshold every three samples for
+              // as long as the pouring lasts, and an unthrottled line would put
+              // three messages a second on a console somebody is trying to read
+              // the weight from. One a second says the same thing.
+              static uint32_t nextStepSayMs[CELLS] = {0, 0};
+              if ((int32_t)(now - nextStepSayMs[i]) >= 0) {
+                nextStepSayMs[i] = now + 1000;
+                Serial.printf("scale: cell %c step %+ld counts -- filter restarted\n",
+                              'A' + i, (long)(v - m));
+              }
             }
           } else {
             // A run has to be CONSECUTIVE. One sample back inside the band means

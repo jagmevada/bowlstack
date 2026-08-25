@@ -35,7 +35,7 @@ const uint8_t ENTRY_MAX = 6;  // 999999 g is a tonne; nothing here weighs more
 bool fresh_ = true;
 
 char prevEntry_[16] = {0};
-char prevLive_[40] = {0};
+char prevLive_[64] = {0};
 uint32_t nextLiveMs_ = 0;
 
 void refreshEntry() {
@@ -301,20 +301,32 @@ void updateCalibPage(const State &s) {
   nextLiveMs_ = now + 250;
 
   const ScaleView &sc = s.scale;
-  char buf[40];
+  char buf[64];
   if (sc.online < CELLS) {
     snprintf(buf, sizeof(buf), "%u of %u cells online", sc.online, CELLS);
   } else {
-    // COUNTS, not the kilogram figure. The kilograms are computed with the
-    // factor this page is about to replace, so quoting them here would be
-    // circular -- and on an uncalibrated unit there is no kilogram figure at
-    // all. Counts is the one number that means the same thing before and after.
-    // Short enough to FIT. The first version read "now %+ld counts on the
-    // platform", which at 14 px is wider than the 232 px available -- and
-    // because the label is centred and clipped, it lost characters from BOTH
-    // ends, so it read "w +260516 counts on the platfo". A truncated diagnostic
-    // is worse than a terse one.
-    snprintf(buf, sizeof(buf), "on the platform: %+ld", (long)sc.totalCounts);
+    // THE ZERO AND THE DEFLECTION, side by side, because the deflection is
+    // meaningless without knowing what it is measured from. Both are the stored
+    // NVS values -- the tare this unit is actually using, not a fresh reading.
+    //
+    // It is the other half of the same job the deflection does. A tare of zero
+    // here means nothing has ever zeroed this platform and the number beside it
+    // is an absolute converter reading rather than a load; two tares that look
+    // nothing like each other say the corners are carrying very different
+    // shares before anything is put on. Either would otherwise have to be
+    // chased on a different page, after the calibration had already been taken.
+    //
+    // COUNTS, not kilograms. The kilograms are computed with the very factor
+    // this page is about to replace, so quoting them here would be circular --
+    // and on an uncalibrated unit there are none. Counts is the one figure that
+    // means the same thing before and after.
+    //
+    // ONE LINE, and it has to stay one: the label is centred and clipped, so an
+    // overflow loses characters from BOTH ends. An earlier version read
+    // "now %+ld counts on the platform" and rendered as
+    // "w +260516 counts on the platfo".
+    snprintf(buf, sizeof(buf), "0 = %ld/%ld   net %+ld", (long)sc.cell[0].offset,
+             (long)sc.cell[1].offset, (long)sc.totalCounts);
   }
   if (strcmp(prevLive_, buf) == 0) return;
   snprintf(prevLive_, sizeof(prevLive_), "%s", buf);

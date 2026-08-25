@@ -419,10 +419,11 @@ void scopeSample(uint32_t nowMs) {
     nextRefitMs_ = nowMs + REFIT_MS;
   }
 
-  // 20 Hz, matching the rate scale.cpp publishes at. The converters run at
-  // 80 SPS underneath; sampling the scope faster than the publish rate would
-  // draw the same value four times and call it history.
-  if ((int32_t)(nowMs - lastSampleMs_) < 50) return;
+  // 10 Hz, matching the rate scale.cpp publishes at AND the rate the converters
+  // deliver. Sampling faster than data arrives does not add resolution, it
+  // duplicates columns -- the trace would show each reading twice and the
+  // 232-column history would cover half as much time while looking the same.
+  if ((int32_t)(nowMs - lastSampleMs_) < 100) return;
   lastSampleMs_ = nowMs;
 
   bool outside = false;
