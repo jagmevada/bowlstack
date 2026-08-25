@@ -20,7 +20,16 @@ namespace ui {
 
 // Builds an empty list inside `parent`. `onBack` is optional: pass nullptr for
 // the top-level menu, which is a swipeable page and needs no back button.
-lv_obj_t *menuCreate(lv_obj_t *parent, const char *title, void (*onBack)(void));
+// `onBack` is optional: pass nullptr for the top-level menu, which is a
+// swipeable page.
+//
+// `onHome` replaces the swipe HINT with a real button. The swipe still works,
+// but on this panel it is a poor primary gesture: the touch controller is
+// polled at ~30 Hz through a driver that retries, so a drag has to be
+// deliberate and slow to register -- which is a lot to ask of somebody holding
+// a bowl in their other hand. A button is one tap and cannot be half-completed.
+lv_obj_t *menuCreate(lv_obj_t *parent, const char *title, void (*onBack)(void),
+                     void (*onHome)(void) = nullptr);
 
 // `hint` is the muted right-hand text -- a current value, a status, or nullptr.
 // It is what makes a menu useful at a glance rather than a list of nouns.

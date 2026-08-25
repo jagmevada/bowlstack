@@ -48,4 +48,13 @@ void updateWeight(const State &s);
 // LVGL and cannot reach scale.cpp.
 void weightOnTare(void (*cb)(void));
 
+// The gear button, which goes to the menu page -- the same place a swipe leads.
+//
+// The swipe is not removed and still works. It is simply not good enough to be
+// the ONLY way: a drag on this panel has to be slow and deliberate to register,
+// because the touch controller is polled at ~30 Hz through a driver that
+// retries on every read, and a quick flick never accumulates enough samples to
+// be read as a drag. One tap cannot be half-completed.
+void weightOnSettings(void (*cb)(void));
+
 }  // namespace ui

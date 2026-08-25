@@ -38,11 +38,17 @@ lv_obj_t *lblTotal;
 lv_obj_t *lblUnit;
 lv_obj_t *lblFlag;
 lv_obj_t *btnTare;
+lv_obj_t *btnSettings;
 
 void (*onTare_)(void) = nullptr;
+void (*onSettings_)(void) = nullptr;
 
 void tareClicked(lv_event_t *) {
   if (onTare_) onTare_();
+}
+
+void settingsClicked(lv_event_t *) {
+  if (onSettings_) onSettings_();
 }
 
 void styleFlat(lv_obj_t *o) {
@@ -96,6 +102,7 @@ void formatKg(char *buf, uint32_t len, float grams) {
 }  // namespace
 
 void weightOnTare(void (*cb)(void)) { onTare_ = cb; }
+void weightOnSettings(void (*cb)(void)) { onSettings_ = cb; }
 
 void buildWeight(lv_obj_t *parent) {
   lv_obj_t *scr = parent ? parent : lv_screen_active();
@@ -177,15 +184,25 @@ void buildWeight(lv_obj_t *parent) {
   lv_obj_set_width(gap, LV_PCT(100));
   lv_obj_set_flex_grow(gap, 1);
 
-  // ONE BUTTON, AND IT IS BIG. This is the only control a person uses during a
-  // service, they are holding a bowl in the other hand, and the panel is 2
-  // inches across -- so it gets 200 x 64 rather than the 44 px a menu row
-  // settled for. There is nothing else on this page to compete for the space.
-  //
-  // It tares BOTH cells. Zeroing one corner against the other is a setup job
-  // and lives on the Diagnose page with the figures that make it meaningful.
-  btnTare = lv_button_create(scr);
-  lv_obj_set_size(btnTare, 200, 64);
+  // --- the action row -----------------------------------------------------
+  // TARE and a way off this page, side by side at the bottom where a thumb
+  // reaches. Both are 64 px tall, which is well over the 44 px the menu rows
+  // settled on -- this is the one screen used with a bowl in the other hand,
+  // and there is nothing else on it to spend the room on.
+  lv_obj_t *actions = lv_obj_create(scr);
+  styleFlat(actions);
+  lv_obj_set_width(actions, LV_PCT(100));
+  lv_obj_set_height(actions, 64);
+  lv_obj_set_flex_flow(actions, LV_FLEX_FLOW_ROW);
+  lv_obj_set_style_pad_column(actions, 8, LV_PART_MAIN);
+  lv_obj_set_flex_align(actions, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER);
+
+  // TARES BOTH CELLS. Zeroing one corner against the other is a setup job and
+  // lives on Diagnose with the figures that make it meaningful.
+  btnTare = lv_button_create(actions);
+  lv_obj_set_flex_grow(btnTare, 1);
+  lv_obj_set_height(btnTare, 64);
   lv_obj_set_style_radius(btnTare, 8, LV_PART_MAIN);
   lv_obj_set_style_bg_color(btnTare, lv_color_hex(C_KEY), LV_PART_MAIN);
   lv_obj_add_event_cb(btnTare, tareClicked, LV_EVENT_CLICKED, nullptr);
@@ -194,6 +211,25 @@ void buildWeight(lv_obj_t *parent) {
   lv_obj_set_style_text_color(tl, lv_color_hex(C_TEXT), LV_PART_MAIN);
   lv_label_set_text(tl, "TARE");
   lv_obj_center(tl);
+
+  // A BUTTON RATHER THAN A SWIPE, and the swipe still works alongside it.
+  //
+  // Dragging across this panel has to be deliberate to register: the touch
+  // controller is polled at roughly 30 Hz through a driver that retries on
+  // every read, so a quick flick does not produce enough samples to be read as
+  // a drag at all. That is fine for a gesture somebody discovers once and
+  // tolerable for one they use occasionally; it is the wrong primary way to
+  // reach settings from a screen used one-handed.
+  btnSettings = lv_button_create(actions);
+  lv_obj_set_size(btnSettings, 64, 64);
+  lv_obj_set_style_radius(btnSettings, 8, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(btnSettings, lv_color_hex(C_KEY), LV_PART_MAIN);
+  lv_obj_add_event_cb(btnSettings, settingsClicked, LV_EVENT_CLICKED, nullptr);
+  lv_obj_t *sl = lv_label_create(btnSettings);
+  lv_obj_set_style_text_font(sl, &lv_font_montserrat_24, LV_PART_MAIN);
+  lv_obj_set_style_text_color(sl, lv_color_hex(C_MUTED), LV_PART_MAIN);
+  lv_label_set_text(sl, LV_SYMBOL_SETTINGS);
+  lv_obj_center(sl);
 
   // NO PERF LINE. "fps 13  ui 62%" was here while the frame rate was the thing
   // being worked on, and it earned its place then -- it is what caught the

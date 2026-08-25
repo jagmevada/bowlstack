@@ -100,6 +100,18 @@ void doCycleAvg() { if (onCycleAvg_) onCycleAvg_(); }
 void doRestore() { if (onRestore_) onRestore_(); }
 void doPlatformZero() { if (onPlatformZero_) onPlatformZero_(); }
 
+// --- the two navigation buttons -------------------------------------------
+// Forward declared because both live on pages built further down, and both do
+// the same thing the swipe does. The swipe is untouched; these exist because a
+// drag on this panel has to be slow and deliberate to register at all, which is
+// the wrong thing to require of somebody holding a bowl.
+void goToMenu() {
+  if (tv_ && tileMenu_) lv_tileview_set_tile(tv_, tileMenu_, LV_ANIM_OFF);
+}
+void goToHome() {
+  if (tv_ && tileHome_) lv_tileview_set_tile(tv_, tileHome_, LV_ANIM_OFF);
+}
+
 void showOnly(lv_obj_t *which) {
   lv_obj_t *all[] = {detailSettings_, detailWifi_,   detailBatt_,   detailScale_,
                      detailCalib_,    detailSensor_, detailDevice_};
@@ -201,13 +213,14 @@ void buildPages() {
   // swipe RIGHT lands, matching the back-toward-home direction used everywhere
   // else in the tree.
   tileMenu_ = lv_tileview_add_tile(tv_, 0, 0, LV_DIR_RIGHT);
-  menuRoot_ = menuCreate(tileMenu_, "Menu", nullptr);
+  menuRoot_ = menuCreate(tileMenu_, "Menu", nullptr, goToHome);
   menuAddRow(menuRoot_, "Settings", nullptr, openSettings);
   menuAddRow(menuRoot_, "Sensors", nullptr, openSensor);
 
   tileHome_ = lv_tileview_add_tile(tv_, 1, 0, LV_DIR_LEFT);
   lv_obj_set_style_pad_all(tileHome_, 0, LV_PART_MAIN);
   buildWeight(tileHome_);
+  weightOnSettings(goToMenu);
 
   // Overlays, created AFTER the tileview so they stack above it.
   detailSettings_ = makeDetail(scr);
