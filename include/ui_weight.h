@@ -7,8 +7,8 @@
 // THE TYPE SCALE IS THE ONE IN lv_conf.h AND IT IS NOT NEGOTIABLE HERE.
 //
 //   48   the total. The one thing someone walked over to see.
-//   20   each cell's share -- readable if you look, invisible if you do not.
-//   16   captions and units.
+//   24   the TARE button, the only control on the page.
+//   16   the caption and the unit.
 //   14   the rate line, which is diagnostics rather than information.
 //
 // 14 and 16 are the "read deliberately, up close" tier and 18 is the floor for
@@ -36,18 +36,16 @@ void buildWeight(lv_obj_t *parent = nullptr);
 // string changed -- and this runs every frame against a value that moves.
 void updateWeight(const State &s);
 
-// Each cell panel carries its own zero button, and this is what it calls --
-// with 0 for A and 1 for B.
+// The one button on the page. Tares BOTH cells.
 //
-// A BUTTON PER CELL RATHER THAN ONE FOR THE PAIR, because they answer different
-// questions. Zeroing the assembly is what you do before weighing something.
-// Zeroing ONE corner is what you do while setting the platform up, when the two
-// raw counts start far apart and you want to know whether that is the mounting
-// or the cell -- and the total, being a sum, cannot tell you.
+// PER-CELL ZEROING IS NOT HERE ANY MORE. Zeroing one corner against the other
+// is a setup job -- it is how you tell an uneven mounting from an uneven pair
+// of cells -- and it is meaningless without the raw counts beside it, so it
+// lives on Settings > Diagnose with the figures that give it meaning. What is
+// left on the dashboard is the action somebody performs while holding a bowl.
 //
-// It sits IN the cell's own panel rather than in a row underneath, so which
-// button belongs to which cell needs no label. A function pointer for the same
-// reason ui_state.h exists: src/ui/ is pure LVGL and cannot reach scale.cpp.
-void weightOnTareCell(void (*cb)(uint8_t cell));
+// A function pointer for the same reason ui_state.h exists: src/ui/ is pure
+// LVGL and cannot reach scale.cpp.
+void weightOnTare(void (*cb)(void));
 
 }  // namespace ui

@@ -1,5 +1,6 @@
 #include "ui_device.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -51,7 +52,7 @@ void buildDevicePage(lv_obj_t *parent) {
   lv_obj_t *t = lv_label_create(hdr);
   lv_obj_set_style_text_font(t, &lv_font_montserrat_20, LV_PART_MAIN);
   lv_obj_set_style_text_color(t, lv_color_hex(C_TEXT), LV_PART_MAIN);
-  lv_label_set_text(t, "Device");
+  lv_label_set_text(t, "Diagnose");
 
   lv_obj_t *b = lv_button_create(hdr);
   lv_obj_set_size(b, 42, 28);
@@ -103,8 +104,20 @@ void updateDevicePage(const State &s) {
                     c.state == Cell::Warming ? "warming" : "OFFLINE");
       continue;
     }
-    n += snprintf(buf + n, sizeof(buf) - n, "cell %s   raw %8ld%s\n", NAME[i],
-                  (long)c.rawCounts, c.overRange ? "  OVER" : "");
+    // THE CELL'S MASS FIRST, because it is the figure that moved here off the
+    // dashboard and the one most people open this page for. An uneven split is
+    // how you see a bowl placed off-centre, a mount fouling, or one cell doing
+    // all the work -- none of which the total can show you, being a sum.
+    if (sc.calibrated) {
+      const long mg = (long)lroundf(c.grams);
+      const long a = mg < 0 ? -mg : mg;
+      n += snprintf(buf + n, sizeof(buf) - n, "cell %s   %s%ld.%03ld kg%s\n", NAME[i],
+                    mg < 0 ? "-" : "", a / 1000L, a % 1000L, c.overRange ? "  OVER" : "");
+    } else {
+      n += snprintf(buf + n, sizeof(buf) - n, "cell %s   %ld cts%s\n", NAME[i],
+                    (long)c.counts, c.overRange ? "  OVER" : "");
+    }
+    n += snprintf(buf + n, sizeof(buf) - n, "         raw %8ld\n", (long)c.rawCounts);
     // net = filtered minus tare, which is the figure the kilograms are computed
     // from. Printed beside the raw one so the effect of the filter and the
     // effect of the tare can be told apart at a glance.

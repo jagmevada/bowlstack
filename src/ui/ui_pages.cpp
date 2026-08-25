@@ -77,6 +77,23 @@ float lastCalMassG_ = 0.0f;
 lv_obj_t *settingsMenu_ = nullptr;
 lv_obj_t *scaleMenu_ = nullptr;
 
+// ROW POSITIONS, NAMED. menuSetHint() addresses rows by index, and inserting
+// "Set platform zero" at position 1 silently moved the calibration mass onto it
+// and the averaging figure onto "Clear calibration" -- two hints attached to
+// two labels that had nothing to do with them, with nothing to fail. Naming the
+// positions next to the rows themselves does not make that impossible, but it
+// puts the two things a reader has to keep in step within a screen of each
+// other.
+enum : uint8_t { ROW_SET_WIFI = 0, ROW_SET_BATTERY, ROW_SET_SCALE, ROW_SET_DIAGNOSE };
+enum : uint8_t {
+  ROW_SCALE_TARE = 0,
+  ROW_SCALE_PLATFORM_ZERO,
+  ROW_SCALE_CALIBRATE,
+  ROW_SCALE_CLEAR,
+  ROW_SCALE_AVERAGE,
+  ROW_SCALE_RESTORE,
+};
+
 void doTare() { if (onTare_) onTare_(); }
 void doClearCal() { if (onClearCal_) onClearCal_(); }
 void doCycleAvg() { if (onCycleAvg_) onCycleAvg_(); }
@@ -187,7 +204,6 @@ void buildPages() {
   menuRoot_ = menuCreate(tileMenu_, "Menu", nullptr);
   menuAddRow(menuRoot_, "Settings", nullptr, openSettings);
   menuAddRow(menuRoot_, "Sensors", nullptr, openSensor);
-  menuAddRow(menuRoot_, "Device", nullptr, openDevice);
 
   tileHome_ = lv_tileview_add_tile(tv_, 1, 0, LV_DIR_LEFT);
   lv_obj_set_style_pad_all(tileHome_, 0, LV_PART_MAIN);
@@ -199,6 +215,12 @@ void buildPages() {
   menuAddRow(settingsMenu_, "WiFi", nullptr, openWifi);
   menuAddRow(settingsMenu_, "Battery", nullptr, openBattery);
   menuAddRow(settingsMenu_, "Scale", nullptr, openScale);
+  // DIAGNOSE LIVES HERE NOW, not at the top level. It carries the per-cell
+  // breakdown that used to sit on the dashboard -- each cell's share, its zero,
+  // its tare, its raw conversions and its rate. All of it is real information
+  // and none of it belongs on a screen read at a glance by somebody carrying a
+  // bowl; it is read deliberately, by somebody who came looking for it.
+  menuAddRow(settingsMenu_, "Diagnose", nullptr, openDevice);
 
   // The Scale page is three rows rather than a screen of its own, which is the
   // whole reason ui_menu exists: adding a setting is adding a row. Tare is
@@ -301,7 +323,7 @@ void pagesTick(uint32_t nowMs) {
   if (settingsMenu_) {
     // The Scale row carries the one fact that decides what the whole dashboard
     // can say: with no calibration there are no grams anywhere in the product.
-    menuSetHint(settingsMenu_, 2, s.scale.calibrated ? "" : "uncal");
+    menuSetHint(settingsMenu_, ROW_SET_SCALE, s.scale.calibrated ? "" : "uncal");
   }
   if (scaleMenu_) {
     // The Average row shows the value it will change, which is what makes a
@@ -312,10 +334,10 @@ void pagesTick(uint32_t nowMs) {
     lastCalMassG_ = s.scale.calMassG;
     static char mass[12];
     snprintf(mass, sizeof(mass), "%ld g", (long)(s.scale.calMassG + 0.5f));
-    menuSetHint(scaleMenu_, 1, s.scale.calMassG > 0.0f ? mass : "");
+    menuSetHint(scaleMenu_, ROW_SCALE_CALIBRATE, s.scale.calMassG > 0.0f ? mass : "");
     static char avg[8];
     snprintf(avg, sizeof(avg), "%u", s.scale.window);
-    menuSetHint(scaleMenu_, 3, avg);
+    menuSetHint(scaleMenu_, ROW_SCALE_AVERAGE, avg);
   }
 
   wifiTick();

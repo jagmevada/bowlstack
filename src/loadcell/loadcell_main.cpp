@@ -197,10 +197,26 @@ void bootSplash() {
   gfx.drawPng(LOGO128_PNG, LOGO128_PNG_LEN, (gfx.width() - LOGO128_W) / 2,
               (gfx.height() - LOGO128_H) / 2 - 12);
   gfx.setTextColor(TFT_WHITE, TFT_BLACK);
-  gfx.setTextSize(1);
+  // A REAL TYPEFACE, NOT THE 5x7 GLCD FONT SCALED UP, which is what made this
+  // read as dot matrix: LovyanGFX's default is a 5-by-7 bitmap, and every pixel
+  // of it becomes a visible square the moment it is enlarged. DejaVu40 is drawn
+  // at its native size from properly shaped glyphs, so the strokes are strokes
+  // rather than stacks of dots.
+  //
+  // It is still ONE BIT PER PIXEL, and that is a limit of the splash rather
+  // than of this font: LovyanGFX only anti-aliases VLW and TTF faces, both of
+  // which mean shipping a font asset. Everything AFTER this screen is drawn by
+  // LVGL in Montserrat at 4 bpp and is genuinely smooth -- the splash is the
+  // one surface that exists before LVGL does, which is the whole reason it is
+  // drawn this way (no dark gap while the widget tree is built).
+  //
+  // If the shapes alone are not enough, the fix is to hand the splash to LVGL
+  // as well and accept a beat of black at power-on.
+  gfx.setFont(&fonts::DejaVu40);
   gfx.setTextDatum(middle_center);
-  gfx.drawString("Bowlstack", gfx.width() / 2, (gfx.height() + LOGO128_H) / 2 + 4);
+  gfx.drawString("DBF", gfx.width() / 2, (gfx.height() + LOGO128_H) / 2 + 10);
   gfx.setTextDatum(top_left);
+  gfx.setFont(&fonts::Font0);
   delay(1200);
 }
 
@@ -330,10 +346,11 @@ void onRestoreDefault() {
   ui::calibSetMass(0.0f);  // re-prefilled from the snapshot on the next entry
 }
 
-void onTareCell(uint8_t i) {
-  Serial.printf("ui: tare cell %c requested\n", 'A' + i);
-  scale::tareCell(i);
+void onTareBoth() {
+  Serial.println("ui: tare (dashboard button)");
+  scale::tare();
 }
+
 
 void onCycleAvg() {
   Serial.printf("ui: averaging -> %u samples\n", scale::cycleWindow());
@@ -542,7 +559,7 @@ void setup() {
   }
 
   ui::pagesOnScaleTare(onTare);
-  ui::weightOnTareCell(onTareCell);
+  ui::weightOnTare(onTareBoth);
   ui::pagesOnScaleClearCal(onClearCal);
   ui::pagesOnScaleCycleAvg(onCycleAvg);
   ui::pagesOnScaleRestore(onRestoreDefault);
