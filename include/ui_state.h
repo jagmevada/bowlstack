@@ -103,6 +103,11 @@ struct ScaleView {
   float countsPerGram;
   uint8_t window;  // samples in the moving average
 
+  // Decimal places the KILOGRAM reading is shown to: 1, 2 or 3. Display only --
+  // grams above are unrounded and the Diagnose page ignores this entirely, so
+  // the setting can never cost anybody a figure they came looking for.
+  uint8_t decimals;
+
   // The reference mass last calibrated against on this unit. Shown as the
   // Calibrate row's hint and used to pre-fill the keypad.
   float calMassG;

@@ -58,6 +58,7 @@ const char *KEY_CPG = "cpg";
 const char *KEY_TARED_A = "tarA";
 const char *KEY_TARED_B = "tarB";
 const char *KEY_WINDOW = "win";
+const char *KEY_DECIMALS = "dec";
 const char *KEY_CALMASS = "calmass";
 
 // What a calibration must clear, and the important half is the SECOND test.
@@ -275,7 +276,15 @@ uint8_t stepRun_[CELLS] = {0, 0};
 // seeded with them instead of starting from one raw conversion.
 int32_t stepBuf_[CELLS][3] = {{0, 0, 0}, {0, 0, 0}};
 float calMass_ = (float)BOWLSTACK_CAL_MASS_G;
+uint8_t decimals_ = DECIMALS_DEFAULT;
 volatile uint8_t wantWindow_ = 0;  // 0 = no change pending
+// DEFERRED THE SAME WAY THE WINDOW IS, and not for symmetry. Applying it
+// straight from the menu handler would write NVS from the UI task while the
+// scale task is using the same Preferences object, which is neither reentrant
+// nor guarded -- a corrupt namespace rather than a wrong reading, and one that
+// would show up as a unit that forgot its calibration. The value itself is a
+// byte and would have been safe; `prefs_` is what is not.
+volatile uint8_t wantDecimals_ = 0;  // 0 = no change pending
 
 Preferences prefs_;
 
@@ -399,6 +408,8 @@ void loadPersisted() {
   }
   window_n_ = prefs_.getUChar(KEY_WINDOW, (uint8_t)BOWLSTACK_AVG_WINDOW);
   if (window_n_ < 4 || window_n_ > WINDOW_MAX) window_n_ = BOWLSTACK_AVG_WINDOW;
+  decimals_ = prefs_.getUChar(KEY_DECIMALS, DECIMALS_DEFAULT);
+  if (decimals_ < 1 || decimals_ > 3) decimals_ = DECIMALS_DEFAULT;
   calMass_ = prefs_.getFloat(KEY_CALMASS, (float)BOWLSTACK_CAL_MASS_G);
   if (calMass_ < MIN_CAL_GRAMS) calMass_ = (float)BOWLSTACK_CAL_MASS_G;
   prefs_.end();
@@ -449,6 +460,7 @@ void storeFactor() {
 void publish() {
   Snapshot s{};
   s.window = window_n_;
+  s.decimals = decimals_;
   s.calMassG = calMass_;
   s.countsPerGram = countsPerGram_;
   s.calibrated = countsPerGram_ > 0.0f;
@@ -519,6 +531,31 @@ void serviceCommands() {
       const uint16_t sps = cell_[0].sps() ? cell_[0].sps() : 10;
       Serial.printf("scale: averaging %u samples (~%u ms at %u SPS), trim %u\n", window_n_,
                     (unsigned)((window_n_ * 1000UL) / sps), sps, windowTrim());
+    }
+  }
+
+  if (wantDecimals_) {
+    const uint8_t d = wantDecimals_;
+    wantDecimals_ = 0;
+    if (d != decimals_) {
+      decimals_ = d;
+      // NOTHING IS CLEARED, unlike a window change: this touches how the number
+      // is printed and not what goes into it, so the filter, the zeros and the
+      // calibration are all still describing the same thing they were a
+      // millisecond ago. The reading changes its last digit and nothing else.
+      prefs_.begin(NVS_NS, false);
+      prefs_.putUChar(KEY_DECIMALS, decimals_);
+      prefs_.end();
+      // The resolution is quoted against the MEASURED sensitivity rather than
+      // the bench figure, so a unit calibrated to its own cells says what its
+      // own last digit is worth. An uncalibrated unit has no grams to quote.
+      if (countsPerGram_ > 0.0f) {
+        const long stepG = (decimals_ == 1) ? 100L : (decimals_ == 2) ? 10L : 1L;
+        Serial.printf("scale: reading -> %u decimals (%ld g per step, ~%.1f counts)\n",
+                      decimals_, stepG, (double)(stepG * countsPerGram_));
+      } else {
+        Serial.printf("scale: reading -> %u decimals\n", decimals_);
+      }
     }
   }
 
@@ -1009,6 +1046,27 @@ void setWindow(uint8_t n) {
     }
   }
   wantWindow_ = best;
+}
+
+uint8_t decimals() { return decimals_; }
+
+void setDecimals(uint8_t d) {
+  if (d < DECIMAL_CHOICES[0]) d = DECIMAL_CHOICES[0];
+  if (d > DECIMAL_CHOICES[DECIMAL_CHOICE_COUNT - 1])
+    d = DECIMAL_CHOICES[DECIMAL_CHOICE_COUNT - 1];
+  wantDecimals_ = d;
+}
+
+uint8_t cycleDecimals() {
+  // Reads the PENDING value if one is queued, so two quick taps step twice
+  // rather than both stepping off the same starting point -- the same reason
+  // cycleWindow() does, and the same bug if it did not: on a panel this slow to
+  // register a tap, a double tap is a normal thing for a person to do.
+  const uint8_t from = wantDecimals_ ? wantDecimals_ : decimals_;
+  const uint8_t next =
+      (from >= DECIMAL_CHOICES[DECIMAL_CHOICE_COUNT - 1]) ? DECIMAL_CHOICES[0] : (uint8_t)(from + 1);
+  wantDecimals_ = next;
+  return next;
 }
 
 uint8_t cycleWindow() {

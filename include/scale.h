@@ -116,6 +116,56 @@ uint8_t cycleWindow();
 // smeared through it. A plain mean cannot do that; a mean of the middle can.
 uint8_t windowTrim();
 
+// --- how many decimals the reading carries ---------------------------------
+// 0.0 kg, 0.00 kg or 0.000 kg. DISPLAY ONLY: nothing computes from it, the
+// stored counts and the calibration are untouched, and the Diagnose page keeps
+// its full three places whatever this says.
+//
+// IT IS A SETTING BECAUSE THE HONEST ANSWER DEPENDS ON THE ASSEMBLY, not on the
+// converter. At the bench figure of ~104 counts/g, a still platform's
+// peak-to-peak runs 60 to 160 counts -- somewhere between half a gram and a
+// gram and a half. So the third decimal of a kilogram is at or below this
+// hardware's own noise: it is a digit that will not sit still, and a digit that
+// will not sit still reads as a broken scale rather than as a precise one. The
+// second decimal is clear of it with room to spare. The first throws away
+// resolution the cells genuinely have.
+//
+// Which of those is right depends on what is being weighed and how steady the
+// bench is, which is a judgement about the job. So the device asks instead of
+// choosing, and defaults to what it has always shown.
+//
+// Rounding, never truncation -- see formatKg() in ui_weight.cpp. Truncating
+// would make a scale that reads consistently light, and by up to a whole unit
+// of the last place shown.
+// BOWLSTACK_DECIMALS IS A BUILD FLAG FOR THE SAME REASON THE WINDOW IS ONE: the
+// desktop preview cannot include this header -- src/ui/ is pure LVGL and this
+// reaches nau7802.h and Arduino behind it -- so a shared default has to travel
+// as a -D that both environments carry. CLAUDE.md's rule is that anything the
+// UI renders comes from a shared fixture or a genuinely platform-specific
+// source, and "what the Precision row says before anybody touches it" is
+// emphatically the first kind. A literal 3 typed into ui_demo.cpp would be the
+// third category, and the third category is how the simulator stops being
+// evidence.
+#ifndef BOWLSTACK_DECIMALS
+#define BOWLSTACK_DECIMALS 3
+#endif
+static_assert(BOWLSTACK_DECIMALS >= 1 && BOWLSTACK_DECIMALS <= 3,
+              "BOWLSTACK_DECIMALS must be 1, 2 or 3");
+
+static const uint8_t DECIMAL_CHOICES[] = {1, 2, 3};
+static const uint8_t DECIMAL_CHOICE_COUNT = 3;
+static const uint8_t DECIMALS_DEFAULT = BOWLSTACK_DECIMALS;
+
+uint8_t decimals();
+
+// Clamped into range rather than accepted verbatim, for the same reason
+// setWindow() snaps: the menu can only produce legal values, but a provisioning
+// script must not be able to put the display somewhere the UI cannot describe.
+void setDecimals(uint8_t d);
+
+// Steps 1 -> 2 -> 3 -> 1, for a menu row that is tapped. Returns the new value.
+uint8_t cycleDecimals();
+
 // --- the automatic power-up tare -------------------------------------------
 // WHAT IT IS FOR: a serving station is powered up with whatever tray or pot is
 // already sitting on it, and asking somebody to remember to press Tare before
@@ -190,7 +240,8 @@ struct Snapshot {
   float countsPerGram;
   bool calibrated;
 
-  uint8_t window;   // samples currently averaged
+  uint8_t window;    // samples currently averaged
+  uint8_t decimals;  // decimal places the kilogram reading is shown to
   float calMassG;   // reference mass last calibrated against
   uint8_t online;  // cells currently producing conversions
   bool zeroed;     // every online cell has a stored platform zero

@@ -279,6 +279,7 @@ void publishScale(uint32_t nowMs) {
   s.scale.overRange = sn.overRange;
   s.scale.countsPerGram = sn.countsPerGram;
   s.scale.window = sn.window;
+  s.scale.decimals = sn.decimals;
   s.scale.zeroed = sn.zeroed;
   s.scale.calMassG = sn.calMassG;
 
@@ -392,6 +393,10 @@ void onCycleAvg() {
   Serial.printf("ui: averaging -> %u samples\n", scale::cycleWindow());
 }
 
+void onCyclePrecision() {
+  Serial.printf("ui: reading -> %u decimals\n", scale::cycleDecimals());
+}
+
 void onClearCal() {
   Serial.println("ui: calibration cleared");
   scale::clearCalibration();
@@ -445,6 +450,10 @@ void serviceConsole() {
       case 'W':
         Serial.printf("\n> averaging -> %u samples\n", scale::cycleWindow());
         break;
+      case 'd':
+      case 'D':
+        Serial.printf("\n> reading -> %u decimals\n", scale::cycleDecimals());
+        break;
       case '?':
         Serial.println(
             "\n  t  tare BOTH cells at whatever is on the platform NOW\n"
@@ -453,6 +462,8 @@ void serviceConsole() {
             "     Calibrate on the panel to type a different one\n"
             "  x  clear the calibration and go back to counts\n"
             "  w  step the moving average 8 -> 16 -> 32 -> 64 -> 128 -> 8\n"
+            "  d  step the reading 0.0 -> 0.00 -> 0.000 kg -> 0.0 (display only;\n"
+            "     Diagnose keeps all three places whatever this says)\n"
             "\n  Order matters: tare on an EMPTY platform, then put the mass on,\n"
             "  wait for the reading to settle, then calibrate.\n"
             "\n  a and b are the SETUP tools: zeroing one corner against the other\n"
@@ -598,6 +609,7 @@ void setup() {
   ui::weightOnTare(onTareBoth);
   ui::pagesOnScaleClearCal(onClearCal);
   ui::pagesOnScaleCycleAvg(onCycleAvg);
+  ui::pagesOnScaleCyclePrecision(onCyclePrecision);
   ui::pagesOnScaleRestore(onRestoreDefault);
   ui::pagesOnScalePlatformZero(onPlatformZero);
   ui::calibOnApply(onCalibApply);
@@ -606,7 +618,9 @@ void setup() {
   ui::calibSetMass(scale::calMass());
 
   ui::buildPages();
-  Serial.println("  console: t = tare both, a/b = tare one, c = calibrate, x = clear, ? = help");
+  Serial.println(
+      "  console: t = tare both, a/b = tare one, c = calibrate, x = clear,\n"
+      "           w = average, d = decimals, ? = help");
   Serial.println("  home = weight; gear button (or swipe LEFT) for the menu,");
   Serial.println("  house button at the same spot to come back:");
   Serial.println("    Settings -> WiFi, Battery, Scale (tare / calibrate)");

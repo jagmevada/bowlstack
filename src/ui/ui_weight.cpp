@@ -87,16 +87,34 @@ void setTotalColor(uint32_t rgb) {
   lv_obj_set_style_text_color(lblTotal, lv_color_hex(rgb), LV_PART_MAIN);
 }
 
-// Kilograms to three decimals, from an integer gram value.
+// Kilograms to `decimals` places (1, 2 or 3), from a gram value.
 //
-// lroundf on the GRAM figure and then an integer split, rather than "%.3f" on
-// the float: printf rounds in binary and 1.0005 is not representable, so the
-// last digit could disagree with the same value shown elsewhere from the same
-// counts.
-void formatKg(char *buf, uint32_t len, float grams) {
-  const long mg = (long)lroundf(grams);
-  const long a = mg < 0 ? -mg : mg;
-  snprintf(buf, len, "%s%ld.%03ld", mg < 0 ? "-" : "", a / 1000L, a % 1000L);
+// lroundf and then an integer split, rather than "%.*f" on the float: printf
+// rounds in binary and 1.0005 is not representable, so the last digit could
+// disagree with the same value shown elsewhere from the same counts.
+//
+// THE ROUNDING HAPPENS AT THE DISPLAYED PLACE, not at the gram and then again
+// at the print. Rounding twice is how 1.4996 kg becomes 1.500 becomes 1.50 --
+// each step defensible, the pair of them wrong. So the gram figure is divided
+// by the size of one displayed step and rounded ONCE:
+//
+//     decimals   step     249 g reads
+//     1          100 g    0.2 kg
+//     2           10 g    0.25 kg
+//     3            1 g    0.249 kg
+//
+// And it is ROUNDING, not truncation. Truncating would build a scale that
+// reads consistently light -- by up to a whole unit of the last place shown,
+// which at one decimal is 99 g of food that nobody is charged for.
+void formatKg(char *buf, uint32_t len, float grams, uint8_t decimals) {
+  if (decimals < 1) decimals = 1;
+  if (decimals > 3) decimals = 3;
+  const long perKg = (decimals == 1) ? 10L : (decimals == 2) ? 100L : 1000L;
+  const long gramsPerStep = 1000L / perKg;  // 100, 10, 1
+  const long steps = (long)lroundf(grams / (float)gramsPerStep);
+  const long a = steps < 0 ? -steps : steps;
+  snprintf(buf, len, "%s%ld.%0*ld", steps < 0 ? "-" : "", a / perKg, (int)decimals,
+           a % perKg);
 }
 
 }  // namespace
@@ -268,7 +286,7 @@ void updateWeight(const State &st) {
     setTotalColor(C_MUTED);
     setIfChanged(lblCaption, prevCaption_, sizeof(prevCaption_), "total");
   } else {
-    if (s.calibrated) formatKg(buf, sizeof(buf), s.totalGrams);
+    if (s.calibrated) formatKg(buf, sizeof(buf), s.totalGrams, s.decimals);
     else snprintf(buf, sizeof(buf), "%ld", (long)s.totalCounts);
     setIfChanged(lblTotal, prevTotal_, sizeof(prevTotal_), buf);
     setIfChanged(lblUnit, prevUnit_, sizeof(prevUnit_), s.calibrated ? "kg" : "cts");

@@ -67,6 +67,7 @@ uint8_t depth_ = 0;
 void (*onTare_)(void) = nullptr;
 void (*onClearCal_)(void) = nullptr;
 void (*onCycleAvg_)(void) = nullptr;
+void (*onCyclePrecision_)(void) = nullptr;
 void (*onRestore_)(void) = nullptr;
 void (*onPlatformZero_)(void) = nullptr;
 
@@ -84,7 +85,13 @@ lv_obj_t *scaleMenu_ = nullptr;
 // positions next to the rows themselves does not make that impossible, but it
 // puts the two things a reader has to keep in step within a screen of each
 // other.
-enum : uint8_t { ROW_SET_WIFI = 0, ROW_SET_BATTERY, ROW_SET_SCALE, ROW_SET_DIAGNOSE };
+enum : uint8_t {
+  ROW_SET_WIFI = 0,
+  ROW_SET_BATTERY,
+  ROW_SET_SCALE,
+  ROW_SET_DIAGNOSE,
+  ROW_SET_PRECISION,
+};
 enum : uint8_t {
   ROW_SCALE_TARE = 0,
   ROW_SCALE_PLATFORM_ZERO,
@@ -97,6 +104,7 @@ enum : uint8_t {
 void doTare() { if (onTare_) onTare_(); }
 void doClearCal() { if (onClearCal_) onClearCal_(); }
 void doCycleAvg() { if (onCycleAvg_) onCycleAvg_(); }
+void doCyclePrecision() { if (onCyclePrecision_) onCyclePrecision_(); }
 void doRestore() { if (onRestore_) onRestore_(); }
 void doPlatformZero() { if (onPlatformZero_) onPlatformZero_(); }
 
@@ -282,6 +290,18 @@ void buildPages() {
   // and none of it belongs on a screen read at a glance by somebody carrying a
   // bowl; it is read deliberately, by somebody who came looking for it.
   menuAddRow(settingsMenu_, "Diagnose", nullptr, openDevice);
+  // PRECISION SITS HERE, BESIDE THE PAGE THAT IGNORES IT. Diagnose always shows
+  // three decimals -- it is the page you open when you distrust the number, and
+  // rounding the evidence to match the dashboard would be the wrong favour. So
+  // this row changes the DASHBOARD's last digit only, and its neighbour is the
+  // place to go when you want the unrounded figure back.
+  //
+  // A cycling row for the same reason Average is one: three ordered values, and
+  // the way you choose between them is to flip with a mass on the platform and
+  // watch which one holds still. The hint shows the format itself rather than
+  // the digit count, because "0.00 kg" answers the question the row asks and
+  // "2" needs translating first.
+  menuAddRow(settingsMenu_, "Precision", nullptr, doCyclePrecision);
 
   // The Scale page is three rows rather than a screen of its own, which is the
   // whole reason ui_menu exists: adding a setting is adding a row. Tare is
@@ -354,6 +374,7 @@ void pagesBack() { back(); }
 void pagesOnScaleTare(void (*cb)(void)) { onTare_ = cb; }
 void pagesOnScaleClearCal(void (*cb)(void)) { onClearCal_ = cb; }
 void pagesOnScaleCycleAvg(void (*cb)(void)) { onCycleAvg_ = cb; }
+void pagesOnScaleCyclePrecision(void (*cb)(void)) { onCyclePrecision_ = cb; }
 void pagesOnScaleRestore(void (*cb)(void)) { onRestore_ = cb; }
 void pagesOnScalePlatformZero(void (*cb)(void)) { onPlatformZero_ = cb; }
 
@@ -385,6 +406,12 @@ void pagesTick(uint32_t nowMs) {
     // The Scale row carries the one fact that decides what the whole dashboard
     // can say: with no calibration there are no grams anywhere in the product.
     menuSetHint(settingsMenu_, ROW_SET_SCALE, s.scale.calibrated ? "" : "uncal");
+    // Built from the setting rather than a lookup table, so a fourth choice
+    // could never be added to scale.h and leave this row describing the third.
+    static char prec[12];
+    const uint8_t d = s.scale.decimals ? s.scale.decimals : 3;
+    snprintf(prec, sizeof(prec), "0.%0*d kg", (int)d, 0);
+    menuSetHint(settingsMenu_, ROW_SET_PRECISION, prec);
   }
   if (scaleMenu_) {
     // The Average row shows the value it will change, which is what makes a

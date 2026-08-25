@@ -55,6 +55,20 @@ void pagesOnScaleClearCal(void (*cb)(void));
 // flipping between two of them with a mass on the platform than by reflashing.
 void pagesOnScaleCycleAvg(void (*cb)(void));
 
+// Steps the dashboard reading between 0.0, 0.00 and 0.000 kg and wraps.
+//
+// DISPLAY ONLY, and deliberately so: it changes how the total is printed, never
+// what was measured. The Diagnose page keeps three decimals whatever this says,
+// so nobody can lose a figure by leaving this on one place.
+//
+// It is a setting because the right answer belongs to the assembly rather than
+// to the converter. At ~104 counts/g a still platform wanders half a gram to a
+// gram and a half, so the third decimal of a kilogram is at or below this
+// hardware's own noise -- a digit that never settles, which reads as a broken
+// scale rather than a precise one. Two places clear it; one throws away
+// resolution the cells have. Which to want is a judgement about the job.
+void pagesOnScaleCyclePrecision(void (*cb)(void));
+
 // Loads the factor the firmware was built with and persists it as this unit's
 // own. It is what lets "Clear calibration" mean cleared: without a deliberate
 // route back to the built-in figure, clearing had to leave the stored key
