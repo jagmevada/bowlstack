@@ -27,8 +27,7 @@ void onRowClicked(lv_event_t *e) {
 
 }  // namespace
 
-lv_obj_t *menuCreate(lv_obj_t *parent, const char *title, void (*onBack)(void),
-                     void (*onHome)(void)) {
+lv_obj_t *menuCreate(lv_obj_t *parent, const char *title, void (*onBack)(void)) {
   lv_obj_set_style_bg_color(parent, lv_color_hex(C_BG), LV_PART_MAIN);
   lv_obj_set_style_bg_opa(parent, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_set_style_pad_all(parent, 6, LV_PART_MAIN);
@@ -59,27 +58,6 @@ lv_obj_t *menuCreate(lv_obj_t *parent, const char *title, void (*onBack)(void),
     lv_obj_add_event_cb(b, onRowClicked, LV_EVENT_CLICKED, (void *)onBack);
     lv_obj_t *l = lv_label_create(b);
     lv_label_set_text(l, LV_SYMBOL_LEFT);
-    lv_obj_center(l);
-  } else if (onHome) {
-    // A BUTTON RATHER THAN THE SWIPE HINT IT USED TO SHOW. The gesture still
-    // works and this does not replace it -- but a drag on this panel has to be
-    // deliberate to register, because the touch controller is polled at ~30 Hz
-    // through a driver that retries on every read, and a quick flick simply
-    // does not produce enough samples to be read as a drag. Somebody holding a
-    // bowl gets one hand and one attempt.
-    //
-    // It carries the wordmark rather than a house glyph: the splash says DBF,
-    // so the same three letters mean "the front of this device" by the time
-    // anybody reaches this page.
-    lv_obj_t *b = lv_button_create(hdr);
-    lv_obj_set_size(b, 64, 28);
-    lv_obj_set_style_radius(b, 4, LV_PART_MAIN);
-    lv_obj_set_style_bg_color(b, lv_color_hex(C_KEY), LV_PART_MAIN);
-    lv_obj_add_event_cb(b, onRowClicked, LV_EVENT_CLICKED, (void *)onHome);
-    lv_obj_t *l = lv_label_create(b);
-    lv_obj_set_style_text_font(l, &lv_font_montserrat_16, LV_PART_MAIN);
-    lv_obj_set_style_text_color(l, lv_color_hex(C_TEXT), LV_PART_MAIN);
-    lv_label_set_text(l, "DBF");
     lv_obj_center(l);
   } else {
     lv_obj_t *l = lv_label_create(hdr);

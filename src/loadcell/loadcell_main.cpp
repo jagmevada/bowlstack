@@ -199,7 +199,7 @@ void bootSplash() {
   gfx.setTextColor(TFT_WHITE, TFT_BLACK);
   // A REAL TYPEFACE, NOT THE 5x7 GLCD FONT SCALED UP, which is what made this
   // read as dot matrix: LovyanGFX's default is a 5-by-7 bitmap, and every pixel
-  // of it becomes a visible square the moment it is enlarged. DejaVu40 is drawn
+  // of it becomes a visible square the moment it is enlarged. DejaVu is drawn
   // at its native size from properly shaped glyphs, so the strokes are strokes
   // rather than stacks of dots.
   //
@@ -212,9 +212,41 @@ void bootSplash() {
   //
   // If the shapes alone are not enough, the fix is to hand the splash to LVGL
   // as well and accept a beat of black at power-on.
-  gfx.setFont(&fonts::DejaVu40);
+  // THREE LINES: who made it, which unit this is, and what it is running. That
+  // is the whole job of a splash on a device that will be one of many -- the
+  // last two are the first things anybody asks about a unit that is
+  // misbehaving, and this is the only screen that shows them without navigating.
+  //
+  // The id and version come from the build flags rather than being typed here,
+  // so the splash cannot disagree with what the console prints or with what the
+  // Diagnose page reports.
+  //
+  // DejaVu18, because LovyanGFX ships DejaVu at 9/12/18/24/40/56/72 and there is
+  // no 20. 18 is the neighbour below it.
+  //
+  // THE BLOCK IS ANCHORED TO THE BOTTOM EDGE, not hung off the logo. Growing it
+  // downward from the logo pushed the text toward the panel edge as lines were
+  // added and crowded the artwork as they were removed; anchoring it to the
+  // bottom instead means the logo keeps its air whatever the block does, and a
+  // fourth line would eat into the gap rather than run off the screen. With
+  // three lines the text starts at y=257 and the logo ends at y=212, so there
+  // are 45 px of black between them.
+  gfx.setFont(&fonts::DejaVu18);
   gfx.setTextDatum(middle_center);
-  gfx.drawString("DBF", gfx.width() / 2, (gfx.height() + LOGO128_H) / 2 + 10);
+  {
+    const char *const lines[] = {"Unodari", BOWLSTACK_DEVICE_ID,
+                                 BOWLSTACK_FW_VERSION};
+    const int32_t nLines = (int32_t)(sizeof(lines) / sizeof(lines[0]));
+    const int32_t LINE_H = 22;   // 18 px of glyph plus 4 of leading
+    const int32_t MARGIN = 8;    // black below the last line
+    const int32_t cx = gfx.width() / 2;
+    // middle_center, so this is the CENTRE of the first line: the last line's
+    // centre sits MARGIN + half a line above the bottom, and the rest stack up
+    // from there.
+    int32_t y = gfx.height() - MARGIN - LINE_H / 2 - LINE_H * (nLines - 1);
+    for (int32_t i = 0; i < nLines; i++, y += LINE_H)
+      gfx.drawString(lines[i], cx, y);
+  }
   gfx.setTextDatum(top_left);
   gfx.setFont(&fonts::Font0);
   delay(1200);
@@ -571,7 +603,8 @@ void setup() {
 
   ui::buildPages();
   Serial.println("  console: t = tare both, a/b = tare one, c = calibrate, x = clear, ? = help");
-  Serial.println("  home = weight; swipe LEFT for the menu:");
+  Serial.println("  home = weight; gear button (or swipe LEFT) for the menu,");
+  Serial.println("  house button at the same spot to come back:");
   Serial.println("    Settings -> WiFi, Battery, Scale (tare / calibrate)");
   Serial.println("    Sensors  -> live cell scope, both traces + frame rate");
 
