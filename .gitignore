@@ -21,3 +21,19 @@ include/secret*.h
 
 # Generated from logo512x512.png; the committed artefact is include/logo128.h
 logo128.png
+
+# GENERATED FROM include/secret.h AND HOLDS THE LIVE ANON KEY. Its own header
+# has always said "Gitignored" -- nothing here actually matched it, so it was
+# untracked by luck rather than by rule, and one `git add web/` would have put
+# a live key in the history. That has happened in this repo once already; see
+# the include/secret*.h note above. config.example.js is the committed template.
+web/config.js
+
+# Third-party, 25 MB, and reproducible from package-lock.json.
+node_modules/
+
+# Reference material for the water-dispenser port: the 4.3B schematic PDF and
+# the two handoff specs. Kept out of the repo at the owner's request -- they
+# live in the working copy, not in the history, so they are NOT carried onto
+# the dispenser branch either.
+docs/Flowmeter kickstart/
