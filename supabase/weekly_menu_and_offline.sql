@@ -622,52 +622,41 @@ select d.device_id,
         and m.meal_date = public.current_meal_date(d.timezone)
         and m.meal_type = public.current_meal_type(d.timezone);
 
+-- SYNCED FROM schema.sql, VERBATIM apart from the CREATE OR REPLACE.
+-- This copy had drifted three columns behind -- bowl_weight_g, buffer_g and
+-- weight_g -- which is not a cosmetic difference: CREATE OR REPLACE VIEW may
+-- only APPEND columns, so running this file against a current database failed
+-- outright with 42P16 and rolled back everything in the transaction with it,
+-- while the header two hundred lines up promised it was safe on live. Second
+-- time this file has broken that promise by holding a stale copy of something
+-- schema.sql also defines; verify.mjs case 11 now fingerprints it.
 create or replace view public.slot_overview
 with (security_invoker = true) as
 select d.location,
        d.food_slot,
        max(m.food_name)                                        as current_food,
        public.current_meal_type(max(d.timezone))               as current_meal,
-
-       -- STACKS ONLY, and the filter is load-bearing. A load cell may share a
-       -- served position -- (location, food_slot) is deliberately not unique --
-       -- and counting it here would claim four more bowls of capacity that no
-       -- bowl counter is watching. The numerator would stay RIGHT the whole
-       -- time, because a scale writes NULL to stack_count and is already
-       -- excluded from the sum below, so the bar would simply read low forever:
-       -- 9 of 16 where the truth is 9 of 12. A wrong denominator under a
-       -- correct numerator is the hardest kind of wrong to notice.
        count(*) filter (where d.kind = 'stack')                as devices,
        count(*) filter (where d.kind = 'stack'
                           and coalesce(s.reported, false))     as devices_reported,
 
-       -- Ceiling for this slot, so a progress bar need not hardcode one. If a
-       -- fourth stack joins Darshanarthi slot 1 the achievable total rises, and a
-       -- UI with "max 12" baked in would misreport the busiest position in the
-       -- hall.
        (count(*) filter (where d.kind = 'stack') * 4)::bigint  as bowls_capacity,
 
-       -- The trustworthy total. NULL, not 0, when no device reported: no data is
-       -- not an empty counter, and the two send staff to do opposite things.
        sum(s.stack_count) filter (where s.stack_status = 'ok') as bowls_trusted,
        sum(s.stack_count)                                      as bowls_reported,
 
        bool_or(s.stack_status = 'discontiguous')               as any_fault,
        bool_or(s.stack_status = 'degraded')                    as any_degraded,
-       -- NOT filtered by kind, unlike the counts above. A load cell has a
+       -- Battery and liveness are NOT filtered by kind. A load cell has a
        -- battery and can go dark exactly like a stack, and a slot whose scale
        -- is flat is a slot that needs somebody -- so these keep meaning "any
-       -- device at this position", which is what they already said.
+       -- device here", which is what they already said.
        bool_or(s.battery_level in ('low','critical'))          as any_battery_warn,
        bool_or(coalesce(s.reported, false)
                and public.in_service_window(now(), d.timezone, d.device_id)
                and s.updated_at < now() - public.offline_after()) as any_offline,
        min(s.updated_at)                                       as oldest_update,
 
-       -- Some stack at this position slept through the last completed
-       -- window. The stock screen keeps the last count but must say it is
-       -- last-known, not live. Appended last -- see device_overview, whose
-       -- deployment gate is restated here so the two cannot drift.
        bool_or(coalesce(coalesce(s.reported, false)
                and d.location in ('D','M','T')
                and d.food_slot is not null
@@ -676,19 +665,42 @@ select d.location,
                      - public.offline_after(),
                false))                                         as any_missed_service,
 
-       -- What the load cells at this position say. NULL rather than 0 when
-       -- none has a usable weight -- sum() over an empty filter is NULL, which
-       -- is the answer we want and the distinction the whole schema turns on.
+       -- Appended: what the scales at this position say. NULL rather than 0
+       -- when none of them has a usable weight -- sum() over an empty filter
+       -- is NULL, which is the answer we want.
        count(*) filter (where d.kind = 'scale')                as scales,
        count(*) filter (where d.kind = 'scale'
                           and s.weight_state = 'ok')           as scales_ok,
        sum(s.weight_g) filter (where d.kind = 'scale'
                                  and s.weight_state = 'ok')    as measured_weight_g,
-       -- Why a scale here is NOT contributing, so the screen can name the
-       -- fault rather than show a silently smaller total. 'ok' is removed
-       -- because it is not an issue.
+       -- Why any scale here is NOT contributing a weight, so the screen can
+       -- name the fault instead of showing a silently smaller total. 'ok' is
+       -- removed because it is not an issue.
        array_remove(array_agg(distinct s.weight_state)
-                    filter (where d.kind = 'scale'), 'ok')     as scale_issues
+                    filter (where d.kind = 'scale'), 'ok')     as scale_issues,
+
+       -- THE SAME ARITHMETIC slot_quantity DOES, one grouping down. Stock is
+       -- per HALL per position where Master is per position across halls, and
+       -- both screens must answer "how much food is here" with the same
+       -- number -- so the sum is computed once per row here rather than in the
+       -- client, which is the rule slot_overview already follows for bowls.
+       max(m.bowl_weight_g)                                    as bowl_weight_g,
+       (sum(s.stack_count) filter (where s.stack_status = 'ok'))
+         * max(m.bowl_weight_g)                                as buffer_g,
+       -- coalesce per TERM, never on the sum: a position with a counter and no
+       -- valued buffer has a real total, and so does the reverse. NULL only
+       -- when neither term exists -- which for this view means the dish has no
+       -- per-bowl weight AND no scale is reporting, and the card falls back to
+       -- showing bowls.
+       case when max(m.bowl_weight_g) is null
+                 and sum(s.weight_g) filter (where d.kind = 'scale'
+                                               and s.weight_state = 'ok') is null
+            then null
+            else coalesce((sum(s.stack_count) filter (where s.stack_status = 'ok'))
+                            * max(m.bowl_weight_g), 0)
+               + coalesce(sum(s.weight_g) filter (where d.kind = 'scale'
+                                                    and s.weight_state = 'ok'), 0)
+       end                                                     as weight_g
   from public.devices d
   left join public.device_status s using (device_id)
   left join public.meal_food_mapping m

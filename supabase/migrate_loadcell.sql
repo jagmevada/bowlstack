@@ -819,11 +819,12 @@ grant select on public.slot_quantity to authenticated;
 
 comment on view public.slot_quantity is
   'Master Dashboard source: quantity per dish position across every serving '
-  'area, in grams. weight_g is the authoritative figure and applies the '
-  'measured-beats-estimated rule PER AREA; est_weight_g and measured_weight_g '
-  'are the two inputs, kept so a screen can say which it is showing. '
-  'weight_mismatch flags a position where both exist and disagree beyond '
-  'weight_mismatch_tolerance() -- a miscalibrated cell or a wrong per-bowl '
-  'weight, invisible from either number alone.';
+  'area, in grams. weight_g is the authoritative figure and is a SUM: '
+  'buffer_g (bowls waiting, counted x per-bowl weight) plus counter_g (food '
+  'on the scales), because those are different food in different places. It '
+  'was once measured-beats-estimated per area, which discarded a hall''s '
+  'whole buffer whenever a scale there happened to read empty. est_weight_g '
+  'and measured_weight_g are the two inputs, kept so a screen can say which '
+  'part it is showing.';
 
 commit;

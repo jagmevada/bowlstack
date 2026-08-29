@@ -936,7 +936,30 @@ select d.location,
        -- name the fault instead of showing a silently smaller total. 'ok' is
        -- removed because it is not an issue.
        array_remove(array_agg(distinct s.weight_state)
-                    filter (where d.kind = 'scale'), 'ok')     as scale_issues
+                    filter (where d.kind = 'scale'), 'ok')     as scale_issues,
+
+       -- THE SAME ARITHMETIC slot_quantity DOES, one grouping down. Stock is
+       -- per HALL per position where Master is per position across halls, and
+       -- both screens must answer "how much food is here" with the same
+       -- number -- so the sum is computed once per row here rather than in the
+       -- client, which is the rule slot_overview already follows for bowls.
+       max(m.bowl_weight_g)                                    as bowl_weight_g,
+       (sum(s.stack_count) filter (where s.stack_status = 'ok'))
+         * max(m.bowl_weight_g)                                as buffer_g,
+       -- coalesce per TERM, never on the sum: a position with a counter and no
+       -- valued buffer has a real total, and so does the reverse. NULL only
+       -- when neither term exists -- which for this view means the dish has no
+       -- per-bowl weight AND no scale is reporting, and the card falls back to
+       -- showing bowls.
+       case when max(m.bowl_weight_g) is null
+                 and sum(s.weight_g) filter (where d.kind = 'scale'
+                                               and s.weight_state = 'ok') is null
+            then null
+            else coalesce((sum(s.stack_count) filter (where s.stack_status = 'ok'))
+                            * max(m.bowl_weight_g), 0)
+               + coalesce(sum(s.weight_g) filter (where d.kind = 'scale'
+                                                    and s.weight_state = 'ok'), 0)
+       end                                                     as weight_g
   from public.devices d
   left join public.device_status s using (device_id)
   left join public.meal_food_mapping m
@@ -1028,7 +1051,11 @@ grant execute on function public.weight_mismatch_tolerance() to authenticated;
 --    would flag every mixed slot: one measured hall against a total that
 --    includes estimated halls is not a comparison, it is two different sums.
 -- ---------------------------------------------------------------------
-create or replace view public.slot_quantity
+-- DROPPED, not replaced: this removes weight_source and the three mismatch
+-- columns, and CREATE OR REPLACE VIEW may only append.
+drop view if exists public.slot_quantity;
+
+create view public.slot_quantity
 with (security_invoker = true) as
 with per_area as (
   select d.location,
@@ -1117,59 +1144,60 @@ per_area_w as (
                and p.bowls_trusted is not null
               then p.bowls_trusted::bigint * p.bowl_weight_g
          end                                                     as est_line_g,
-         -- THE PRECEDENCE RULE. Measured first, estimated second, NULL when
-         -- this hall can offer neither.
-         coalesce(p.measured_weight_g,
-                  case when p.bowl_weight_g is not null
-                       then coalesce(p.bowls_trusted, 0)::bigint * p.bowl_weight_g
-                  end)                                           as weight_total_g,
-         coalesce(p.measured_weight_g,
-                  case when p.bowl_weight_g is not null
-                        and p.bowls_trusted is not null
-                       then p.bowls_trusted::bigint * p.bowl_weight_g
-                  end)                                           as weight_line_g,
-         case when p.measured_weight_g is not null then 'measured'
-              when p.bowl_weight_g is not null     then 'estimated'
-         end                                                     as weight_source
+         -- ADDED, NOT CHOSEN, and this replaced a precedence rule that was
+         -- simply wrong about the hardware.
+         --
+         -- The two terms are DIFFERENT FOOD IN DIFFERENT PLACES: the stack
+         -- counts bowls held in reserve, the platform weighs what is on the
+         -- serving counter. Neither substitutes for the other, so picking one
+         -- discards the other.
+         --
+         -- Measured on the live database the evening this was found: D/1 held
+         -- two buffered bowls at 18 kg each and an empty counter, and Master
+         -- reported 18.0 kg for the slot instead of 54.0 kg -- because a scale
+         -- was present and reading zero, so "measured beats estimated" threw
+         -- away 36 kg of real food. A kitchen reading that number orders more
+         -- rice it already has.
+         --
+         -- NULL only when NEITHER term exists. coalesce per TERM rather than
+         -- on the sum, so a hall with a counter and no valued buffer still has
+         -- a total, and so does the reverse.
+         case when p.measured_weight_g is null and p.bowl_weight_g is null
+              then null
+              else coalesce(p.measured_weight_g, 0)
+                 + coalesce(case when p.bowl_weight_g is not null
+                                 then coalesce(p.bowls_trusted, 0)::bigint * p.bowl_weight_g
+                            end, 0)
+         end                                                     as weight_total_g,
+         case when p.measured_weight_g is null
+               and (p.bowl_weight_g is null or p.bowls_trusted is null)
+              then null
+              else coalesce(p.measured_weight_g, 0)
+                 + coalesce(case when p.bowl_weight_g is not null
+                                  and p.bowls_trusted is not null
+                                 then p.bowls_trusted::bigint * p.bowl_weight_g
+                            end, 0)
+         end                                                     as weight_line_g
     from per_area p
 ),
--- THE MISMATCH IS PER AREA, and that is the whole of note C. A miscalibrated
--- cell is a fault in ONE hall's instrument; comparing slot TOTALS averages it
--- into the halls that are fine and hides it.
+-- THE MISMATCH CHECK IS GONE, and its removal is the point worth recording.
 --
--- Measured on the demo fixture, which is what caught this: a Tiffin scale
--- reading 35% heavy at a position also served by Darshanarthi and Mahatma moved
--- the slot total by 7%, comfortably inside a 25% band -- so the slot looked
--- healthy and the broken cell was invisible. Flagged per area it is obvious,
--- and the area can be NAMED, which is the difference between "something here
--- disagrees" and "go and look at Tiffin's".
+-- It compared each hall's measured counter weight against its bowls-times-
+-- weight estimate and flagged a disagreement as a miscalibrated cell or a
+-- wrong menu figure. That reasoning assumed the two describe the SAME food.
+-- They do not: the stack counts bowls held in reserve and the platform weighs
+-- what is on the serving counter, so they are different food in different
+-- places and a difference between them carries no information at all.
 --
--- A third CTE rather than more expressions in the second, because the test
--- needs est_total_g and a SELECT cannot reference its own output aliases.
-per_area_m as (
-  select p.*,
-         -- est_LINE_g, NOT est_total_g, and the difference is the whole
-         -- correctness of this test. est_total_g coalesces a missing
-         -- bowls_trusted to 0 so the slot total can add it up; comparing a
-         -- measurement against that zero says "the scales read 40 kg more than
-         -- the bowl count predicts" about a hall whose stacks have simply gone
-         -- dark -- which is precisely the scale-only case this view exists to
-         -- support. A disagreement needs TWO opinions, and est_line_g is NULL
-         -- when there is only one.
-         (p.measured_weight_g is not null
-          and p.est_line_g is not null
-          and abs(p.measured_weight_g - p.est_line_g) > t.abs_g
-          and abs(p.measured_weight_g - p.est_line_g)
-                > t.frac * greatest(p.est_line_g, 1))            as mismatch,
-         -- Signed, measured MINUS estimated, so the sign says which way round
-         -- it runs: positive means the cells read heavier than the bowl count
-         -- predicts.
-         case when p.measured_weight_g is not null and p.est_line_g is not null
-              then p.measured_weight_g - p.est_line_g
-         end                                                     as mismatch_g
-    from per_area_w p
-   cross join lateral public.weight_mismatch_tolerance() t
-),
+-- What it actually produced, live: D/1 held two buffered bowls at 18 kg and an
+-- empty counter, and the dashboard announced "Darshanarthi's scale disagrees
+-- by 36.0 kg" about two instruments that were both perfectly correct.
+--
+-- A genuine cross-check between the two is possible and is a different
+-- calculation entirely -- it would compare bowls REMOVED from the buffer
+-- against grams ADDED to the counter over the same interval, which does
+-- describe one movement of one lot of food. That needs the derivative of both
+-- series, not their levels, and it is not attempted here.
 -- THE DISTINCT REASONS, AGGREGATED ONCE PER SLOT AND JOINED ONCE.
 --
 -- This used to be `left join lateral unnest(p.scale_issues)` inside per_slot,
@@ -1185,7 +1213,7 @@ per_area_m as (
 slot_issues as (
   select p.food_slot,
          array_agg(distinct i order by i) as scale_issues
-    from per_area_m p
+    from per_area_w p
    cross join lateral unnest(p.scale_issues) as i
    group by p.food_slot
 ),
@@ -1215,18 +1243,32 @@ per_slot as (
          sum(p.bowls_capacity * p.bowl_weight_g)
            filter (where p.bowl_weight_g is not null)            as capacity_weight_g,
 
-         -- A LOWER BOUND, and the test has widened. It used to ask "does some
-         -- hall hold bowls with no per-bowl weight"; it now asks "does some
-         -- hall hold bowls it cannot weigh AT ALL", which is the question it
-         -- was always standing in for. A hall with a load cell has a weight
-         -- even with no menu figure typed, so it stops being counted as
-         -- missing one. With no scales anywhere weight_total_g collapses to
-         -- est_total_g and this is identical to the old behaviour.
+         -- A LOWER BOUND -- but only where a weight is actually OWED.
+         --
+         -- THREE CONDITIONS, and the third was missing. A hall is short a
+         -- weight when it holds bowls, cannot weigh them, AND IS SERVING A
+         -- DISH. Without that last clause a hall that is simply not serving
+         -- this meal got counted as unweighed: breakfast runs at Darshanarthi
+         -- only, so Mahatma held a bowl with no dish against it, and the slot
+         -- reported ">=36.4 kg" with a "Set weight" link pointing at a hall
+         -- where there is nothing to set a weight FOR.
+         --
+         -- The bound was wrong as well as the prompt. ">=" claims there is
+         -- more food than shown; a hall with no dish is not holding
+         -- unmeasured food, so the figure was exact and said it was not.
+         --
+         -- food_name IS the test for "is this hall serving": it comes from
+         -- meal_food_mapping through last_served_meal(), which is the same
+         -- resolution the Menu tab writes and the dish names above are read
+         -- from. A hall with a dish and no kg/bowl still prompts, which is the
+         -- case the prompt exists for.
          bool_or(p.weight_total_g is null
-                 and coalesce(p.bowls_trusted, 0) > 0)           as est_is_partial,
+                 and coalesce(p.bowls_trusted, 0) > 0
+                 and p.food_name is not null)                    as est_is_partial,
          array_remove(array_agg(
            case when p.weight_total_g is null
                  and coalesce(p.bowls_trusted, 0) > 0
+                 and p.food_name is not null
                 then p.location end), null)                      as areas_without_weight,
 
          jsonb_agg(jsonb_build_object(
@@ -1245,7 +1287,6 @@ per_slot as (
            'weight_g',          p.weight_line_g,
            'est_weight_g',      p.est_line_g,
            'measured_weight_g', p.measured_weight_g,
-           'weight_source',     p.weight_source,
            'scales',            p.scales,
            'capacity_weight_g', case when p.bowl_weight_g is not null
                                      then p.bowls_capacity * p.bowl_weight_g end
@@ -1263,31 +1304,13 @@ per_slot as (
          sum(p.measured_weight_g)                                as measured_weight_g,
          sum(p.weight_total_g)                                   as weight_g,
 
-         case
-           when count(*) filter (where p.weight_source is not null) = 0
-             then null
-           when count(*) filter (where p.weight_source = 'measured')
-              = count(*) filter (where p.weight_source is not null)
-             then 'measured'
-           when count(*) filter (where p.weight_source = 'estimated')
-              = count(*) filter (where p.weight_source is not null)
-             then 'estimated'
-           else 'mixed'
-         end                                                     as weight_source,
 
-         -- ANY hall here disagreeing, not the halls averaged together.
-         bool_or(p.mismatch)                                     as weight_mismatch,
-
-         -- Summed over the DISAGREEING halls only, so the figure is the size of
-         -- the problem rather than the size of the problem diluted by the halls
-         -- that are fine.
-         sum(p.mismatch_g) filter (where p.mismatch)             as weight_mismatch_g,
-
-         -- Which halls, so the screen can say "Tiffin's scale" instead of
-         -- "something at slot 4". This is the actionable half.
-         array_remove(array_agg(p.location) filter (where p.mismatch), null)
-                                                                 as weight_mismatch_areas
-    from per_area_m p
+         -- The two pools, kept separate as well as summed, so a screen can
+         -- say "36 kg buffered, nothing on the counter" rather than only the
+         -- total. weight_g above is their sum.
+         sum(p.est_total_g)                                      as buffer_g,
+         sum(p.measured_weight_g)                                as counter_g
+    from per_area_w p
    group by p.food_slot
   having bool_or(p.any_reported)
 )
@@ -1320,13 +1343,11 @@ select q.food_slot,
        q.scales_ok,
        q.measured_weight_g,
        q.weight_g,
-       q.weight_source,
-       q.weight_mismatch_g,
-       q.weight_mismatch,
+       q.buffer_g,
+       q.counter_g,
        -- LEFT joined, one row per slot, so it cannot multiply anything. NULL
        -- when every scale here is healthy, which is the common case.
-       si.scale_issues,
-       q.weight_mismatch_areas
+       si.scale_issues
   from per_slot q
   left join slot_issues si on si.food_slot = q.food_slot
  order by q.food_slot;
@@ -1336,12 +1357,13 @@ grant select on public.slot_quantity to authenticated;
 
 comment on view public.slot_quantity is
   'Master Dashboard source: quantity per dish position across every serving '
-  'area, in grams. weight_g is the authoritative figure and applies the '
-  'measured-beats-estimated rule PER AREA; est_weight_g and measured_weight_g '
-  'are the two inputs, kept so a screen can say which it is showing. '
-  'weight_mismatch flags a position where both exist and disagree beyond '
-  'weight_mismatch_tolerance() -- a miscalibrated cell or a wrong per-bowl '
-  'weight, invisible from either number alone.';
+  'area, in grams. weight_g is the authoritative figure and is a SUM: '
+  'buffer_g (bowls waiting, counted x per-bowl weight) plus counter_g (food '
+  'on the scales), because those are different food in different places. It '
+  'was once measured-beats-estimated per area, which discarded a hall''s '
+  'whole buffer whenever a scale there happened to read empty. est_weight_g '
+  'and measured_weight_g are the two inputs, kept so a screen can say which '
+  'part it is showing.';
 
 -- #####################################################################
 -- ##  PART 3 of 4:  register_loadcells.sql

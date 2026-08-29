@@ -1760,12 +1760,13 @@ select q.food_slot,
 
 comment on view public.slot_quantity is
   'Master Dashboard source: quantity per dish position across every serving '
-  'area, in grams. weight_g is the authoritative figure and applies the '
-  'measured-beats-estimated rule PER AREA; est_weight_g and measured_weight_g '
-  'are the two inputs, kept so a screen can say which it is showing. '
-  'weight_mismatch flags a position where both exist and disagree beyond '
-  'weight_mismatch_tolerance() -- a miscalibrated cell or a wrong per-bowl '
-  'weight, invisible from either number alone.';
+  'area, in grams. weight_g is the authoritative figure and is a SUM: '
+  'buffer_g (bowls waiting, counted x per-bowl weight) plus counter_g (food '
+  'on the scales), because those are different food in different places. It '
+  'was once measured-beats-estimated per area, which discarded a hall''s '
+  'whole buffer whenever a scale there happened to read empty. est_weight_g '
+  'and measured_weight_g are the two inputs, kept so a screen can say which '
+  'part it is showing.';
 
 revoke all on public.device_overview from anon, authenticated, public;
 revoke all on public.slot_overview   from anon, authenticated, public;
@@ -1782,7 +1783,17 @@ commit;
 --       assign_devices.sql      the permanent location/food_slot assignment
 --       seed_meal_mapping.sql   sample menus, for the front-end test bed
 --       reset_spares.sql        restores awaiting_deployment for the reserved 8
---       smoke_test.sql          25 assertions; expect ALL PASS
+--       smoke_test.sql          32 assertions; expect ALL PASS
+--
+--     Then, for the load cells at the serving counter:
+--       apply_loadcell.sql      all four load-cell migrations in ONE
+--                               self-verifying transaction -- it snapshots
+--                               every device, status row and slot_overview
+--                               figure first and RAISES if one moved
+--     or the four separately: migrate_loadcell.sql, register_loadcells.sql,
+--     assign_loadcells.sql, migrate_weight_samples.sql, migrate_burn_rate.sql
+--
+--     whats_installed.sql says which of those a database already has.
 -- ---------------------------------------------------------------------
 
 -- ---------------------------------------------------------------------
