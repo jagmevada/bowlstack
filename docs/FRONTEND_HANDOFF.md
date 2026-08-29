@@ -179,7 +179,32 @@ from index 0. Rendering it as a vertical column is the intuitive view.
 
 A dish carries a **per-bowl weight** alongside its name, and
 `public.slot_quantity` turns bowl counts into kilograms for the Master
-Dashboard. Three rules matter more than the rest.
+Dashboard. Four rules matter more than the rest.
+
+### Buffer and counter ADD; they are not rival estimates
+
+A slot's food sits in two places. Bowls are **buffered** behind the line —
+counted by the BWL stacks, converted to grams through the dish's per-bowl
+weight. Food already **on the counter** is weighed directly by the LDC scales.
+They are different food in different places, so:
+
+```
+weight_g  =  buffer_g  +  counter_g
+```
+
+This is the correction that matters most, because the plausible alternative is
+wrong in the dangerous direction. Preferring the measured figure where one
+exists reads as "trust the instrument" and is what the view originally did — and
+live, Darshanarthi held two buffered bowls at 18 kg beside an empty counter, so
+Master reported **18.0 kg for a position holding 54.0 kg**. A scale reading zero
+erased a hall's entire buffer. Under-ordering against that number is how a
+service runs out.
+
+For the same reason there is **no mismatch check** between the two. One existed;
+it announced *"Darshanarthi's scale disagrees by 36.0 kg"* about two instruments
+that were both perfectly correct. A genuine cross-check is a different
+calculation — bowls *removed* from the buffer against grams *added* to the
+counter — and needs the derivatives, not the levels.
 
 ### Grams, as an integer
 
@@ -225,11 +250,22 @@ exactly to `total_bowls × W`, so nothing is lost.
 | `bowls_trusted` | bowls across all areas, `stack_status = 'ok'` only. NULL, not 0, when nothing reported |
 | `est_weight_g` | the headline, in grams. NULL when no contributing area has a weight |
 | `capacity_weight_g` | the same sum against capacity, so a bar needs no hardcoded ceiling |
-| `est_is_partial` | **the total is a LOWER BOUND** — some area holds bowls that cannot be weighed |
+| `est_is_partial` | **the total is a LOWER BOUND** — some area holds bowls that cannot be weighed. Requires all three: no weight, bowls actually present, **and a dish set at that position** |
 | `areas_without_weight` | which areas, so the UI can name them instead of saying "somewhere" |
 | `areas` | per-hall breakdown as jsonb: location, dish, `bowl_weight_g`, `bowls_trusted`, `bowls_capacity`, `devices`, plus **`weight_g`** — that hall's own mass, computed by the view so no screen re-derives it. NULL when the hall has no weight **or no reading**; never 0 |
 | `menu_meal_type` / `menu_meal_date` | which meal the dishes and weights came from |
 | `menu_is_live` | false when that meal is not the one currently running |
+| `scales` / `scales_ok` | how many load cells serve this slot, and how many are reporting a usable weight |
+| `measured_weight_g` | **counter only** — the sum of the scales. NULL when no scale here has a reading |
+| `buffer_g` / `counter_g` | the two terms of the sum above, named so a screen can break the headline down without re-deriving it |
+| `weight_g` | **the headline.** `buffer_g + counter_g`, NULL only when neither exists |
+| `scale_issues` | jsonb, NULL when every scale here is healthy: which area, which device, which `weight_state`. LEFT joined one row per slot, so it cannot multiply anything |
+
+> **`scale_issues` is a separate CTE for a reason.** It began as
+> `left join lateral unnest(scale_issues)` inside the grouped query, which
+> duplicated each area row once per distinct bad state — devices 6→10, capacity
+> 24→40, and **`bowls_trusted` 4→8**, a doubled stock figure produced by a
+> *fault report*. Smoke assertion 31 is that regression.
 
 There is deliberately **no site-wide total** — rice + dal + curry added
 together is arithmetically fine and operationally meaningless. Quantity is only
@@ -239,6 +275,12 @@ meaningful per dish, so totals stop at the slot.
 already uses for a degraded stack's count, and reusing it beats inventing a
 second vocabulary for "real but incomplete". A total that silently drops an
 unweighed area reads as complete, and a kitchen under-orders against it.
+
+**A hall with no dish at this position owes no weight.** Breakfast runs at
+Darshanarthi only, so Mahatma held a bowl against no dish and the slot reported
+`≥36.4 kg` with a *Set weight* link pointing at a hall with nothing to set a
+weight for. `food_name is not null` is the third condition, and the `≥` was the
+worse half of the bug: it claims more food than it shows, and there was none.
 
 ### Which slots appear
 
@@ -313,6 +355,30 @@ moments up to 5 s apart. Order by `recorded_at`, never by `id` or `received_at`.
 has no clock. It can be meaningfully earlier than `received_at` after a network
 outage — that is correct, not a bug.
 
+### Load cells: `weight_samples`, not `status_events`
+
+A scale cannot append to `status_events` — five of that table's NOT NULL
+columns are bowl-shaped, so it could only do so by fabricating a bowl count.
+Its history is its own table, with the same shape of contract:
+
+```ts
+const { data } = await supabase.from('weight_samples')
+  .select('recorded_at, reason, weight_state, weight_g, cells_online, battery_level')
+  .eq('device_id', 'LDC-001')
+  .gte('recorded_at', since)
+  .order('recorded_at', { ascending: true })
+```
+
+Unlike `status_events` this is **not** change-only: a row lands on a 250 g move
+or a state change, and otherwise every two minutes, so a station that is simply
+sitting there still draws a line. `weight_g` is NULL wherever `weight_state`
+is not `ok`; plot those as gaps, never as zero.
+
+> Change-detection compares against the last **enqueued** sample, not the last
+> **posted** one. Comparing against the posted value while the sampler ran every
+> 250 ms produced nine rows for one bowl — seq 6 through 14 inside two seconds,
+> observed live. There is a 5 s floor underneath it as well.
+
 A worked example of using these fields honestly — the trial dashboard's
 reading-status band derives *silence* from a change-only log like this: a long
 gap that ends in a `reason = 'boot'` row means the device was powered off for
@@ -378,10 +444,44 @@ plan in `meal_menu_template` (per weekday) — see
 [meal_mapping.md](meal_mapping.md) for the full contract, including why the
 views never read the template directly.
 
+### Master view — consumption rate and time-to-empty
+
+`public.slot_burn_rate`, one row per `food_slot`. This is what the load-cell
+product exists for: **which dish is going fastest, and will it last the meal.**
+
+| Column | Meaning |
+|---|---|
+| `total_g` / `buffer_g` / `counter_g` | the level now, same sum as `slot_quantity` |
+| `g_per_hour` | consumption rate. NULL when there is not enough evidence |
+| `runs_out_at` | projected empty, NULL when `g_per_hour` is NULL or ≤ 0 |
+| `short_before_close` | true when `runs_out_at` precedes the end of the window — **the alarm**, and the cue to start a second production run |
+| `is_partial` | the level is a lower bound, so the projection is optimistic |
+| `dishes`, `consumed_g_window` | what, and how much has gone this service |
+
+`public.slot_stock_series` is the same figure over time, for the chart;
+`public.device_burn_rate` is the per-device working.
+
+> **Rate is measured on buffer + counter together**, so carrying bowls from the
+> stack onto the counter reads as *flat* rather than as a serving. Measuring
+> either alone reports a phantom.
+>
+> **Two estimator mistakes, both found by testing rather than by reading.**
+> Summing per-interval *falls* above a 250 g threshold rejected all real
+> consumption: at a 2-minute cadence a station draining 4 kg/h falls 133 g per
+> interval. Lowering the threshold is worse — summing only falls is *biased*,
+> because noise pushes half a flat station's intervals downward and those all
+> count while the matching rises are discarded. It is endpoints within
+> refill-delimited segments now.
+>
+> And `g_per_hour / 60` is **grams** per minute. Labelling that kg/min put
+> "38.60 kg/min" on the screen.
+
 ### Health view
 
 Battery, charging, `sensors_online`, `firmware`, `offline`,
-`awaiting_deployment`. This is what lets the kitchen in-charge tell the service
+`awaiting_deployment`. For a scale the sensor line is **weight and cell
+count**, not a stack of four levels — `kind` picks which, and a scale rendered
+with `f1..f4` is the usual symptom of forgetting it. This is what lets the kitchen in-charge tell the service
 counter in-charge which station needs attention — so sort by severity, not by
 device ID. (The trial dashboard renders this as a symbolic roster — one glyph
 line per device — with the sentences on each device's own page.)

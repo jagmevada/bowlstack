@@ -4,15 +4,23 @@
 
 ## Resume here — `loadcell` branch
 
-**Two NAU7802 on two buses, feeding the same UI. RUNNING AND CALIBRATED.** Both
-cells read, both respond to load, the dashboard shows kilograms. Nothing is
-published upstream.
+**Three NAU7802 behind a TCA9548A, feeding the same UI. RUNNING AND
+CALIBRATED.** All three cells read, all three respond to load, the dashboard
+shows kilograms. Nothing is published upstream yet.
+
+**Connectivity is now wired rather than demonstrated.** The station joins the
+strongest known network at boot without a finger on the glass, remembers a
+network commissioned from the panel across power cycles, and reconnects on its
+own; the battery band comes from the hysteresed `battery::Monitor` the discrete
+product ships rather than from three bare comparisons; and charge state is
+reported unknown because the firmware says so. See the top of
+`src/bringup/bringup_wifi.cpp` for why WiFiManager is *not* part of that.
 
 ### Measured on the board
 
 | | |
 | --- | --- |
-| cells | 79 SPS each against 80 configured; p-p 200–500 counts |
+| cells | 9–10 SPS each against 10 configured; p-p 120–180 counts |
 | **sensitivity** | **106.857 counts/g** — 18,700 counts for a 175 g reference |
 | dashboard | **13 fps, ui 62%**; `ui 2%` when the reading is steady |
 | free heap | ~126 kB; LVGL pool 52k/89k, 1–3% fragmentation |
@@ -62,8 +70,8 @@ Every action exists in two places, and they call the same function:
 
 | console | screen | does |
 |---|---|---|
-| `t` | Settings → Scale → Tare | zero both cells |
-| `a` / `b` | **TARE 0** inside each cell panel | zero one cell |
+| `t` | Settings → Scale → Tare | zero every cell |
+| `1` / `2` / `3` | **TARE 0** inside each cell panel | zero one cell |
 | `c` | — | calibrate against the **stored** mass |
 | — | Settings → Scale → Calibrate | keypad: type **any** mass, then OK |
 | `x` | Settings → Scale → Clear calibration | back to counts |
@@ -152,8 +160,38 @@ smoothed tared figure, deliberately does not.
 
 ### Known open
 
-- **Nothing is published upstream.** No Supabase, no telemetry, no `weights`
-  table. The device weighs and displays; that is all.
+- ~~**Nothing is published upstream.**~~ **Done.** LDC-001 reports to Supabase:
+  `device_status` for current state on a 20 s heartbeat, `weight_samples` for
+  the history on change and every two minutes. Verified end to end on the real
+  board against the live database — `weight_state ok, 817 g, 3 cells,
+  104.331 counts/g`, arriving within 20 s. The transport is `src/uplink.cpp`,
+  shared verbatim with the discrete product; only the payload writer
+  (`src/loadcell/scale_telemetry.cpp`) differs.
+
+  What is NOT done: the load cell cannot appear in `status_events` and never
+  will — five of that table's NOT NULL columns are bowl-shaped. Its history has
+  its own table, which is why `slot_burn_rate` exists.
+- **The WiFi page's QR advertises an access point nothing raises.** The page
+  scrolls to *"or set up from your phone:"* and a QR encoding
+  `WIFI:T:WPA;S:Bowlstack-LDC-001;P:bowlstack;;` — and no code anywhere in this
+  image calls `softAP()`. Scanning it gets *"network not found"*, which reads as
+  a broken device. It is the honesty rule applied to an affordance rather than
+  to a reading, and there are only two fixes: raise a real SoftAP **with a page
+  behind it** (an AP that joins you to nothing is worse than no QR), or stop
+  advertising one. Deliberately left alone for now because the fix is a UI
+  decision, not a wiring one. Note that linking `net.cpp` would *not* have fixed
+  it either: WiFiManager raises an **open** AP named `LDC-001`, not a WPA one
+  named `Bowlstack-LDC-001`.
+- **A board on USB with no cell fitted reports a healthy battery.** The ETA6098
+  holds the BAT node at its charge voltage, so the divider faithfully reports
+  ~4.17 V and `battery::Monitor` classifies `good`. Nothing in software
+  distinguishes that from a real full cell — it needs the charger-sense mod
+  below, where *charging, pinned at 4.2 V, no droop under load* is the tell.
+  Adopting the hysteresed classifier did **not** fix this and must not be
+  described as having done so.
+- **Charge state is still unreadable**, and now says so because the firmware
+  says so rather than because a fixture happened to. `demoOverrideCharging()` is
+  fed `board::CHARGER_STATUS_READABLE`; the one-resistor mod is what flips it.
 - **The gram split assumes matched cells.** One factor is applied to the sum,
   which makes the TOTAL right regardless of where the load sits, and the
   per-cell shares right only if the two cells have equal sensitivity. Per-corner
@@ -163,10 +201,12 @@ smoothed tared figure, deliberately does not.
   dropping the file if this branch outlives the port.
 - **`buildPages()` would strand change-detection state if called twice** —
   inherited from `touch-ui`, still true, still only one call site.
-- **Bus B still has no pull-ups.** GPIO11/12 are running on the ESP32's ~45 kΩ
-  internal ones. It works today at 100 kHz on a short lead; 4.7 k to 3V3 on both
-  lines is what makes it right, and is what would let `HZ_B` in scale.cpp go to
-  400000.
+- ~~**Bus B still has no pull-ups.**~~ **Gone with the bus.** The cells moved
+  behind a TCA9548A on GPIO21/16 in 3e58f87 — the camera's SCCB pair, with R4/R5
+  4.7 kΩ already fitted — so there is no bit-banged bus and no internal-pull-up
+  compromise left. The whole trunk runs at 400 kHz. Each downstream **stub**
+  still needs its own pair, because a mux is a switch and not a buffer; see
+  `include/i2cmux.h`.
 - **ui 74% is still high for 11 fps.** What remains after the layout fix is
   genuine software glyph rendering — ~13,000 px of 4 bpp antialiased 48 px
   digits, eleven times a second, on a core with no 2D acceleration. The levers

@@ -13,8 +13,24 @@ supabase/schema.sql            -- drops and rebuilds everything
 supabase/register_devices.sql  -- registers BWL-001 .. BWL-032
 supabase/assign_devices.sql    -- permanent location/food_slot assignment
 supabase/seed_meal_mapping.sql -- sample menus, for the front-end test bed
-supabase/smoke_test.sql        -- 25 assertions; run BEFORE flashing any device
+supabase/smoke_test.sql        -- 32 assertions; run BEFORE flashing any device
 ```
+
+For the **load cells** — the scales at the serving counter, LDC-001..032 —
+four more, or `supabase/apply_loadcell.sql`, which is all four fused into one
+self-verifying transaction and is what you should actually run:
+
+```
+supabase/migrate_loadcell.sql        -- devices.kind + the weight columns
+supabase/register_loadcells.sql      -- registers LDC-001 .. LDC-032
+supabase/assign_loadcells.sql        -- DERIVES each one's position from BWL-nnn
+supabase/migrate_weight_samples.sql  -- the history table
+supabase/migrate_burn_rate.sql       -- consumption rate and time-to-empty
+```
+
+`supabase/whats_installed.sql` says which of these a database already has and
+what to run next; `supabase/inventory.sql` dumps every table, view, function,
+policy and grant. Both are read-only, and safe on live.
 
 On a database that is **already live**, never re-run `schema.sql`. Additive
 changes ship as their own idempotent file — currently:
@@ -82,6 +98,7 @@ plain `UPDATE` instead of an upsert.
 | Column | Notes |
 | --- | --- |
 | `device_id` | PK, `^[A-Za-z0-9_-]{3,32}$` — the installation's identity |
+| `kind` | `stack` (bowl counter, the default) or `scale` (load cell) |
 | `location` | `D` Darshanarthi, `M` Mahatma, `T` Tiffin, `R` reserved/future |
 | `food_slot` | 1–8, the dish position on the station |
 | `label` | free text, names the **position** — never the dish |
@@ -93,6 +110,22 @@ counters per dish position, so three stacks share a slot and remaining stock for
 dish is the **sum** across them — see `slot_overview`. Do not add a unique
 constraint here: it encodes one stack per position, which is wrong about the
 building.
+
+> **`kind` is the only thing separating two products.** A bowl counter says how
+> many bowls are *buffered* at a dish position; a load cell says how much food
+> is on the *counter* at that position. They share the registry, the
+> assignment, the service windows and the offline machinery, and they agree
+> about almost no telemetry column — so every view that counts devices or sums
+> stock filters on it. Adding `kind` and nothing else silently inflates
+> capacity: a scale at a served position turns 12 bowls of capacity into 16
+> while the numerator stays right, which is a bar that reads low forever.
+>
+> **LDC-nnn is derived onto BWL-nnn's position, never given its own literal
+> table.** The correspondence *is* the rule, and a hand-maintained copy drifts.
+> That paid for itself at once: the live fleet has BWL-002/003 and the slot-5
+> units unassigned, and `assign_loadcells.sql` copied that faithfully, where a
+> literal table would have parked LDC-002 at D/1 and filed its measurement
+> under the wrong dish.
 
 ### `meal_food_mapping` — what each slot serves, per meal per day
 
@@ -133,10 +166,50 @@ Carries `boot_id`, `uptime_s`, `stack_count`, `stack_status`, `levels[]`,
 > inference, and an implausible value there identifies a wiring fault the band
 > would disguise.
 
+#### The load-cell columns
+
+A scale writes `weight_state`, `weight_g`, `cells_ok`, `cells_online`,
+`scale_cal_counts_per_g` and leaves every stack column NULL. A counter does the
+reverse. Both write the shared ones — `boot_id`, `uptime_s`, battery, firmware,
+MAC.
+
+> **The state is always knowable; the number is not.** A scale that has never
+> seen a known mass has counts and no grams, so `weight_state` is what a device
+> *always* sends and `weight_g` exists only when that state is `ok`:
+>
+> ```sql
+> check ((weight_state = 'ok') = (weight_g is not null))
+> ```
+>
+> A firmware bug therefore cannot put an invented figure on the dashboard — the
+> database refuses the row. The seven states are `ok`, `uncalibrated`,
+> `untared`, `settling`, `over_range`, `cells_partial`, `no_cells`, ordered in
+> the firmware from the fault nearest the hardware outwards.
+>
+> **And zero is a real weight.** A tared, empty platform reads 0 g and means
+> *refill me*; NULL means nobody knows. Those send staff to opposite places, so
+> nothing in the schema or the dashboard may coalesce one into the other.
+
 ### `status_events` — append-only history
 
 One row per **real change**, never per report. `(device_id, boot_id, seq)` is
 unique — that constraint *is* the idempotency mechanism.
+
+**Bowl counters only.** Five of this table's NOT NULL columns are bowl-shaped,
+so a scale could append to it only by fabricating a bowl count. It has its own
+table instead.
+
+### `weight_samples` — the load cell's history
+
+Same shape of idea, different payload: `(device_id, boot_id, seq)` unique,
+`age_ms` in and `recorded_at` computed server-side, `weight_state` always
+present and `weight_g` only when `ok`. Written on a change of 250 g or of
+state, and otherwise every two minutes so a flat station still draws a line.
+
+`kind` is denormalised onto each row by a trigger, which must be
+`SECURITY DEFINER` — it reads `devices`, and anon cannot see that table at all.
+Without it every history insert fails 42501 while the current-state PATCH
+carries on working perfectly, which is a fault that looks like nothing.
 
 ### `service_windows` — when devices are expected to be awake
 
@@ -296,11 +369,17 @@ hours. It evaluates wall-clock windows in
 each installation's timezone. Adding any `service_windows` row for a device
 replaces the fleet defaults for that device entirely — list all three meals.
 
-> **Trial state (2026-08-02):** the live project temporarily runs debug
-> windows — breakfast 06:30–09:30, lunch 11:30–14:30, dinner **16:30**–21:30 —
-> so offline behaviour could be exercised in the afternoon. Restore the real
-> windows (06:00–09:00 / 11:30–14:00 / 18:30–21:00) before collecting clean
-> trial data.
+> **Live values (2026-08-30):** breakfast 06:30–09:30, lunch 11:30–14:30,
+> dinner 18:30–21:30. These are the real windows and the database is currently
+> on them.
+>
+> **A moved window is not a local change.** It tells the whole fleet it is
+> supposed to be awake, so every unit powered down for the night reads `offline`
+> in red for as long as it is in place. `supabase/debug_service_windows.sql`
+> exists for moving one deliberately: it records the real values in its header
+> and carries its own commented-out restore. Use it rather than an ad-hoc
+> UPDATE — a debug window has been left in place and had to be tracked down
+> later, twice.
 
 ---
 
@@ -313,6 +392,19 @@ The device holds only the **anon key**. It gets:
 | `devices` | nothing at all |
 | `device_status` | `SELECT(device_id)`, `UPDATE(payload columns)` |
 | `status_events` | `INSERT(payload columns)` |
+| `weight_samples` | `INSERT(payload columns)` |
+
+Both device types hold the same key and the same grants; the schema does not
+try to stop a counter writing a weight, because a column-level grant is not the
+place to encode which firmware is on which board.
+
+> **A fresh `CREATE FUNCTION` grants EXECUTE to PUBLIC, and a later `GRANT` to
+> named roles does not take it away** — only an explicit `revoke ... from
+> public` does. That briefly made `weight_mismatch_tolerance()` the one function
+> in this schema anyone could call. It returned two constants and leaked
+> nothing, which is precisely why it was worth fixing rather than excusing:
+> `inventory.sql` is what found it, and every new function is written with the
+> revoke beside the grant.
 
 **No read path to any telemetry column, ever.**
 

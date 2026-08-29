@@ -9,14 +9,21 @@ a resume section.
 ## What branch you are on
 
 `loadcell`. **The measurement here is WEIGHT, not bowl count.** Same Waveshare
-board, same 240×320 panel, same UI framework and the same status bar — two
+board, same 240×320 panel, same UI framework and the same status bar — three
 NAU7802 bridge converters under one platform instead of four VL53L0X up a pipe.
 
 | | |
 | --- | --- |
-| cell A | GPIO47/48, hardware I²C port 0, **shared with the touch chip and IMU** |
-| cell B | GPIO11/12, bit-banged (lgfx soft port −1), **needs external 4.7 k pull-ups** |
-| why two buses | the NAU7802's address is fixed at 0x2A and cannot be moved |
+| cells | **GPIO21/16**, hardware I²C port 1, 400 kHz — the camera's SCCB pair, 4.7 k already fitted (R4/R5) |
+| mux | **TCA9548A at 0x70**, one channel per cell (0/1/2) |
+| port 0 | GPIO47/48 carries the touch chip and the IMU, **and nothing else** |
+| why a mux | the NAU7802's address is fixed at 0x2A and cannot be moved |
+| why three cells | two leave the platform free to rock about the line joining them; three points define a plane |
+
+> This table described **two** cells on two buses until 3e58f87 — cell A sharing
+> the touch bus, cell B bit-banged on GPIO11/12. Both pairs are free now. If you
+> find that arrangement described anywhere else in the repo, it is stale;
+> `include/board_waveshare_s3.h` section 8 is the authority.
 
 The ToF branch is `touch-ui` and is untouched; the discrete ToF product is
 `main`. `src/bringup/bringup_display.cpp` and `bringup_sensors.cpp` were removed
@@ -25,6 +32,33 @@ here rather than left half-compiling — see the note in `platformio.ini`.
 **A unit reports COUNTS until somebody calibrates it.** That is deliberate, not
 unfinished: with no known mass there is no counts-to-gram factor, so there are no
 grams. Menu → Settings → Scale → Tare, put the known mass on, then Calibrate.
+
+That rule reaches the database as a constraint rather than a convention:
+`check ((weight_state = 'ok') = (weight_g is not null))`. A scale always sends
+a *state*; it sends a *number* only when that state is `ok`. Zero, though, is a
+real weight — a tared empty platform means *refill me*, where NULL means nobody
+knows, and those send staff to opposite places.
+
+### It reports upstream
+
+`LDC-001` publishes to the same Supabase project as the bowl counters and shows
+up on the same dashboard. `src/uplink.cpp` is the transport, shared verbatim
+with the discrete product; `src/loadcell/scale_telemetry.cpp` is the only part
+that differs. Current state PATCHes `device_status` every 20 s; history appends
+to `weight_samples` on a 250 g move, on a state change, and otherwise every two
+minutes.
+
+**Not `status_events`** — five of that table's NOT NULL columns are bowl-shaped,
+so a scale could append to it only by fabricating a bowl count.
+
+The reason any of this exists is `slot_burn_rate`: which dish is going fastest
+and whether it lasts the meal. Consumption is measured on **buffer plus
+counter**, so carrying bowls from a stack onto the scale reads as flat rather
+than as a serving.
+
+See [docs/supabase.md](docs/supabase.md) for the schema and
+[docs/FRONTEND_HANDOFF.md](docs/FRONTEND_HANDOFF.md) for what the dashboard
+reads. `supabase/whats_installed.sql` says what a given database already has.
 
 ---
 

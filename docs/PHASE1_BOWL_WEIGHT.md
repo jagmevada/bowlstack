@@ -1,8 +1,13 @@
 # Phase 1 — per-bowl weight and the Master Dashboard
 
-**Status:** built and verified. Dashboard **v1.23**.
-**Not included:** the 20 load cells. Phase 1 is deliberately the estimate —
-`bowls × weight` — and needs no new hardware. See [What comes next](#what-comes-next).
+**Status:** built and verified. Dashboard **v1.23** at the time of writing.
+**Not included:** the load cells. Phase 1 is deliberately the estimate —
+`bowls × weight` — and needs no new hardware.
+
+> **Phases 2, 3 and 4 have since SHIPPED** (dashboard v1.35). Phase 1 stands
+> unchanged and is still what runs where no scale is installed — but read
+> [What comes next](#what-comes-next) for the two things that turned out
+> differently, because one of them makes a statement in this document wrong.
 
 ---
 
@@ -322,14 +327,35 @@ the per-area arithmetic. `smoke_test.sql` is now **25 assertions**.
 
 ## What comes next
 
-Nothing in Phase 1 blocks any of this. `slot_quantity` gains a
-`measured_weight_g` column and the UI gains a source chip.
+**All three shipped.** Nothing in Phase 1 blocked any of it, and Phase 1's own
+arithmetic is untouched — it is now one of two terms rather than the only one.
 
-| Phase | |
-| --- | --- |
-| **2** | `devices.kind` discriminator → `LDC-001`…`LDC-020` reusing the whole registry, assignment, service windows and offline logic; nullable weight columns on `device_status` using the same anon column-grant write path; HX711 firmware |
-| **3** | `measured_weight_g` in `slot_quantity`, the measured-vs-estimated precedence rule (decided once, in SQL), and a mismatch chip — a disagreement between the two is itself a signal: a miscalibrated cell, or a wrong per-bowl weight in the menu |
-| **4** | A `weight_samples` table for the analog history — **not** `status_events`, which is stack-shaped and NOT NULL on stack columns — then burn rate and projected run-out (*"Rice runs out ~13:42"*), the highest-value operational number in the whole design |
+| Phase | | |
+| --- | --- | --- |
+| **2** | **done** | `devices.kind` discriminator → `LDC-001`…`LDC-032` reusing the whole registry, assignment, service windows and offline logic; nullable weight columns on `device_status` using the same anon column-grant write path. The firmware is **NAU7802**, not HX711 — three cells behind a TCA9548A, because two leave the platform free to rock and the NAU7802's address is fixed at 0x2A |
+| **3** | **done, differently** | `measured_weight_g` is in `slot_quantity`. The precedence rule and the mismatch chip are **not** — see below |
+| **4** | **done** | `weight_samples` for the analog history, then `slot_burn_rate` and projected run-out. It is the highest-value number in the design and it is on the Master tab |
+
+### The one thing this document got wrong
+
+Phase 3 above proposes that `slot_quantity` prefer the measured figure over the
+estimate, and flag a disagreement between them as a signal. **Both halves are
+wrong, and the first is dangerous.**
+
+Buffered bowls and food on the counter are **different food in different
+places**. They add. Preferring one discards the other: live, Darshanarthi held
+two buffered bowls at 18 kg beside an empty counter and Master reported *18.0
+kg* for a position holding *54.0 kg* — a scale reading zero erased a hall's
+entire buffer, and a kitchen under-ordering against that number runs out.
+
+The mismatch chip is built on the same wrong model. It shipped, announced
+*"Darshanarthi's scale disagrees by 36.0 kg"* about two instruments that were
+both perfectly correct, and was removed. A real cross-check exists but is a
+different calculation — bowls *removed* from the buffer against grams *added*
+to the counter — and needs the derivatives, not the levels.
+
+The error is instructive rather than embarrassing: "trust the instrument over
+the estimate" is a good instinct that happens to be about the wrong quantity.
 
 Out of scope by decision: a **Tare / Calibrate** button on the dashboard. There
 is no browser→device command path anywhere in this architecture today; adding
