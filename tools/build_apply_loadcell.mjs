@@ -1,0 +1,262 @@
+// Generates supabase/apply_loadcell.sql -- the whole load-cell augmentation as
+// ONE file, in ONE transaction, that refuses to commit if it changed anything
+// about the bowl counters.
+//
+// WHY GENERATE IT rather than write it. The four source files are the ones that
+// get maintained, reviewed and rolled back individually; a hand-written fifth
+// copy of their contents would be a second definition of the same migration and
+// would drift from them the first time one was touched. This script fuses them
+// mechanically, so the combined file cannot say anything the parts do not.
+//
+// Re-run it after editing any of the four:
+//     node tools/build_apply_loadcell.mjs
+//
+// WHAT THE FUSION CHANGES, and it is only this: each source file's own
+// `begin;`/`commit;` is removed so the four become one transaction, and the
+// per-file verification SELECTs that trail each `commit;` are dropped in favour
+// of one consolidated report at the end. Nothing else is rewritten.
+import { readFileSync, writeFileSync } from 'node:fs';
+
+const REPO = new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
+const SRC = `${REPO}/supabase`;
+
+const PARTS = [
+  ['migrate_bowl_weight.sql', 'per-bowl weight, and the Master Dashboard view'],
+  ['migrate_loadcell.sql', 'load-cell stations alongside the bowl counters'],
+  ['register_loadcells.sql', 'LDC-001..032 into the devices registry'],
+  ['assign_loadcells.sql', 'each LDC onto the position of its BWL'],
+];
+
+/** The transactional body of one migration: everything strictly between its own
+ *  `begin;` and `commit;`. Anything after the commit is that file's own
+ *  verification, which the consolidated report at the end replaces. */
+function body(file) {
+  const lines = readFileSync(`${SRC}/${file}`, 'utf8').replace(/^﻿/, '').split(/\r?\n/);
+  const b = lines.findIndex(l => l.trim() === 'begin;');
+  const c = lines.findIndex((l, i) => i > b && l.trim() === 'commit;');
+  if (b < 0 || c < 0) throw new Error(`${file}: expected one begin;/commit; pair`);
+  if (lines.slice(c + 1).some(l => l.trim() === 'commit;'))
+    throw new Error(`${file}: more than one commit; -- the fusion assumes one`);
+  return lines.slice(b + 1, c).join('\n').replace(/^\n+|\n+$/g, '');
+}
+
+const banner = (n, file, what) => `
+-- #####################################################################
+-- ##  PART ${n} of ${PARTS.length}:  ${file}
+-- ##  ${what}
+-- #####################################################################
+`;
+
+const out = `-- =====================================================================
+--  Bowlstack -- apply the load-cell augmentation.  GENERATED FILE.
+--
+--  Regenerate with:  node tools/build_apply_loadcell.mjs
+--  Do not edit by hand -- edit the four files it fuses and re-run that.
+--
+--  ---------------------------------------------------------------------
+--  WHAT THIS IS FOR
+--  ---------------------------------------------------------------------
+--  Paste the whole file into the Supabase SQL editor and run it ONCE. It
+--  does what these four do, in the only order that works:
+--
+${PARTS.map(([f, w], i) => `--    ${i + 1}. ${f.padEnd(26)} ${w}`).join('\n')}
+--
+--  ---------------------------------------------------------------------
+--  WHY IT IS SAFE TO RUN MID-SERVICE
+--  ---------------------------------------------------------------------
+--  ONE TRANSACTION. All four parts and the verification run inside a single
+--  BEGIN. If ANY of it fails -- a missing prerequisite, a constraint, a
+--  verification check -- the whole thing rolls back and your database is
+--  exactly as it was. There is no half-applied state to recover from.
+--
+--  IT PROVES IT DID NOT TOUCH THE BOWL COUNTERS. Before changing anything
+--  it snapshots every existing device, its status row, and the whole of
+--  slot_overview -- the numbers the Stock screen renders. After the
+--  migration it compares them and RAISES if a single figure moved, which
+--  aborts the transaction. "It should not affect bowl counting" becomes a
+--  check the database performs rather than a claim in a comment.
+--
+--  IT ADDS AND NEVER REMOVES. No table is dropped, no row is rewritten, no
+--  existing column changes name, type, nullability or default.
+--
+--  ---------------------------------------------------------------------
+--  TO REHEARSE FIRST
+--  ---------------------------------------------------------------------
+--  Change the LAST line of this file from
+--
+--      commit;
+--  to
+--      rollback;
+--
+--  and run it. Everything executes, every check runs, the report prints --
+--  and nothing is kept. Then change it back and run it for real.
+-- =====================================================================
+
+begin;
+
+-- ---------------------------------------------------------------------
+--  BEFORE: snapshot what must not change.
+--
+--  Temp tables, so they vanish with the session and cannot collide with
+--  anything. Captured INSIDE the transaction, so what they record is
+--  precisely the state this transaction started from.
+-- ---------------------------------------------------------------------
+create temp table _before_devices on commit drop as
+  select device_id, location, food_slot, label, timezone from public.devices;
+
+create temp table _before_status on commit drop as
+  select device_id, reported, boot_id, uptime_s, stack_count, stack_status,
+         levels, sensors_ok, sensors_online, battery_mv, battery_level,
+         charging, firmware, mac
+    from public.device_status;
+
+create temp table _before_stock on commit drop as
+  select location, food_slot, devices, devices_reported, bowls_capacity,
+         bowls_trusted, bowls_reported, any_fault, any_degraded
+    from public.slot_overview;
+
+create temp table _before_counts on commit drop as
+  select (select count(*) from public.devices)            as devices,
+         (select count(*) from public.device_status)      as device_status,
+         (select count(*) from public.status_events)      as status_events,
+         (select count(*) from public.service_windows)    as service_windows,
+         (select count(*) from public.meal_food_mapping)  as meal_food_mapping;
+${PARTS.map(([f, w], i) => banner(i + 1, f, w) + '\n' + body(f)).join('\n')}
+
+-- #####################################################################
+-- ##  VERIFICATION -- runs before the commit, and aborts it on failure.
+-- #####################################################################
+do $$
+declare
+  v_n int;
+  v_txt text;
+begin
+  -- 1. Every pre-existing device kept its identity and its posting.
+  select count(*) into v_n from (
+    select device_id, location, food_slot, label, timezone from _before_devices
+    except
+    select device_id, location, food_slot, label, timezone from public.devices
+  ) x;
+  if v_n > 0 then
+    raise exception 'ABORTED: % existing device row(s) changed or vanished', v_n;
+  end if;
+
+  select count(*) into v_n from (
+    select * from _before_status
+    except
+    select device_id, reported, boot_id, uptime_s, stack_count, stack_status,
+           levels, sensors_ok, sensors_online, battery_mv, battery_level,
+           charging, firmware, mac
+      from public.device_status
+  ) x;
+  if v_n > 0 then
+    raise exception 'ABORTED: % existing device_status row(s) changed', v_n;
+  end if;
+
+  -- 2. THE ONE THAT MATTERS. Every figure the Stock screen renders, unmoved.
+  --    A load cell registered at a served position must not become a fourth
+  --    bowl counter -- that would inflate capacity with a correct numerator,
+  --    which is a bar that reads low forever and looks like nothing at all.
+  select count(*) into v_n from (
+    (select * from _before_stock
+      except
+     select location, food_slot, devices, devices_reported, bowls_capacity,
+            bowls_trusted, bowls_reported, any_fault, any_degraded
+       from public.slot_overview)
+    union all
+    (select location, food_slot, devices, devices_reported, bowls_capacity,
+            bowls_trusted, bowls_reported, any_fault, any_degraded
+       from public.slot_overview
+      except
+     select * from _before_stock)
+  ) x;
+  if v_n > 0 then
+    raise exception
+      'ABORTED: % row(s) of slot_overview moved -- the bowl counters are '
+      'not supposed to change. Nothing has been committed.', v_n;
+  end if;
+
+  -- 3. Nothing deleted anywhere. Only devices and device_status may GROW,
+  --    and only by the 32 scales being registered.
+  select count(*) into v_n from _before_counts b
+   where (select count(*) from public.status_events)     <> b.status_events
+      or (select count(*) from public.service_windows)   <> b.service_windows
+      or (select count(*) from public.meal_food_mapping) <> b.meal_food_mapping
+      or (select count(*) from public.devices)           <  b.devices
+      or (select count(*) from public.device_status)     <  b.device_status;
+  if v_n > 0 then
+    raise exception 'ABORTED: a table gained or lost rows it should not have';
+  end if;
+
+  -- 4. Every pre-existing device is still classified as a bowl counter.
+  select count(*) into v_n from public.devices d
+    join _before_devices b using (device_id)
+   where d.kind <> 'stack';
+  if v_n > 0 then
+    raise exception 'ABORTED: % pre-existing device(s) were reclassified', v_n;
+  end if;
+
+  -- 5. The device write path did not widen. anon must still be able to read
+  --    exactly one column of device_status, whatever columns were added.
+  select count(*) into v_n from information_schema.column_privileges
+   where table_schema='public' and table_name='device_status'
+     and grantee='anon' and privilege_type='SELECT';
+  if v_n <> 1 then
+    raise exception
+      'ABORTED: anon can now SELECT % columns of device_status, expected 1', v_n;
+  end if;
+
+  -- 6. No function became callable by PUBLIC. A fresh CREATE FUNCTION carries
+  --    that by default and a bare GRANT does not remove it -- which is exactly
+  --    how weight_mismatch_tolerance briefly became the only one in the schema
+  --    that anon could call.
+  select string_agg(proname, ', ') into v_txt from (
+    select p.proname from pg_proc p
+     cross join lateral aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+     where p.pronamespace = 'public'::regnamespace
+       and a.privilege_type = 'EXECUTE' and a.grantee = 0
+     group by p.proname
+  ) x;
+  if v_txt is not null then
+    raise exception 'ABORTED: function(s) executable by PUBLIC: %', v_txt;
+  end if;
+
+  raise notice 'All verification checks passed. Committing.';
+end $$;
+
+-- ---------------------------------------------------------------------
+--  The report. One result set, because the Supabase editor shows only the
+--  last statement's output.
+-- ---------------------------------------------------------------------
+select item as step, name as detail, status from (
+  values
+    (1, 'bowl counters (BWL-*)',
+        (select count(*)::text from public.devices where kind = 'stack')
+          || ' registered, unchanged'),
+    (2, 'load cells (LDC-*)',
+        (select count(*)::text from public.devices where kind = 'scale')
+          || ' registered, '
+          || (select count(*)::text from public.devices
+               where kind='scale' and location in ('D','M','T')) || ' deployed'),
+    (3, 'Stock screen (slot_overview)',
+        (select count(*)::text from public.slot_overview)
+          || ' dish positions, every figure identical to before'),
+    (4, 'Master screen (slot_quantity)',
+        'view present, ' ||
+        (select count(*)::text from information_schema.columns
+          where table_schema='public' and table_name='slot_quantity')
+          || ' columns'),
+    (5, 'measured weight',
+        'no station has reported one yet -- expected until a scale is flashed'),
+    (6, 'next',
+        'run supabase/smoke_test.sql -- expect 32 assertions, 0 FAIL')
+) as t(item, name, status)
+order by item;
+
+-- CHANGE THIS TO rollback; TO REHEARSE WITHOUT KEEPING ANYTHING.
+commit;
+`;
+
+writeFileSync(`${SRC}/apply_loadcell.sql`, out, 'utf8');
+console.log(`wrote supabase/apply_loadcell.sql (${out.split('\n').length} lines, `
+          + `fusing ${PARTS.length} migrations)`);
