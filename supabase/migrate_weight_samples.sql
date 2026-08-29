@@ -187,6 +187,22 @@ begin
   return new;
 end $$;
 
+
+-- CREATE FUNCTION grants EXECUTE to PUBLIC, and a later GRANT to named roles
+-- does NOT take it back -- only an explicit revoke does. Both of these were
+-- left with it. Neither is directly callable (Postgres refuses to invoke a
+-- trigger function outside a trigger, 0A000) and tg_weight_samples_kind is
+-- SECURITY DEFINER, which is exactly the shape of object that should not be
+-- sitting there with a PUBLIC grant regardless of today's reachability.
+--
+-- The real cost of leaving it is to the signal: inventory.sql exists to make
+-- "which functions can PUBLIC execute" a question with the answer NONE, and
+-- two permanent false positives are how the next genuine one goes unnoticed.
+-- apply_loadcell.sql now aborts the whole transaction on a non-empty answer,
+-- which is what found these.
+
+revoke all on function public.tg_weight_samples_stamp() from public, anon, authenticated;
+
 drop trigger if exists weight_samples_stamp on public.weight_samples;
 create trigger weight_samples_stamp
   before insert on public.weight_samples
@@ -238,6 +254,9 @@ begin
   end if;
   return new;
 end $$;
+
+
+revoke all on function public.tg_weight_samples_kind() from public, anon, authenticated;
 
 drop trigger if exists weight_samples_kind on public.weight_samples;
 create trigger weight_samples_kind

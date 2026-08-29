@@ -1683,12 +1683,13 @@ per_slot as (
            'bowls_trusted',  p.bowls_trusted,
            'bowls_capacity', p.bowls_capacity,
            'devices',        p.devices,
-           -- THE HALL'S OWN MASS, and it is now the precedence answer rather
-           -- than the estimate it used to be. Same key, better number: a hall
-           -- with a load cell shows what was weighed there. Still NULL when the
-           -- hall has neither a measurement nor a reading to multiply -- never
-           -- 0, which beside a bowl count of "--" is a contradiction that sends
-           -- somebody to refill a station nobody has heard from.
+           -- THE HALL'S OWN MASS: its buffered bowls PLUS whatever its scales
+           -- weigh. Same key, better number. It was briefly the precedence
+           -- answer -- measured beats estimated -- which is how a hall with an
+           -- empty counter reported 18.0 kg while holding 54.0 kg. Still NULL
+           -- when the hall has neither a measurement nor a reading to multiply
+           -- -- never 0, which beside a bowl count of "--" is a contradiction
+           -- that sends somebody to refill a station nobody has heard from.
            'weight_g',          p.weight_line_g,
            'est_weight_g',      p.est_line_g,
            'measured_weight_g', p.measured_weight_g,
@@ -1786,12 +1787,13 @@ commit;
 --       smoke_test.sql          32 assertions; expect ALL PASS
 --
 --     Then, for the load cells at the serving counter:
---       apply_loadcell.sql      all four load-cell migrations in ONE
+--       apply_loadcell.sql      every load-cell migration in ONE
 --                               self-verifying transaction -- it snapshots
 --                               every device, status row and slot_overview
 --                               figure first and RAISES if one moved
---     or the four separately: migrate_loadcell.sql, register_loadcells.sql,
---     assign_loadcells.sql, migrate_weight_samples.sql, migrate_burn_rate.sql
+--     or separately, in this order: migrate_loadcell.sql,
+--     register_loadcells.sql, assign_loadcells.sql,
+--     migrate_weight_samples.sql, migrate_burn_rate.sql
 --
 --     whats_installed.sql says which of those a database already has.
 -- ---------------------------------------------------------------------

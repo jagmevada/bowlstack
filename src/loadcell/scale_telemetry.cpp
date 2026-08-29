@@ -194,38 +194,63 @@ battery::Level reportedBand_ = battery::Level::Unknown;
 // function and that constraint ever disagree, the PATCH fails with a 400 and
 // the station stops reporting entirely -- so the two are deliberately written
 // to mirror each other line for line.
+// The seven states, as NAMED CONSTANTS rather than bare literals at each
+// return.
+//
+// Change detection compares these by POINTER -- `state != reportedState_` --
+// which is the cheap and correct thing to do for a small closed set, but it is
+// only correct if one state is always the same pointer. With bare literals
+// that holds by compiler literal-pooling rather than by any rule: -Os merges
+// identical strings in a translation unit, so it worked, and nothing would
+// have told us if it stopped.
+//
+// It is not hypothetical here. OVER_RANGE is returned from TWO places -- a
+// saturated converter, and a gram figure outside what the column accepts --
+// and under a build that did not merge them those two would compare as
+// different states. The visible effect is a station that posts on every tick
+// while flipping between two spellings of the same fault, and enqueues a
+// history row each time: the nine-rows-for-one-bowl failure again, by a
+// different route.
+const char *const ST_NO_CELLS      = "no_cells";
+const char *const ST_CELLS_PARTIAL = "cells_partial";
+const char *const ST_OVER_RANGE    = "over_range";
+const char *const ST_SETTLING      = "settling";
+const char *const ST_UNCALIBRATED  = "uncalibrated";
+const char *const ST_UNTARED       = "untared";
+const char *const ST_OK            = "ok";
+
 const char *weightState(const scale::Snapshot &s) {
   // No converter is answering. This is also what a missing or unpowered mux
   // looks like from up here, which is why the boot console says so explicitly
   // rather than leaving three dead cells to read as three faults.
-  if (s.online == 0) return "no_cells";
+  if (s.online == 0) return ST_NO_CELLS;
 
   // Cells under one platform SUM. A missing cell therefore makes the total
   // silently LOW rather than noisy -- it looks exactly like a lighter bowl --
   // so a partial assembly has no weight at all, not a partial one.
-  if (s.online < scale::CELLS) return "cells_partial";
+  if (s.online < scale::CELLS) return ST_CELLS_PARTIAL;
 
   // A saturated converter returns a large, steady, plausible number and the
   // weight simply stops rising. Said rather than inferred.
-  if (s.overRange) return "over_range";
+  if (s.overRange) return ST_OVER_RANGE;
 
   // The automatic power-up tare has not concluded. Waiting and Observing are
   // both "no zero yet"; GaveUp and Off mean it is not coming, and the tared
   // check below is then the one that matters.
   if (s.autoTare == scale::AutoTare::Waiting ||
       s.autoTare == scale::AutoTare::Observing) {
-    return "settling";
+    return ST_SETTLING;
   }
 
   // No known mass has ever been applied to this unit, so there is no
   // counts-to-gram factor and there are no grams. net_counts still goes out, so
   // the dashboard can see the cells are alive.
-  if (!s.calibrated) return "uncalibrated";
+  if (!s.calibrated) return ST_UNCALIBRATED;
 
   // Calibrated but not zeroed: the figure is right about CHANGE and wrong about
   // the absolute, because it still includes the platform. That is not a weight
   // of the food, which is what the column means.
-  if (!s.tared) return "untared";
+  if (!s.tared) return ST_UNTARED;
 
   // OUTSIDE WHAT THE COLUMN WILL ACCEPT, which on this hardware means the
   // calibration factor is wrong by orders of magnitude rather than that the
@@ -243,10 +268,10 @@ const char *weightState(const scale::Snapshot &s) {
     // Written as !(in range) rather than (out of range) so a NaN -- which
     // compares false against everything -- lands here too instead of being
     // serialised as `null` by ArduinoJson beside a state of 'ok'.
-    return "over_range";
+    return ST_OVER_RANGE;
   }
 
-  return "ok";
+  return ST_OK;
 }
 
 // The tare- and zero-subtracted sum over the online cells -- exactly the figure
@@ -502,29 +527,26 @@ void begin() {
 
 void loop(const scale::Snapshot &s, uint32_t uptimeSec, uint16_t batteryMv,
           battery::Level batteryLevel) {
-  if (!uplink::connected()) return;
-
   const uint32_t now = millis();
-  if (backoffActive_) {
-    if ((int32_t)(now - backoffUntilMs_) < 0) return;
-    backoffActive_ = false;
-  }
 
-  if (unprovisioned_) {
-    // Latched: only a human inserting a `devices` row fixes this. Back off hard
-    // rather than hammering the endpoint for the life of the device, but allow
-    // one probe per interval so a unit registered later recovers on its own.
-    backoffUntilMs_ = now + UNPROVISIONED_RETRY_MS;
-    backoffActive_ = true;
-    unprovisioned_ = false;
-    Serial.printf("scale-uplink: %s not registered in `devices` -- backing off "
-                  "%lu s\n",
-                  deviceId_, (unsigned long)(UNPROVISIONED_RETRY_MS / 1000));
-    return;
-  }
-
+  // --- OBSERVING COMES FIRST, AND IS NOT GATED ON THE LINK -----------------
+  // Everything down to the end of the history block runs whether or not there
+  // is a network, because the queue exists precisely to hold what happened
+  // while there was not one.
+  //
+  // This section used to sit BELOW `if (!uplink::connected()) return;`, which
+  // quietly made the 32-sample buffer unreachable: the only way to fill it was
+  // to be ONLINE with posts failing. A WiFi outage -- the one case the buffer
+  // is described as covering, and the reason it is 32 entries rather than 4 --
+  // recorded nothing at all, so the reconnect replayed nothing and the
+  // consumption curve had a clean hole through the middle of it. Worse, the
+  // hole is invisible: seq stays contiguous across it, because a sample that
+  // was never observed never took a seq. The code read as though it buffered
+  // offline; it only buffered mid-failure.
+  //
+  // Sampling is local and costs nothing. The network gates POSTING, below.
   const char *state = weightState(s);
-  const bool haveWeight = (strcmp(state, "ok") == 0);
+  const bool haveWeight = (state == ST_OK);
   const int32_t weightG = haveWeight ? (int32_t)lroundf(s.totalGrams) : 0;
 
   // --- is there news? ------------------------------------------------------
@@ -576,6 +598,27 @@ void loop(const scale::Snapshot &s, uint32_t uptimeSec, uint16_t batteryMv,
                        : (stateChanged || moved) ? "change" : "periodic";
     everEnqueued_ = true;
     enqueue(s, reason, state, weightG, haveWeight, batteryMv, batteryLevel);
+  }
+
+  // --- from here down, nothing happens without a link ----------------------
+  if (!uplink::connected()) return;
+
+  if (backoffActive_) {
+    if ((int32_t)(now - backoffUntilMs_) < 0) return;
+    backoffActive_ = false;
+  }
+
+  if (unprovisioned_) {
+    // Latched: only a human inserting a `devices` row fixes this. Back off hard
+    // rather than hammering the endpoint for the life of the device, but allow
+    // one probe per interval so a unit registered later recovers on its own.
+    backoffUntilMs_ = now + UNPROVISIONED_RETRY_MS;
+    backoffActive_ = true;
+    unprovisioned_ = false;
+    Serial.printf("scale-uplink: %s not registered in `devices` -- backing off "
+                  "%lu s\n",
+                  deviceId_, (unsigned long)(UNPROVISIONED_RETRY_MS / 1000));
+    return;
   }
 
   const bool due = (int32_t)(now - nextStatusMs_) >= 0;

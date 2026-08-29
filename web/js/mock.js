@@ -264,16 +264,16 @@ function weightOf(dev, bowlWeightG, bowls) {
   }
   const truth = bowls * Number(bowlWeightG);
   if (dev.device_id === SCALE_MISCALIBRATED) {
-    // Past both bands of weight_mismatch_tolerance(), so the chip fires. A
-    // miscalibrated cell is one of exactly two things a disagreement can mean,
-    // and the demo should show one of them -- the other, a wrong per-bowl
-    // weight on the Menu tab, is reachable by editing one and watching this
-    // same chip appear.
+    // Kept, though the chip it used to trip is gone. Nothing on screen flags
+    // this device any more -- which is the honest outcome, because a scale
+    // reading heavy is indistinguishable from a counter with more food on it,
+    // and the dashboard has no second opinion to compare against. It stays as
+    // a reminder that a miscalibrated cell is invisible from the levels alone;
+    // catching it needs bowls REMOVED against grams ADDED.
     return ['ok', Math.round(truth * SCALE_MISCAL_FACTOR)];
   }
   // A few hundred grams of realistic slop, deterministic per device so the
-  // screen is stable between polls. Well inside the tolerance, so an honest
-  // scale never trips the chip.
+  // screen is stable between polls.
   return ['ok', Math.round(truth + ((dev.i * 137) % 400) - 200)];
 }
 
@@ -493,15 +493,20 @@ function slotQuantityRows(rows) {
       ? null : (a.bowls_trusted || 0) * a.bowl_weight_g;
     const estLine = a => a.bowl_weight_g == null || a.bowls_trusted == null
       ? null : a.bowls_trusted * a.bowl_weight_g;
-    const wTotal = a => a.measured_weight_g != null ? a.measured_weight_g : estTotal(a);
-    const wLine = a => a.measured_weight_g != null ? a.measured_weight_g : estLine(a);
-    const srcOf = a => a.measured_weight_g != null ? 'measured'
-      : a.bowl_weight_g != null ? 'estimated' : null;
-
-    const sources = areas.map(srcOf).filter(Boolean);
-    const weight_source = sources.length === 0 ? null
-      : sources.every(s => s === 'measured') ? 'measured'
-      : sources.every(s => s === 'estimated') ? 'estimated' : 'mixed';
+    // BUFFER PLUS COUNTER. Bowls waiting behind the line and food already out
+    // on the scales are different food in different places, so a hall's mass
+    // is the SUM of the two, and NULL only when it has neither.
+    //
+    // This read `measured != null ? measured : estimate` until an adversarial
+    // pass caught it -- the precedence rule public.slot_quantity abandoned for
+    // reporting 18.0 kg at a position holding 54.0 kg, because a scale reading
+    // empty erased the hall's entire buffer. SQL was fixed; the mock was not,
+    // so demo mode kept rendering the retracted model. That is the divergence
+    // CLAUDE.md names: one source file, two answers, and the wrong one is the
+    // one anybody demoing the product sees.
+    const sum2 = (m, e) => (m == null && e == null) ? null : (m || 0) + (e || 0);
+    const wTotal = a => sum2(a.measured_weight_g, estTotal(a));
+    const wLine = a => sum2(a.measured_weight_g, estLine(a));
 
     const withWeight = areas.filter(a => wTotal(a) != null);
     const weight_g = withWeight.length
@@ -510,24 +515,11 @@ function slotQuantityRows(rows) {
     const measured_weight_g = measured.length
       ? measured.reduce((n, a) => n + a.measured_weight_g, 0) : null;
 
-    // PER AREA, over the halls that have BOTH -- mirroring per_area_m. A
-    // miscalibrated cell is one hall's broken instrument, and comparing slot
-    // totals averages it into the halls that are fine: a Tiffin scale 35% heavy
-    // at a three-hall position moves the total by 7%, inside the 25% band, so
-    // the slot reads healthy and the fault is invisible.
-    //
-    // Outside BOTH bands, never one -- public.weight_mismatch_tolerance().
-    const TOL_G = 2000, TOL_FRAC = 0.25;
-    const mismatched = areas.filter(a => {
-      const e = estTotal(a);
-      if (a.measured_weight_g == null || e == null) return false;
-      const d = Math.abs(a.measured_weight_g - e);
-      return d > TOL_G && d > TOL_FRAC * Math.max(e, 1);
-    });
-    const weight_mismatch = mismatched.length > 0;
-    const weight_mismatch_g = mismatched.length
-      ? mismatched.reduce((n, a) => n + (a.measured_weight_g - estTotal(a)), 0) : null;
-    const weight_mismatch_areas = mismatched.map(a => a.location);
+    // There is deliberately NO mismatch check here, and none in the view. It
+    // compared buffered bowls against a counter holding different food and
+    // announced a 36 kg "disagreement" between two instruments that were both
+    // correct. A real cross-check is bowls REMOVED against grams ADDED, which
+    // needs the derivatives rather than the levels.
 
     out.push({
       food_slot,
@@ -547,29 +539,36 @@ function slotQuantityRows(rows) {
       // "holds bowls with no per-bowl weight". A hall with a load cell has a
       // weight even with no menu figure typed. With no scales anywhere this
       // collapses to the old test exactly.
-      est_is_partial: areas.some(a => wTotal(a) == null && (a.bowls_trusted || 0) > 0),
+      // THREE conditions, matching the view. The third -- a dish is actually
+      // set here -- is the one that was missing: breakfast runs at
+      // Darshanarthi only, so Mahatma held a bowl against no dish and the slot
+      // claimed ">=36.4 kg" with a Set weight link pointing at a hall with
+      // nothing to set a weight for. The bound was the worse half of it: ">="
+      // asserts MORE food than it shows, and there was none.
+      est_is_partial: areas.some(a => wTotal(a) == null
+        && (a.bowls_trusted || 0) > 0 && a.food_name != null),
       areas_without_weight: areas
-        .filter(a => wTotal(a) == null && (a.bowls_trusted || 0) > 0)
+        .filter(a => wTotal(a) == null && (a.bowls_trusted || 0) > 0
+                     && a.food_name != null)
         .map(a => a.location),
       areas: areas.map(a => ({
         location: a.location, food_name: a.food_name,
         bowl_weight_g: a.bowl_weight_g, bowls_trusted: a.bowls_trusted,
         bowls_capacity: a.bowls_capacity, devices: a.devices,
-        // The hall's own mass, and it is the precedence answer rather than the
-        // estimate it used to be. Still NULL, never 0, when the hall has
-        // neither a measurement nor a reading to multiply.
+        // The hall's own mass: buffered bowls PLUS what its scales weigh.
+        // Still NULL, never 0, when it has neither a measurement nor a
+        // reading to multiply -- 0 beside a bowl count of "--" is a
+        // contradiction that sends somebody to refill a full station.
         weight_g: wLine(a),
         est_weight_g: estLine(a),
         measured_weight_g: a.measured_weight_g,
-        weight_source: srcOf(a),
         scales: a.scales,
         capacity_weight_g: a.bowl_weight_g == null
           ? null : a.bowls_capacity * a.bowl_weight_g,
       })).sort((x, y) => x.location.localeCompare(y.location)),
       scales: areas.reduce((n, a) => n + a.scales, 0),
       scales_ok: areas.reduce((n, a) => n + a.scales_ok, 0),
-      measured_weight_g, weight_g, weight_source,
-      weight_mismatch, weight_mismatch_g, weight_mismatch_areas,
+      measured_weight_g, weight_g,
       scale_issues: [...new Set(areas.flatMap(a => a.scale_issues))].sort(),
       any_fault: areas.some(a => a.any_fault),
       any_degraded: areas.some(a => a.any_degraded),

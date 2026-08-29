@@ -227,6 +227,24 @@ function slotCard(row, devices, inService, tz, meal, rate, series) {
 }
 
 /** One hall's share of one dish position: name, bowls, mass. */
+// Says how a hall's kilograms were arrived at, in the terms the view actually
+// publishes: est_weight_g is the buffered bowls, measured_weight_g is what its
+// scales weigh, and the figure on screen is their sum.
+export function areaWeightNote(a, bowls) {
+  const kg = g => (Number(g) / 1000).toFixed(1);
+  const buf = a.est_weight_g, ctr = a.measured_weight_g;
+  const bowlPart = a.bowl_weight_g != null
+    ? `${bowls == null ? '—' : bowls} bowls x ${kg(a.bowl_weight_g)} kg, from the Menu tab`
+    : 'buffered bowls';
+  const scalePart = `weighed at the counter${a.scales > 1 ? ` by ${a.scales} scales` : ''}`;
+  if (buf != null && ctr != null) {
+    return `${kg(buf)} kg buffered (${bowlPart}) + ${kg(ctr)} kg ${scalePart}.`;
+  }
+  if (ctr != null) return `${kg(ctr)} kg, ${scalePart}.`;
+  if (buf != null) return `${bowlPart}.`;
+  return undefined;
+}
+
 function areaLine(a, health, showDish) {
   const bowls = a.bowls_trusted == null ? null : Number(a.bowls_trusted);
   const grams = a.weight_g == null ? null : Number(a.weight_g);
@@ -274,11 +292,10 @@ function areaLine(a, health, showDish) {
   // says what it is missing rather than printing "0.0 kg", which would read as
   // an empty counter and send someone to refill a full one.
   //
-  // A weighed hall is NOT marked. `a.weight_source` says which halls were
-  // measured and this line deliberately does not render it: four cards abreast
-  // leaves ~250 px here, and every glyph added is a wrap risk on a row that was
-  // already tuned to fit in one. The tooltip carries the arithmetic instead,
-  // which is where somebody who wants to know goes anyway.
+  // A weighed hall is NOT marked in the row itself: four cards abreast leaves
+  // ~250 px here, and every glyph added is a wrap risk on a row already tuned
+  // to fit in one. The tooltip carries the arithmetic instead, which is where
+  // somebody who wants to know goes anyway.
   // THREE REASONS A HALL HAS NO KILOGRAMS, and they are not the same fact.
   //
   //   no dish        this hall is not serving this meal -- breakfast runs at
@@ -302,12 +319,17 @@ function areaLine(a, health, showDish) {
          : a.bowl_weight_g == null ? 'no weight set' : '—')
     : h('span', {
         class: `marea-kg${glyph ? ' is-alert' : ''}`,
-        title: a.weight_source === 'measured'
-            ? `Weighed at the counter${a.scales > 1 ? ` by ${a.scales} scales` : ''}.`
-          : a.bowl_weight_g != null
-            ? `${bowls == null ? '—' : bowls} bowls x `
-              + `${(Number(a.bowl_weight_g) / 1000).toFixed(1)} kg, from the Menu tab.`
-            : undefined,
+        // THE TOOLTIP HAS TO SHOW THE SUM, because the figure it is attached
+        // to is one. It read `a.weight_source === 'measured' ? ... : ...`,
+        // and weight_source was deleted from the view along with the
+        // precedence rule -- so against the live API it was always undefined
+        // and always took the buffer branch, printing "2 bowls x 18.0 kg"
+        // beside a figure of 54.0 kg that included 18 kg weighed at the
+        // counter. The tooltip contradicted its own number. Against mock.js,
+        // which still emitted the field, it took the other branch and was
+        // wrong differently -- the same one-source-two-answers split
+        // CLAUDE.md warns about.
+        title: areaWeightNote(a, bowls),
       }, fmtWeight(grams)));
 
   return line;

@@ -2,17 +2,17 @@
 // ONE file, in ONE transaction, that refuses to commit if it changed anything
 // about the bowl counters.
 //
-// WHY GENERATE IT rather than write it. The four source files are the ones that
+// WHY GENERATE IT rather than write it. The six source files are the ones that
 // get maintained, reviewed and rolled back individually; a hand-written fifth
 // copy of their contents would be a second definition of the same migration and
 // would drift from them the first time one was touched. This script fuses them
 // mechanically, so the combined file cannot say anything the parts do not.
 //
-// Re-run it after editing any of the four:
+// Re-run it after editing any of them:
 //     node tools/build_apply_loadcell.mjs
 //
 // WHAT THE FUSION CHANGES, and it is only this: each source file's own
-// `begin;`/`commit;` is removed so the four become one transaction, and the
+// `begin;`/`commit;` is removed so the six become one transaction, and the
 // per-file verification SELECTs that trail each `commit;` are dropped in favour
 // of one consolidated report at the end. Nothing else is rewritten.
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -25,7 +25,27 @@ const PARTS = [
   ['migrate_loadcell.sql', 'load-cell stations alongside the bowl counters'],
   ['register_loadcells.sql', 'LDC-001..032 into the devices registry'],
   ['assign_loadcells.sql', 'each LDC onto the position of its BWL'],
+  ['migrate_weight_samples.sql', 'the analog history a scale appends to'],
+  ['migrate_burn_rate.sql', 'consumption rate, and when a dish runs out'],
 ];
+
+// The last two were missing until an adversarial pass ran this file into an
+// empty database as `anon` and found that public.weight_samples did not exist.
+// The omission was invisible from either side: apply_loadcell.sql ran clean,
+// every bowl-counting figure it guards was untouched, and the live database
+// had the two tables anyway because they had been applied by hand first.
+//
+// What it would have cost is a SECOND site. The operator runs the one file the
+// documentation points at, the fleet comes up, current weight appears on the
+// dashboard -- and every history POST answers 404 forever, so there is no
+// curve and no burn rate. The device even handles that case gracefully and
+// carries on reporting current state, which is the wrong kind of robust: it
+// means nothing anywhere is red.
+//
+// ORDER IS LOAD-BEARING. weight_samples needs devices.kind from
+// migrate_loadcell; burn_rate reads weight_samples. They go last, in this
+// order, and the fusion refuses to reorder them.
+
 
 /** The transactional body of one migration: everything strictly between its own
  *  `begin;` and `commit;`. Anything after the commit is that file's own
@@ -51,20 +71,35 @@ const out = `-- ================================================================
 --  Bowlstack -- apply the load-cell augmentation.  GENERATED FILE.
 --
 --  Regenerate with:  node tools/build_apply_loadcell.mjs
---  Do not edit by hand -- edit the four files it fuses and re-run that.
+--  Do not edit by hand -- edit the six files it fuses and re-run that.
 --
 --  ---------------------------------------------------------------------
 --  WHAT THIS IS FOR
 --  ---------------------------------------------------------------------
 --  Paste the whole file into the Supabase SQL editor and run it ONCE. It
---  does what these four do, in the only order that works:
+--  does what these six do, in the only order that works:
 --
 ${PARTS.map(([f, w], i) => `--    ${i + 1}. ${f.padEnd(26)} ${w}`).join('\n')}
 --
 --  ---------------------------------------------------------------------
+--  IF YOU NEED TO UNDO IT AFTER IT HAS COMMITTED
+--  ---------------------------------------------------------------------
+--  Run these three, IN THIS ORDER -- they undo in the reverse of the order
+--  applied, because each drops objects the one before it depends on:
+--
+--      rollback_burn_rate.sql
+--      rollback_weight_samples.sql
+--      rollback_loadcell.sql
+--
+--  Taking them out of order fails on a dependency rather than doing
+--  damage, so a mistake here is loud. Note that migrate_bowl_weight.sql
+--  (part 1) has NO rollback and does not need one: it predates the load
+--  cells and the bowl counters depend on it.
+--
+--  ---------------------------------------------------------------------
 --  WHY IT IS SAFE TO RUN MID-SERVICE
 --  ---------------------------------------------------------------------
---  ONE TRANSACTION. All four parts and the verification run inside a single
+--  ONE TRANSACTION. All six parts and the verification run inside a single
 --  BEGIN. If ANY of it fails -- a missing prerequisite, a constraint, a
 --  verification check -- the whole thing rolls back and your database is
 --  exactly as it was. There is no half-applied state to recover from.

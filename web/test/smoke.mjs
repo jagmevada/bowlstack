@@ -1599,5 +1599,96 @@ await go('#/assign');
     noWeight.kind === 'noweight' && noWeight.headline === '7 bowls', noWeight.headline);
 }
 
+// ---------------------------------------------------------------------
+// [demo mode agrees with the view]
+//
+// THE GAP THAT LET THIS DRIFT. Every assertion above drives slotQuantity()
+// with rows written by hand, so all of them passed while mock.js -- the thing
+// that actually feeds demo mode -- still implemented the RETRACTED precedence
+// rule, still emitted a weight_source field the view had deleted, and still
+// missed the third condition on est_is_partial. A suite that only tests the
+// consumer cannot see the producer go wrong.
+//
+// So these drive the mock's own synthesis and assert the three rules the view
+// enforces. This is the mock/live divergence CLAUDE.md names, caught on the
+// dashboard rather than on the panel.
+// ---------------------------------------------------------------------
+{
+  console.log('\n[demo mode agrees with the view]');
+  const { createMockClient } = await import(new URL('js/mock.js', webDir).href);
+  const client = createMockClient();
+  const { data: slots } = await client.from('slot_quantity').select('*');
+
+  ok('demo mode produces slots at all', Array.isArray(slots) && slots.length > 0,
+    String(slots && slots.length));
+
+  const allAreas = slots.flatMap(r => r.areas || []);
+
+  // 1. No field the view does not publish. A mock that invents a column
+  //    teaches the UI to depend on something the API will never send.
+  const RETIRED = ['weight_source', 'weight_mismatch', 'weight_mismatch_g',
+                   'weight_mismatch_areas'];
+  const leaked = RETIRED.filter(k =>
+    slots.some(r => k in r) || allAreas.some(a => k in a));
+  ok('no retired column is still manufactured', leaked.length === 0, leaked.join(','));
+
+  // 2. Buffer plus counter, per hall AND at the slot. The precedence rule
+  //    reported 18.0 kg at a position holding 54.0 kg.
+  const badArea = allAreas.find(a => {
+    const b = a.est_weight_g, c = a.measured_weight_g;
+    if (b == null && c == null) return a.weight_g != null;
+    return a.weight_g !== (b || 0) + (c || 0);
+  });
+  ok("a hall's weight is buffer + counter", !badArea, JSON.stringify(badArea));
+
+  const bothTerms = slots.find(r => r.est_weight_g != null && r.measured_weight_g != null);
+  ok('at least one slot exercises BOTH terms', !!bothTerms,
+    'no slot in the fixture has buffered bowls and a scale together');
+  if (bothTerms) {
+    ok('...and its total adds them rather than choosing',
+      bothTerms.weight_g === bothTerms.est_weight_g + bothTerms.measured_weight_g,
+      `${bothTerms.weight_g} vs ${bothTerms.est_weight_g}+${bothTerms.measured_weight_g}`);
+  }
+
+  // 3. A hall with no dish owes no weight, so it cannot make a slot partial.
+  const wrongPartial = slots.find(r => (r.areas_without_weight || [])
+    .some(loc => (r.areas || []).find(a => a.location === loc && a.food_name == null)));
+  ok('a hall with no dish is never listed as missing a weight',
+    !wrongPartial, wrongPartial && String(wrongPartial.food_slot));
+}
+
+// ---------------------------------------------------------------------
+// [the area tooltip describes the number it is attached to]
+//
+// It branched on weight_source, which the view deleted with the precedence
+// rule -- so live it was always undefined and always claimed the whole figure
+// came from bowls, printing "2 bowls x 18.0 kg" beside 54.0 kg.
+// ---------------------------------------------------------------------
+{
+  console.log('\n[the area tooltip describes the number it is attached to]');
+  const { areaWeightNote } = await import(new URL('js/views/master.js', webDir).href);
+
+  const both = areaWeightNote(
+    { est_weight_g: 36000, measured_weight_g: 18000, bowl_weight_g: 18000, scales: 1 }, 2);
+  ok('both terms are named, with the counter kept separate',
+    /36\.0 kg buffered/.test(both) && /18\.0 kg weighed at the counter/.test(both), both);
+  ok('...and it does not claim the whole figure came from bowls',
+    !/^2 bowls/.test(both), both);
+
+  const ctrOnly = areaWeightNote(
+    { est_weight_g: null, measured_weight_g: 18000, bowl_weight_g: null, scales: 2 }, null);
+  ok('a counter-only hall says so, and how many scales',
+    /18\.0 kg, weighed at the counter by 2 scales/.test(ctrOnly), ctrOnly);
+
+  const bufOnly = areaWeightNote(
+    { est_weight_g: 36000, measured_weight_g: null, bowl_weight_g: 18000, scales: 0 }, 2);
+  ok('a buffer-only hall reads exactly as it did before load cells existed',
+    bufOnly === '2 bowls x 18.0 kg, from the Menu tab.', bufOnly);
+
+  ok('a hall with neither gets no tooltip rather than an empty one',
+    areaWeightNote({ est_weight_g: null, measured_weight_g: null,
+                     bowl_weight_g: null, scales: 0 }, null) === undefined, 'defined');
+}
+
 console.log(`\n${fails.length ? `FAILED (${fails.length}): ${fails.join(' | ')}` : 'ALL PASS'}`);
 process.exit(fails.length ? 1 : 0);
