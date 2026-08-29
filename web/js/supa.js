@@ -1,5 +1,7 @@
 // Supabase connection: where the credentials come from, and the one client.
 
+import { isMockMode, createMockClient } from './mock.js';
+
 const LS_KEY = 'bowlstack.connection';
 
 /**
@@ -8,6 +10,10 @@ const LS_KEY = 'bowlstack.connection';
  * project without a rebuild.
  */
 export function readConfig() {
+  // Demo mode has no project to connect to, but the boot sequence gates on
+  // there being one. Answer with a placeholder rather than special-casing the
+  // gate itself — the mock client never looks at these values.
+  if (isMockMode()) return { url: 'https://demo.invalid', anonKey: 'demo' };
   try {
     const stored = JSON.parse(localStorage.getItem(LS_KEY) || 'null');
     if (stored && stored.url && stored.anonKey) return stored;
@@ -49,6 +55,8 @@ export function clearConfig() {
  * no generated config.js work too.
  */
 export function readAutoLogin() {
+  // Demo mode signs itself in; there is nothing to authenticate against.
+  if (isMockMode()) return { mode: 'anonymous' };
   // Same precedence as readConfig: what this browser was told explicitly
   // (the first-run screen) wins over the deployment's baked config. A stored
   // connection without an explicit mode means anonymous -- the screen never
@@ -68,6 +76,7 @@ let client = null;
 
 export function getClient() {
   if (client) return client;
+  if (isMockMode()) { client = createMockClient(); return client; }
   const cfg = readConfig();
   if (!cfg) return null;
   client = window.supabase.createClient(cfg.url, cfg.anonKey, {

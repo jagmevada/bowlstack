@@ -23,6 +23,22 @@ busy service, not an analytics dashboard. Glanceability beats completeness.
 
 ## 2. Screens
 
+### Master view — quantity per dish position, in kilograms
+
+Reads `slot_quantity`. One card per **slot number across all three areas**,
+itemised by serving hall, with that slot's own total. Stock answers "how much
+rice is left at Darshanarthi position 1"; Master answers "how much dal is
+left, and in which hall", which is what the kitchen cooks and refills against.
+
+There is deliberately **no site-wide total**: rice + dal + curry added
+together is a figure nobody acts on.
+
+The per-bowl weight comes from the Menu tab. Each area is weighed against its
+OWN dish before the sum, so a slot serving Curry in one hall and Bhaji in
+another still totals correctly — see
+[FRONTEND_HANDOFF.md](FRONTEND_HANDOFF.md) §4b, which also covers why a
+missing weight is a `≥` bound rather than a zero.
+
 ### Stock view — the primary screen
 
 Live bowl counts grouped by **location** (`D` Darshanarthi, `M` Mahatma,

@@ -54,6 +54,19 @@ const MENU = {
   M: { 1: 'Rice', 2: 'Dal', 3: 'Sabzi', 4: 'Roti', 5: 'Salad' },
   T: { 1: 'Rice', 2: 'Dal', 3: 'Bhaji', 4: 'Roti', 5: 'Chaas' },
 };
+
+// Per-bowl mass in GRAMS, keyed the same way. Slot 1 and 2 agree across all
+// three areas — the normal case. Slot 3 deliberately does NOT: the areas
+// serve different dishes at different weights, and TIFFIN IS UNWEIGHED. That
+// one gap is the fixture's most important property: it is what proves the
+// Master row degrades to a lower bound instead of quietly pricing Tiffin's
+// Bhaji at zero, and what proves the naive "total bowls x one weight"
+// formula is not what shipped.
+const WEIGHT = {
+  D: { 1: 5000, 2: 3500, 3: 4500, 4: 2000, 5: 4000 },
+  M: { 1: 5000, 2: 3500, 3: 4000, 4: 2000, 5: 4000 },
+  T: { 1: 5000, 2: 3500, 3: null, 4: 2000, 5: 4000 },
+};
 const now = Date.now();
 const iso = ms => new Date(ms).toISOString();
 
@@ -150,6 +163,57 @@ slots.push({
   any_missed_service: false,
 });
 
+// slot_quantity, aggregated the way THAT view does it: grouped by food_slot
+// across every area, summing each area's bowls against its own weight, and
+// excluding any slot whose devices have never reported.
+const quantity = [];
+for (let sl = 1; sl <= 6; sl++) {
+  const areas = ['D', 'M', 'T'].map(loc => {
+    const row = slots.find(x => x.location === loc && x.food_slot === sl);
+    return {
+      location: loc, food_name: MENU[loc][sl], bowl_weight_g: WEIGHT[loc][sl],
+      bowls_trusted: row ? row.bowls_trusted : null,
+      bowls_capacity: row ? row.bowls_capacity : 0,
+      devices: row ? row.devices : 0,
+      // Each hall's own mass, computed by the view so no screen re-derives it.
+      weight_g: WEIGHT[loc][sl] == null || !row || row.bowls_trusted == null
+        ? null : row.bowls_trusted * WEIGHT[loc][sl],
+      capacity_weight_g: WEIGHT[loc][sl] == null || !row ? null
+        : row.bowls_capacity * WEIGHT[loc][sl],
+    };
+  });
+  const mine = devices.filter(d => d.food_slot === sl && ['D', 'M', 'T'].includes(d.location));
+  if (!mine.some(d => d.reported)) continue;           // the has-ever-reported gate
+  const weighed = areas.filter(a => a.bowl_weight_g != null);
+  const distinctW = [...new Set(weighed.map(a => a.bowl_weight_g))];
+  const trusted = areas.filter(a => a.bowls_trusted != null);
+  quantity.push({
+    food_slot: sl, current_meal: 'Lunch',
+    // The menu resolved from the meal that is running, so it is live. The
+    // not-live case is exercised below.
+    menu_meal_type: 'Lunch', menu_meal_date: '2026-08-20', menu_is_live: true,
+    dishes: [...new Set(areas.map(a => a.food_name).filter(Boolean))].sort(),
+    bowl_weight_g: distinctW.length === 1 ? distinctW[0] : null,
+    devices: areas.reduce((n, a) => n + a.devices, 0),
+    bowls_capacity: areas.reduce((n, a) => n + a.bowls_capacity, 0),
+    bowls_trusted: trusted.length ? trusted.reduce((n, a) => n + a.bowls_trusted, 0) : null,
+    est_weight_g: weighed.length
+      ? weighed.reduce((n, a) => n + (a.bowls_trusted || 0) * a.bowl_weight_g, 0) : null,
+    capacity_weight_g: weighed.length
+      ? weighed.reduce((n, a) => n + a.bowls_capacity * a.bowl_weight_g, 0) : null,
+    est_is_partial: areas.some(a => a.bowl_weight_g == null && (a.bowls_trusted || 0) > 0),
+    areas_without_weight: areas
+      .filter(a => a.bowl_weight_g == null && (a.bowls_trusted || 0) > 0).map(a => a.location),
+    areas,
+    any_fault: mine.some(d => d.stack_status === 'discontiguous'),
+    any_degraded: mine.some(d => d.stack_status === 'degraded'),
+    any_battery_warn: mine.some(d => ['low', 'critical'].includes(d.battery_level)),
+    any_offline: mine.some(d => d.offline),
+    any_missed_service: mine.some(d => d.missed_last_service),
+    oldest_update: mine.filter(d => d.reported).map(d => d.updated_at).sort()[0] ?? null,
+  });
+}
+
 // status_events, with a seq gap, a second boot_id and one backdated row.
 const events = [];
 let seq = 0;
@@ -170,7 +234,8 @@ for (let i = 30; i >= 0; i--) {
 events.reverse();   // the query orders recorded_at descending
 
 const preload = [1, 2, 3, 4, 5].map(s => ({
-  food_slot: s, food_name: MENU.D[s], source_date: '2026-07-26', is_saved: false,
+  food_slot: s, food_name: MENU.D[s], bowl_weight_g: WEIGHT.D[s],
+  source_date: '2026-07-26', is_saved: false,
 }));
 
 // Weekly template fixture: D has a full Lunch row set for every weekday,
@@ -180,7 +245,8 @@ const templateRows = [];
 for (let wd = 0; wd <= 6; wd++) {
   for (let slot = 1; slot <= 5; slot++) {
     templateRows.push({ location: 'D', weekday: wd, meal_type: 'Lunch',
-                        food_slot: slot, food_name: `T-${MENU.D[slot]}` });
+                        food_slot: slot, food_name: `T-${MENU.D[slot]}`,
+                        bowl_weight_g: WEIGHT.D[slot] });
   }
   templateRows.push({ location: 'M', weekday: wd, meal_type: 'Lunch',
                       food_slot: 6, food_name: 'T-PlannedDish' });
@@ -189,6 +255,9 @@ for (let wd = 0; wd <= 6; wd++) {
 // ---- fake PostgREST ---------------------------------------------------
 const calls = [];
 let preloadSourceDate = null;   // set per-test to mark a template draft
+// Flip to simulate a database that has not run migrate_bowl_weight.sql: the
+// view does not exist, so PostgREST answers 42P01 rather than an empty set.
+let quantityMissing = false;
 let authCallback = null;        // captured so tests can fire auth events
 function builder(table) {
   const rec = { table, filters: [] };
@@ -198,8 +267,14 @@ function builder(table) {
     api[m] = (...args) => { rec.filters.push([m, ...args]); return api; };
   }
   api.then = (res, rej) => {
+    if (table === 'slot_quantity' && quantityMissing) {
+      return Promise.resolve({ data: null, error: {
+        message: 'relation "public.slot_quantity" does not exist', code: '42P01',
+      } }).then(res, rej);
+    }
     let data = table === 'device_overview' ? devices
       : table === 'slot_overview' ? slots
+      : table === 'slot_quantity' ? quantity
       : table === 'status_events' ? events
       : table === 'meal_food_mapping' ? [{ meal_type: 'Lunch', food_slot: 1, food_name: 'Rice' }]
       : table === 'meal_menu_template' ? templateRows
@@ -484,11 +559,308 @@ console.log('\n[stock: symbolic cards & battery bars]');
     /still reading correctly\./.test(faultCard?.textContent || ''));
 }
 
+// ====================================================================
+//  Master — the site total in kilograms.
+//
+//  The expected figures below are worked out by hand, not recomputed from
+//  the fixtures. A test that derived its expectation the same way the code
+//  does would pass on a shared mistake, which is the one thing this block
+//  exists to catch.
+// ====================================================================
+// ====================================================================
+//  Menu — the per-bowl weight field.
+//
+//  Grams on the wire, kilograms on screen, and a blank field is NULL rather
+//  than zero. That last rule is the one worth a test: zero would render a
+//  full counter as "0.0 kg remaining" on Master and send someone to refill
+//  something that is full.
+// ====================================================================
+console.log('');
+console.log('[menu: per-bowl weight]');
+await go('#/menu?locs=D&meal=Lunch&date=2026-09-01');
+{
+  const weights = [...view.querySelectorAll('.row-form .w-input')];
+  ok('every slot gets a weight field', weights.length >= 5, `got ${weights.length}`);
+  ok('the two fields are labelled', /Dish/.test(text()) && /kg \/ bowl/.test(text()));
+
+  // The preload carries grams; the field shows kilograms. 5000 → "5.0".
+  ok('grams arrive as kilograms', weights.map(i => i.value).includes('5.0'),
+    weights.map(i => i.value).join(','));
+  ok('and every seeded weight is converted',
+    ['5.0', '3.5', '4.5', '2.0', '4.0'].every(v => weights.map(i => i.value).includes(v)),
+    weights.map(i => i.value).join(','));
+
+  // A number input, so a phone raises the numeric keypad rather than a
+  // full keyboard for a field that only ever holds digits and a point.
+  ok('it is a numeric field', weights[0]?.getAttribute('type') === 'number');
+  ok('bounded to a weight a bowl can plausibly be',
+    weights[0]?.getAttribute('min') === '0.1' && weights[0]?.getAttribute('max') === '50');
+
+  const dishes = [...view.querySelectorAll('.row-form input[type=text]')];
+  // Slot 1: change the weight only. Slot 2: clear the weight entirely.
+  // Slot 3: clear the DISH, which must delete the row weight and all.
+  weights[0].value = '6.25';
+  weights[1].value = '';
+  dishes[2].value = '';
+
+  const saveBtn = [...view.querySelectorAll('button')].find(b => b.textContent === 'Save menu');
+  ok('save button present', !!saveBtn);
+  saveBtn.dispatchEvent(new window.Event('click'));
+  await new Promise(r => setTimeout(r, 120));
+
+  const up = [...calls].reverse().find(c => c.table === 'meal_food_mapping'
+    && c.filters.some(f => f[0] === 'upsert'));
+  const payload = up?.filters.find(f => f[0] === 'upsert')?.[1] || [];
+  const bySlot = new Map(payload.map(r => [Number(r.food_slot), r]));
+
+  ok('the weight is written as whole grams', bySlot.get(1)?.bowl_weight_g === 6250,
+    String(bySlot.get(1)?.bowl_weight_g));
+  ok('a blank weight is NULL, never zero', bySlot.get(2)?.bowl_weight_g === null,
+    String(bySlot.get(2)?.bowl_weight_g));
+  ok('an untouched weight is preserved', bySlot.get(4)?.bowl_weight_g === 2000,
+    String(bySlot.get(4)?.bowl_weight_g));
+  ok('a blanked dish is not upserted at all', !bySlot.has(3));
+
+  const del = [...calls].reverse().find(c => c.table === 'meal_food_mapping'
+    && c.filters.some(f => f[0] === 'delete'));
+  ok('a blanked dish deletes the row, weight and all',
+    (del?.filters.find(f => f[0] === 'in')?.[2] || []).includes(3),
+    JSON.stringify(del?.filters.find(f => f[0] === 'in')?.[2]));
+}
+
+// The weekly template carries the weight too, or a materialised week would
+// arrive named but unweighed and every Master row would read "set a weight".
+console.log('');
+console.log('[menu: the weekly template carries weight]');
+await go('#/menu?locs=D&meal=Lunch&mode=week&day=3');
+{
+  const weights = [...view.querySelectorAll('.row-form .w-input')];
+  ok('the template editor has weight fields too', weights.length >= 5,
+    `got ${weights.length}`);
+  ok('prefilled from the stored template',
+    weights.map(i => i.value).includes('5.0'), weights.map(i => i.value).join(','));
+
+  weights[0].value = '7.5';
+  const saveBtn = [...view.querySelectorAll('button')]
+    .find(b => b.textContent === 'Save template');
+  ok('template save present', !!saveBtn);
+  saveBtn.dispatchEvent(new window.Event('click'));
+  await new Promise(r => setTimeout(r, 120));
+
+  const up = [...calls].reverse().find(c => c.table === 'meal_menu_template'
+    && c.filters.some(f => f[0] === 'upsert'));
+  const payload = up?.filters.find(f => f[0] === 'upsert')?.[1] || [];
+  ok('the template stores grams as well as a name',
+    payload.some(r => r.bowl_weight_g === 7500),
+    JSON.stringify(payload.slice(0, 2)));
+  ok('and still writes the dish name',
+    payload.every(r => typeof r.food_name === 'string' && r.food_name.trim()));
+}
+
+// ====================================================================
+//  Master — quantity per dish position, itemised by serving hall.
+//
+//  Expected figures are worked out by hand below, not recomputed from the
+//  fixtures. A test that derived its expectation the same way the code does
+//  would pass on a shared mistake, which is the one thing this block exists
+//  to catch.
+//
+//  There is deliberately NO site-wide total to assert: rice + dal + curry
+//  added together is a number nobody can act on.
+// ====================================================================
+console.log('');
+console.log('[master: quantity per slot, per hall]');
+await go('#/master');
+{
+  const t = text().replace(/\s+/g, ' ');
+  const cards = [...view.querySelectorAll('.mslot')];
+  const card = nth => cards.find(c =>
+    c.querySelector('.mrow-slot')?.textContent === `Slot ${nth}`);
+  const kgOf = nth => card(nth)?.querySelector('.mrow-kg')?.textContent;
+  // One line per hall, in SERVING_LOCATIONS order: D, M, T.
+  const hall = (nth, i) => card(nth)?.querySelectorAll('.marea')[i];
+  const hallKg = (nth, i) => hall(nth, i)?.querySelector('.marea-kg')?.textContent;
+  const hallBowls = (nth, i) => hall(nth, i)?.querySelector('.marea-bowls')?.textContent;
+
+  ok('one card per reporting slot', cards.length === 5, `got ${cards.length}`);
+  ok('queried slot_quantity', calls.some(c => c.table === 'slot_quantity'));
+
+  // The site-wide total is gone on purpose — adding rice to dal to curry
+  // produces a figure nobody cooks, orders or refills against.
+  ok('no cross-slot grand total', view.querySelector('.master-total') === null
+    && !/Total remaining/i.test(t));
+
+  // --- slot 1: Rice at 5.0 kg everywhere, with a FAULTED stack ----------
+  // D1 holds 0 + (BWL-002 faulted, excluded) + 2 = 2 trusted bowls; M1 4; T1 4.
+  //   D 2 x 5.0 = 10.0    M 4 x 5.0 = 20.0    T 4 x 5.0 = 20.0   -> 50.0
+  ok('each hall is itemised', card(1)?.querySelectorAll('.marea').length === 3,
+    String(card(1)?.querySelectorAll('.marea').length));
+  // A hall line is a THREE-column grid and must emit exactly three children.
+  // A fourth — an empty placeholder for a dish that is not shown — wraps the
+  // kilograms onto their own row and doubles the height of every card. That
+  // shipped once; this is the guard.
+  ok('every hall line fills exactly three grid cells',
+    [...view.querySelectorAll('.marea')].every(a => a.children.length === 3),
+    [...new Set([...view.querySelectorAll('.marea')].map(a => a.children.length))].join(','));
+  ok('the hall name and its dish share one cell',
+    card(3)?.querySelector('.marea-name .marea-hall') !== null
+    && card(3)?.querySelector('.marea-name .marea-dish') !== null);
+  ok('halls are named', /Darshanarthi/.test(card(1)?.textContent || '')
+    && /Mahatma/.test(card(1)?.textContent || '')
+    && /Tiffin/.test(card(1)?.textContent || ''));
+  ok('Darshanarthi share of slot 1', hallKg(1, 0) === '10.0 kg', hallKg(1, 0));
+  ok('Mahatma share of slot 1', hallKg(1, 1) === '20.0 kg', hallKg(1, 1));
+  ok('Tiffin share of slot 1', hallKg(1, 2) === '20.0 kg', hallKg(1, 2));
+  ok('the slot total is the sum of its halls', kgOf(1) === '50.0 kg', kgOf(1));
+  ok('bowls are shown per hall too', hallBowls(1, 0) === '2/12',
+    hallBowls(1, 0));
+
+  // A fault no longer hides the figure — bowls_trusted already excluded the
+  // faulted stack, so the number is what the healthy stacks hold. It is red,
+  // and the offending hall carries the glyph.
+  ok('a faulted slot still states its figure', /kg/.test(kgOf(1) || ''), kgOf(1));
+  ok('and states it in red', card(1)?.querySelector('.mrow-kg.is-alert') !== null);
+  ok('the fault is pinned to the hall it is in',
+    hall(1, 0)?.querySelector('.st-fault') !== null
+    && hall(1, 1)?.querySelector('.st-fault') === null,
+    'expected the glyph on Darshanarthi only');
+
+  // --- slot 2: Dal at 3.5 kg. M2's stack is OFFLINE ---------------------
+  // D2 3+4+0 = 7 -> 24.5 kg;  M2 0 -> 0.0;  T2 0 -> 0.0
+  ok('slot 2 totals 24.5 kg', kgOf(2) === '24.5 kg', kgOf(2));
+  ok('Darshanarthi carries all of it', hallKg(2, 0) === '24.5 kg', hallKg(2, 0));
+  ok('a hall reporting zero bowls shows 0.0 kg', hallKg(2, 1) === '0.0 kg',
+    hallKg(2, 1));
+  ok('the offline hall is marked', hall(2, 1)?.querySelector('.st-off') !== null);
+
+  // --- slot 3: three dishes, three weights, Tiffin unweighed ------------
+  //   D 4 x 4.5 = 18.0    M 1 x 4.0 = 4.0    T 1 x (unset)
+  // Total is a lower bound; the naive "6 bowls x one weight" is wrong.
+  ok('a slot with different dishes lists them all',
+    /Bhaji \/ Curry \/ Sabzi/.test(card(3)?.textContent || ''),
+    card(3)?.querySelector('.mrow-dish')?.textContent);
+  ok('each hall is weighed against its own dish',
+    hallKg(3, 0) === '18.0 kg' && hallKg(3, 1) === '4.0 kg',
+    `${hallKg(3, 0)} / ${hallKg(3, 1)}`);
+  ok('an unweighed hall says so rather than showing zero',
+    /no weight set/.test(hallKg(3, 2) || ''), hallKg(3, 2));
+  ok('and the slot total is a lower bound', kgOf(3) === '≥22.0 kg', kgOf(3));
+  ok('marked as a bound', card(3)?.querySelector('.mrow-kg.is-bound') !== null);
+  ok('with a link that fixes it', /Set weight/.test(card(3)?.textContent || ''));
+  ok('pointed at the hall actually missing a weight',
+    /locs=T/.test(card(3)?.querySelector('.mrow-fix')?.getAttribute('href') || ''),
+    card(3)?.querySelector('.mrow-fix')?.getAttribute('href'));
+  ok('the differing dishes are named per hall',
+    /Curry/.test(hall(3, 0)?.textContent || '')
+    && /Bhaji/.test(hall(3, 2)?.textContent || ''));
+
+  // --- slot 4: clean. D 5x2.0=10.0, M 2x2.0=4.0, T 2x2.0=4.0 -> 18.0 ----
+  ok('a clean slot states a plain figure', kgOf(4) === '18.0 kg', kgOf(4));
+  ok('and is not marked compromised',
+    card(4)?.querySelector('.mrow-kg.is-alert') === null);
+  ok('its halls add up',
+    hallKg(4, 0) === '10.0 kg' && hallKg(4, 1) === '4.0 kg' && hallKg(4, 2) === '4.0 kg',
+    `${hallKg(4, 0)} / ${hallKg(4, 1)} / ${hallKg(4, 2)}`);
+  ok('the slot carries its bowl count', /9 of 20 bowls/.test(card(4)?.textContent || ''),
+    card(4)?.querySelector('.mslot-of')?.textContent);
+
+  // --- slot 5: only Darshanarthi has a reading --------------------------
+  // D5 2 x 4.0 = 8.0; M5 and T5 have no trusted stack at all.
+  ok('a hall with no reading shows a dash, never 0.0 kg',
+    hallKg(5, 1) === '—', hallKg(5, 1));
+  ok('and its bowl count is a dash too', hallBowls(5, 1) === '—', hallBowls(5, 1));
+  // The terse form must not lose the meaning — it rides in the tooltip.
+  ok('the terse bowl count spells itself out on hover',
+    hall(1, 0)?.querySelector('.marea-bowls')?.getAttribute('title') === '2 of 12 bowls',
+    hall(1, 0)?.querySelector('.marea-bowls')?.getAttribute('title'));
+
+  // --- the header names the meal ---------------------------------------
+  ok('the header names the meal on screen', /Lunch service is on/.test(t), t.slice(0, 120));
+
+  // The gate: M slot 6 exists in slot_overview but no device there has ever
+  // reported, so it must not appear — this is what keeps the undeployed
+  // backup units off the screen.
+  ok('a slot no device has ever reported is hidden', !/Slot 6/.test(t));
+}
+
+// Between meals the figures come from the meal that just finished. That food
+// is still on the counters so the numbers are real — but the header must say
+// which meal it is, or last night's dinner reads as tonight's.
+{
+  for (const r of quantity) {
+    r.menu_is_live = false;
+    r.menu_meal_type = 'Dinner';
+    r.menu_meal_date = '2026-08-19';
+  }
+  await go('#/stock');
+  await go('#/master');
+  const t2 = text();
+  ok('a between-meals header names its meal', /From Dinner/.test(t2), t2.slice(0, 200));
+  ok('and dates it', /19 Aug/.test(t2), t2.slice(0, 200));
+  ok('and says the readings are not live', /last known/.test(t2));
+  ok('the kilograms are still stated', /kg/.test(t2));
+  for (const r of quantity) {
+    r.menu_is_live = true;
+    r.menu_meal_type = 'Lunch';
+    r.menu_meal_date = '2026-08-20';
+  }
+  await go('#/stock');
+  await go('#/master');
+  ok('a live header says service is on', /Lunch service is on/.test(text()));
+}
+
+// An un-migrated database and a fleet that has never reported look identical
+// on screen unless the view says which it is -- and they send someone to
+// opposite places.
+{
+  const saved = quantity.slice();
+  quantity.length = 0;
+  const app = await import('../js/app.js');
+  await go('#/stock');
+  await go('#/master');
+  ok('an empty view blames the fleet, not the database',
+    /never reported|has reported yet/.test(text()) && !/migration/i.test(text()), text().slice(0, 120));
+  quantity.push(...saved);
+  await go('#/stock');
+  await go('#/master');
+  ok('and the rows come back', view.querySelectorAll('.mslot').length === 5);
+}
+
+{
+  // This one needs a real REFETCH, not just a re-render: quantityError is set
+  // by refresh(), and the empty-array case above only worked because
+  // state.quantity holds the very array the stub hands back.
+  quantityMissing = true;
+  window.document.getElementById('refresh-btn').dispatchEvent(new window.Event('click'));
+  await new Promise(r => setTimeout(r, 200));
+  await go('#/stock');
+  await go('#/master');
+  const t2 = text();
+  ok('an un-migrated database says so instead',
+    /needs one migration/i.test(t2), t2.slice(0, 160));
+  ok('and names the file to run',
+    /migrate_bowl_weight\.sql/.test(t2));
+  ok('and does not blame the fleet', !/never reported|has reported yet/.test(t2));
+  ok('the underlying error is still shown', /42P01|does not exist/.test(t2));
+  quantityMissing = false;
+  window.document.getElementById('refresh-btn').dispatchEvent(new window.Event('click'));
+  await new Promise(r => setTimeout(r, 200));
+  await go('#/stock');
+  await go('#/master');
+  ok('and Master recovers once the view exists',
+    view.querySelectorAll('.mslot').length === 5);
+}
+
 console.log('\n[swipe navigation]');
 {
   const { swipeTarget } = await import('../js/app.js');
-  ok('left swipe on Stock lands on Health', swipeTarget('stock', -120, 10, 200, false) === 'health');
-  ok('right swipe on Health returns to Stock', swipeTarget('health', 120, -8, 200, false) === 'stock');
+  // Master sits between Stock and Health in the tab bar, so it is what a
+  // left swipe off Stock now reaches. The order under test is the tab-bar
+  // order, not an arbitrary list.
+  ok('left swipe on Stock lands on Master', swipeTarget('stock', -120, 10, 200, false) === 'master');
+  ok('right swipe on Master returns to Stock', swipeTarget('master', 120, -8, 200, false) === 'stock');
+  ok('left swipe on Master lands on Health', swipeTarget('master', -120, 10, 200, false) === 'health');
+  ok('right swipe on Health returns to Master', swipeTarget('health', 120, -8, 200, false) === 'master');
   ok('left swipe on Devices has nowhere to go', swipeTarget('assign', -120, 0, 200, false) === null);
   ok('right swipe on Stock has nowhere to go', swipeTarget('stock', 120, 0, 200, false) === null);
   ok('a mostly-vertical drag is a scroll, not a swipe', swipeTarget('stock', -70, 60, 200, false) === null);

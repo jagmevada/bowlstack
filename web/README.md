@@ -147,12 +147,13 @@ worse than none).
 | Tab | Source | What it is for |
 | --- | --- | --- |
 | **Stock** | `slot_overview` | Bowls left per dish position, per area. The screen watched during service. |
+| **Master** | `slot_quantity` | Quantity per dish position in **kilograms**, itemised by serving hall, with each slot's own total. Stock answers "how much rice at Darshanarthi position 1"; Master answers "how much dal is left, and in which hall". No site-wide total — adding rice to dal produces a figure nobody can act on. |
 | **Health** | `device_overview` | Every device, **sorted by severity**, as a symbolic roster — one glyph line per device, whole fleet on a phone screen. Answers "which station needs someone". |
 | Device detail | `device_overview` + `status_events` | One device: levels, battery, history, and the reliability numbers a trial exists to collect. |
 | **Menu** | `meal_mapping_preload` + `meal_food_mapping` + `meal_menu_template` | Daily mode: one column per selected area (capsule multi-select), one meal at a time — the morning verification surface. Weekly mode: the template. |
 | **Devices** | `devices` | Assign `location`, `food_slot`, `label`. Rare — hardware moves only. |
 
-Left/right **swipe** moves between the four tabs on a phone; each Stock area
+Left/right **swipe** moves between the five tabs on a phone; each Stock area
 sits on its own colour wash with its heading latched below the tab bar while
 its slots scroll.
 
@@ -351,10 +352,11 @@ web/
     version.js        the version shown in the header — bump on every deploy
     app.js            gates, router, polling, fleet chips
     supa.js           connection + client
+    mock.js           demo-mode fixtures — see "Demo mode" below
     domain.js         every semantic rule, in one place
     ui.js             DOM helpers
     chart.js          step chart + status timeline
-    views/            stock, health, device, menu, assign
+    views/            stock, master, health, device, menu, assign
   test/smoke.mjs      renders every screen against fixtures
 ```
 
@@ -390,6 +392,42 @@ it too, so a deploy cannot leave half an old shell behind.
 | 1.18 | each Stock area sits on its own colour wash (D blue, M violet, T teal) with a matching heading dot, and the area heading stays latched below the top bar while its slots scroll — found without reading |
 | 1.19 | the area subtitle shrinks to one guaranteed line, so every latched heading is the same height |
 | 1.20 | left/right swipe moves between the four tabs — guarded against scrolls, charts, sideways tables and unsaved menu drafts |
+| 1.21 | per-bowl weight on the Menu tab, and the **Master** dashboard — the site total in kilograms, summed per area against each area's own dish; `?mock=1` demo mode |
+| 1.27 | dead code from the removed site-total card cleared out — two domain helpers and its stylesheet block |
+| 1.26 | the layout goes fluid — the 1180px cap is gone, so a wide screen becomes more columns instead of wallpaper; one `--gutter` token keeps the tab bar and content on a single left edge |
+| 1.25 | fixes a hall line emitting a fourth, empty grid cell — the kilograms were wrapping onto their own row and doubling every card's height |
+| 1.24 | Master lays its slot cards side by side and tightens them — the whole fleet fits above the fold; hall bowl counts go terse (`5/12`) with the full wording on hover |
+| 1.23 | Master itemises every slot by serving hall and drops the cross-slot grand total; a fault no longer hides the figure; the header names the meal on screen; demo mode's meal rule matched to the database |
+| 1.22 | Master keeps its dishes and weights between meals — the figure falls back to the meal that just finished and says which one; an un-migrated database says so instead of blaming the fleet |
+
+### Demo mode
+
+```
+web/index.html?mock=1
+```
+
+Runs the whole dashboard with **no Supabase and no hardware**: `js/mock.js`
+stands in for the client, generating the real 20-device deployment plus the
+four backups and the eight reserved units. It exists because the weight work
+had to be reviewed before twenty load cells were mounted, and because a screen
+whose point is a number counting down cannot be judged from a screenshot.
+
+Three properties are deliberate:
+
+- **It drifts.** Bowl counts fall with the wall clock, each stack at its own
+  rate, so every poll visibly changes the screen.
+- **It is writable.** Type a per-bowl weight on the Menu tab, press Save, and
+  the Master total moves — the editing path is the part most worth trying.
+- **It is always in service.** Devices are dark ~16 h a day by design, so a
+  demo opened at 3pm would correctly render "outside service hours", freeze,
+  and idle its poll to 10 minutes — accurate, and useless as a demo.
+
+Everything is derived from two mutable stores by functions that mirror
+`device_overview`, `slot_overview` and `slot_quantity`, so the tabs cannot
+contradict each other. A permanent amber strip says the data is invented;
+demo mode is opt-in per URL and never sticky, because a screen showing
+fabricated bowl counts that someone believes is stock is worse than a screen
+showing nothing.
 
 ### Tests
 

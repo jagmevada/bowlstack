@@ -25,6 +25,59 @@ import {
 const preloadCache = new Map();
 const SLOT_ID = 'menu-body';
 
+// --- the two fields ---------------------------------------------------
+//
+// A dish now carries a per-bowl WEIGHT as well as a name, because the Master
+// Dashboard turns bowls into kilograms and this is the only screen that knows
+// what a bowl of dal weighs.
+//
+// GRAMS on the wire, KILOGRAMS on screen. Nobody types "5000" for a bowl of
+// rice, and nothing downstream should carry a float: the database stores an
+// integer count of grams and the conversion happens exactly twice, here.
+//
+// A BLANK WEIGHT IS NULL, NEVER ZERO — the rule the whole schema is built on.
+// Zero would render a full counter as "0.0 kg remaining" and send someone to
+// refill something that is full; NULL renders as "weight not set" and asks.
+// The name still decides whether the row exists at all: a weight with no dish
+// is not a mapping, and clearing the dish deletes the row weight and all.
+
+const MIN_KG = 0.1;
+const MAX_KG = 50;
+
+function weightInput(label, grams, extra = {}) {
+  return h('input', {
+    class: 'w-input',
+    type: 'number', step: '0.1', min: String(MIN_KG), max: String(MAX_KG),
+    inputmode: 'decimal',
+    value: grams == null ? '' : (Number(grams) / 1000).toFixed(1),
+    placeholder: 'kg',
+    'aria-label': `${label} — kilograms per bowl`,
+    ...extra,
+  });
+}
+
+/** Read a weight field back to whole grams. Anything not a positive number —
+ *  blank, a stray minus, a half-typed decimal point — is "not configured",
+ *  which is NULL. Rounded because the column is an integer and 4.35 kg would
+ *  otherwise arrive as 4349.999999999999. */
+function readWeight(input) {
+  const raw = (input?.value || '').trim();
+  if (!raw) return null;
+  const kg = Number(raw);
+  if (!Number.isFinite(kg) || kg <= 0) return null;
+  return Math.round(Math.min(MAX_KG, Math.max(MIN_KG, kg)) * 1000);
+}
+
+/** The header above each column's rows. Two fields need two labels, or the
+ *  kg box reads as a second dish field on a narrow tablet. */
+function fieldHead() {
+  return h('div', { class: 'row-form row-head' },
+    h('span', { class: 'slotno' }, ''),
+    h('span', {}, 'Dish'),
+    h('span', {}, 'kg / bowl'),
+    h('span', {}));
+}
+
 /** Areas selected in the daily editor. Multi-select; at least one. The old
  *  single `loc` param is honoured so old links and habits keep working. */
 function parseLocs(params) {
@@ -183,10 +236,12 @@ async function load(client, loc, meal, date) {
   let tpl = null;
   try {
     const t = await client.from('meal_menu_template')
-      .select('food_slot, food_name')
+      .select('food_slot, food_name, bowl_weight_g')
       .eq('location', loc).eq('meal_type', meal)
       .eq('weekday', weekdayOf(date));
-    if (!t.error) tpl = new Map((t.data || []).map(r => [Number(r.food_slot), r.food_name]));
+    // The whole row, not just the name: an override is now either field
+    // differing from the plan, and a name-only map could not say so.
+    if (!t.error) tpl = new Map((t.data || []).map(r => [Number(r.food_slot), r]));
   } catch { /* pre-migration database */ }
   return { rows, tpl };
 }
@@ -236,14 +291,23 @@ function dailyGrid(ctx, state, { locs, allMode, meal, date, tz, go }) {
         const entry = inputsByLoc.get('ALL') || {};
         const inputs = entry.inputs || new Map();
         const deletable = entry.deletable || new Set();
+        const weightByLoc = entry.weightByLoc || new Map();
+        const weightDiffers = entry.weightDiffers || new Set();
         const payload = [];
         const toDelete = [];
-        for (const [slot, input] of inputs) {
-          const name = input.value.trim();
+        for (const [slot, f] of inputs) {
+          const name = f.name.value.trim();
+          const typedW = readWeight(f.weight);
           if (name) {
             for (const l of locs) {
+              // A blank weight normally means "not configured". But where the
+              // areas already DISAGREE the shared box was rendered empty, so
+              // an untouched blank carries no intent — keep each area's own
+              // figure instead of silently wiping three different weights.
+              const w = typedW != null ? typedW
+                : (weightDiffers.has(slot) ? (weightByLoc.get(slot)?.get(l) ?? null) : null);
               payload.push({ location: l, meal_type: meal, meal_date: date,
-                             food_slot: slot, food_name: name });
+                             food_slot: slot, food_name: name, bowl_weight_g: w });
             }
           } else if (deletable.has(slot)) {
             toDelete.push(slot);
@@ -354,12 +418,27 @@ function combinedDailyColumn(state, { locs, meal, date, inputsByLoc }) {
   // Only DIFFERING slots are immune to a blank — they are the ambiguity the
   // skip rule exists for.
   const deletable = new Set();
-  inputsByLoc.set('ALL', { inputs, deletable });
+  // What each area currently weighs, per slot. Needed at SAVE time, not just
+  // for display: when the areas disagree on weight and the shared field is
+  // left blank, each area must keep its own figure rather than being nulled
+  // by an empty box nobody typed in. Same protection the differing-dish rule
+  // gives names, for the same reason.
+  const weightByLoc = new Map();
+  const weightDiffers = new Set();
+  inputsByLoc.set('ALL', { inputs, deletable, weightByLoc, weightDiffers });
+  col.append(fieldHead());
   for (const slot of slots) {
     const names = locs.map(l => perLoc.get(l).get(slot)?.food_name ?? '');
     const agreed = new Set(names).size === 1 ? names[0] : '';
     const differs = new Set(names).size > 1;
     if (agreed) deletable.add(slot);
+
+    const ws = locs.map(l => perLoc.get(l).get(slot)?.bowl_weight_g ?? null);
+    weightByLoc.set(slot, new Map(locs.map((l, i) => [l, ws[i]])));
+    const wDiffers = new Set(ws.map(String)).size > 1;
+    if (wDiffers) weightDiffers.add(slot);
+    const wAgreed = wDiffers ? null : ws[0];
+
     const input = h('input', {
       type: 'text', value: agreed, placeholder: differs ? '≠ differs by area' : 'No dish',
       'aria-label': `All areas slot ${slot} dish`,
@@ -368,11 +447,19 @@ function combinedDailyColumn(state, { locs, meal, date, inputsByLoc }) {
         ? locs.map((l, i) => `${LOCATION_NAMES[l]}: ${names[i] || '—'}`).join(' · ')
         : undefined,
     });
-    inputs.set(slot, input);
+    const winput = weightInput(`All areas slot ${slot}`, wAgreed, {
+      placeholder: wDiffers ? '≠' : 'kg',
+      title: wDiffers
+        ? locs.map((l, i) => `${LOCATION_NAMES[l]}: `
+            + (ws[i] == null ? 'not set' : `${(Number(ws[i]) / 1000).toFixed(1)} kg`)).join(' · ')
+        : undefined,
+    });
+    inputs.set(slot, { name: input, weight: winput });
     col.append(h('div', { class: 'row-form' },
       h('span', { class: 'slotno' }, String(slot)),
       input,
-      differs ? badge('warning', '≠', 'differs') : h('span', {})));
+      winput,
+      (differs || wDiffers) ? badge('warning', '≠', 'differs') : h('span', {})));
   }
   return col;
 }
@@ -413,20 +500,36 @@ function menuColumn(state, { loc, meal, date, rows, tpl, inputsByLoc }) {
 
   const inputs = new Map();
   inputsByLoc.set(loc, { inputs });
+  col.append(fieldHead());
   for (const slot of slots) {
     const row = byNumber.get(slot);
-    const tplName = tpl?.get(slot);
-    const overridden = row?.is_saved && tplName != null && tplName !== row.food_name;
+    const t = tpl?.get(slot);
+    const tplName = t?.food_name ?? null;
+    const tplW = t?.bowl_weight_g ?? null;
+    // An override is EITHER field diverging from the weekly plan. Flagging
+    // only the name would leave a slot silently serving the planned dish at
+    // an unplanned weight — which is exactly the number Master multiplies by.
+    const nameOver = row?.is_saved && tplName != null && tplName !== row.food_name;
+    const weightOver = row?.is_saved && tplW != null
+      && Number(tplW) !== Number(row.bowl_weight_g ?? NaN);
+    const overridden = nameOver || weightOver;
     const input = h('input', {
       type: 'text', value: row?.food_name || '', placeholder: 'No dish',
       'aria-label': `${LOCATION_NAMES[loc]} slot ${slot} dish`,
       autocomplete: 'off', maxlength: 60,
     });
-    inputs.set(slot, input);
+    const winput = weightInput(`${LOCATION_NAMES[loc]} slot ${slot}`, row?.bowl_weight_g);
+    inputs.set(slot, { name: input, weight: winput });
     col.append(h('div', { class: `row-form${row && !row.is_saved ? ' is-draft' : ''}` },
       h('span', { class: 'slotno' }, `${slot}${deployedSlots.includes(slot) ? '' : ' ·'}`),
       input,
-      overridden ? badge('warning', '◆', 'override', `Template: ${tplName}`) : h('span', {})));
+      winput,
+      overridden
+        ? badge('warning', '◆', 'override',
+            [nameOver ? `Template dish: ${tplName}` : null,
+             weightOver ? `Template weight: ${(Number(tplW) / 1000).toFixed(1)} kg` : null]
+              .filter(Boolean).join(' · '))
+        : h('span', {})));
   }
   return col;
 }
@@ -437,10 +540,18 @@ function menuColumn(state, { loc, meal, date, rows, tpl, inputsByLoc }) {
 async function saveArea(ctx, { loc, meal, date, inputs }) {
   const payload = [];
   const toDelete = [];
-  for (const [slot, input] of inputs) {
-    const name = input.value.trim();
-    if (name) payload.push({ location: loc, meal_type: meal, meal_date: date, food_slot: slot, food_name: name });
-    else toDelete.push(slot);
+  for (const [slot, f] of inputs) {
+    const name = f.name.value.trim();
+    if (name) {
+      payload.push({ location: loc, meal_type: meal, meal_date: date,
+                     food_slot: slot, food_name: name,
+                     bowl_weight_g: readWeight(f.weight) });
+    } else {
+      // The DISH decides whether the row exists. A weight typed against a
+      // blank dish is not a mapping to keep — it is a half-finished edit, and
+      // the CHECK on food_name would reject it anyway.
+      toDelete.push(slot);
+    }
   }
   if (payload.length) {
     unwrap(await ctx.client.from('meal_food_mapping')
@@ -467,12 +578,13 @@ function copyDayCard(ctx, { locs, date, tz }) {
     note.textContent = 'Copying…';
     try {
       const rows = unwrap(await ctx.client.from('meal_food_mapping')
-        .select('location, meal_type, food_slot, food_name')
+        .select('location, meal_type, food_slot, food_name, bowl_weight_g')
         .in('location', locs).eq('meal_date', date)) || [];
       if (!rows.length) { note.textContent = 'Nothing saved on this day to copy.'; return; }
       unwrap(await ctx.client.from('meal_food_mapping').upsert(
         rows.map(r => ({ location: r.location, meal_date: to, meal_type: r.meal_type,
-                         food_slot: r.food_slot, food_name: r.food_name })),
+                         food_slot: r.food_slot, food_name: r.food_name,
+                         bowl_weight_g: r.bowl_weight_g ?? null })),
         { onConflict: 'location,meal_date,meal_type,food_slot' }));
       for (const l of locs) {
         for (const m of MEAL_TYPES) preloadCache.delete(`${l}|${m}|${to}`);
@@ -519,7 +631,7 @@ const templateCache = new Map();
 
 async function loadTemplate(client, loc) {
   const res = await client.from('meal_menu_template')
-    .select('weekday, meal_type, food_slot, food_name')
+    .select('weekday, meal_type, food_slot, food_name, bowl_weight_g')
     .eq('location', loc);
   if (res.error) throw res.error;
   return res.data || [];
@@ -619,14 +731,21 @@ function weekGrid(state, ctx, { locs, allMode, meal, day, tz, go }) {
         const entry = inputsByLoc.get('ALL') || {};
         const inputs = entry.inputs || new Map();
         const deletable = entry.deletable || new Set();
+        const weightByLoc = entry.weightByLoc || new Map();
+        const weightDiffers = entry.weightDiffers || new Set();
         const payload = [];
         const toDelete = [];
-        for (const [slot, input] of inputs) {
-          const name = input.value.trim();
+        for (const [slot, f] of inputs) {
+          const name = f.name.value.trim();
+          const typedW = readWeight(f.weight);
           if (name) {
             for (const l of locs) {
+              // Same protection as the daily All form: an untouched blank on a
+              // slot the areas already disagree about carries no intent.
+              const w = typedW != null ? typedW
+                : (weightDiffers.has(slot) ? (weightByLoc.get(slot)?.get(l) ?? null) : null);
               payload.push({ location: l, weekday: day, meal_type: meal,
-                             food_slot: slot, food_name: name });
+                             food_slot: slot, food_name: name, bowl_weight_g: w });
             }
           } else if (deletable.has(slot)) {
             toDelete.push(slot);
@@ -657,11 +776,12 @@ function weekGrid(state, ctx, { locs, allMode, meal, day, tz, go }) {
       try {
         const payload = [];
         const toDelete = [];
-        for (const [slot, input] of entry.inputs) {
-          const name = input.value.trim();
+        for (const [slot, f] of entry.inputs) {
+          const name = f.name.value.trim();
           if (name) {
             payload.push({ location: l, weekday: day, meal_type: meal,
-                           food_slot: slot, food_name: name });
+                           food_slot: slot, food_name: name,
+                           bowl_weight_g: readWeight(f.weight) });
           } else if (entry.existing.has(slot)) {
             toDelete.push(slot);
           }
@@ -713,7 +833,7 @@ function combinedWeekColumn(state, { locs, meal, day, inputsByLoc }) {
     const all = templateCache.get(l) || [];
     return [l, new Map(all
       .filter(r => r.weekday === day && r.meal_type === meal)
-      .map(r => [Number(r.food_slot), r.food_name]))];
+      .map(r => [Number(r.food_slot), r]))];
   }));
   const deployedSlots = [...new Set(state.devices
     .filter(d => SERVING_LOCATIONS.includes(d.location) && d.food_slot != null)
@@ -726,7 +846,7 @@ function combinedWeekColumn(state, { locs, meal, day, inputsByLoc }) {
 
   const differing = [];
   for (const slot of slots) {
-    const names = locs.map(l => perLoc.get(l).get(slot) ?? '');
+    const names = locs.map(l => perLoc.get(l).get(slot)?.food_name ?? '');
     if (new Set(names).size > 1) differing.push(slot);
   }
   const chip = differing.length
@@ -742,12 +862,21 @@ function combinedWeekColumn(state, { locs, meal, day, inputsByLoc }) {
 
   const inputs = new Map();
   const deletable = new Set();
-  inputsByLoc.set('ALL', { inputs, deletable });
+  const weightByLoc = new Map();
+  const weightDiffers = new Set();
+  inputsByLoc.set('ALL', { inputs, deletable, weightByLoc, weightDiffers });
+  col.append(fieldHead());
   for (const slot of slots) {
-    const names = locs.map(l => perLoc.get(l).get(slot) ?? '');
+    const names = locs.map(l => perLoc.get(l).get(slot)?.food_name ?? '');
     const agreed = new Set(names).size === 1 ? names[0] : '';
     const differs = new Set(names).size > 1;
     if (agreed) deletable.add(slot);
+
+    const ws = locs.map(l => perLoc.get(l).get(slot)?.bowl_weight_g ?? null);
+    weightByLoc.set(slot, new Map(locs.map((l, i) => [l, ws[i]])));
+    const wDiffers = new Set(ws.map(String)).size > 1;
+    if (wDiffers) weightDiffers.add(slot);
+
     const input = h('input', {
       type: 'text', value: agreed, placeholder: differs ? '≠ differs by area' : 'No dish',
       'aria-label': `All areas slot ${slot} dish`,
@@ -756,11 +885,19 @@ function combinedWeekColumn(state, { locs, meal, day, inputsByLoc }) {
         ? locs.map((l, i) => `${LOCATION_NAMES[l]}: ${names[i] || '—'}`).join(' · ')
         : undefined,
     });
-    inputs.set(slot, input);
+    const winput = weightInput(`All areas slot ${slot}`, wDiffers ? null : ws[0], {
+      placeholder: wDiffers ? '≠' : 'kg',
+      title: wDiffers
+        ? locs.map((l, i) => `${LOCATION_NAMES[l]}: `
+            + (ws[i] == null ? 'not set' : `${(Number(ws[i]) / 1000).toFixed(1)} kg`)).join(' · ')
+        : undefined,
+    });
+    inputs.set(slot, { name: input, weight: winput });
     col.append(h('div', { class: 'row-form' },
       h('span', { class: 'slotno' }, String(slot)),
       input,
-      differs ? badge('warning', '≠', 'differs') : h('span', {})));
+      winput,
+      (differs || wDiffers) ? badge('warning', '≠', 'differs') : h('span', {})));
   }
   return col;
 }
@@ -769,7 +906,7 @@ function weekColumn(state, { loc, meal, day, inputsByLoc }) {
   const all = templateCache.get(loc) || [];
   const mine = new Map(all
     .filter(r => r.weekday === day && r.meal_type === meal)
-    .map(r => [Number(r.food_slot), r.food_name]));
+    .map(r => [Number(r.food_slot), r]));
   const deployedSlots = [...new Set(state.devices
     .filter(d => d.location === loc && d.food_slot != null)
     .map(d => Number(d.food_slot)))].sort((a, b) => a - b);
@@ -784,16 +921,20 @@ function weekColumn(state, { loc, meal, day, inputsByLoc }) {
 
   const inputs = new Map();
   inputsByLoc.set(loc, { inputs, existing: mine });
+  col.append(fieldHead());
   for (const slot of slots) {
+    const row = mine.get(slot);
     const input = h('input', {
-      type: 'text', value: mine.get(slot) || '', placeholder: 'No dish',
+      type: 'text', value: row?.food_name || '', placeholder: 'No dish',
       'aria-label': `${LOCATION_NAMES[loc]} slot ${slot} dish`,
       autocomplete: 'off', maxlength: 60,
     });
-    inputs.set(slot, input);
+    const winput = weightInput(`${LOCATION_NAMES[loc]} slot ${slot}`, row?.bowl_weight_g);
+    inputs.set(slot, { name: input, weight: winput });
     col.append(h('div', { class: 'row-form' },
       h('span', { class: 'slotno' }, `${slot}${deployedSlots.includes(slot) ? '' : ' ·'}`),
       input,
+      winput,
       h('span', {})));
   }
   return col;
@@ -864,6 +1005,7 @@ function copyWeekdayCard(ctx, { locs, day, go }) {
           days.flatMap(d => src.map(r => ({
             location: l, weekday: d, meal_type: r.meal_type,
             food_slot: r.food_slot, food_name: r.food_name,
+            bowl_weight_g: r.bowl_weight_g ?? null,
           }))),
           { onConflict: 'location,weekday,meal_type,food_slot' }));
         templateCache.delete(l);
@@ -910,7 +1052,7 @@ function copyAreaCard(ctx, { loc, go }) {
     note.textContent = 'Copying…';
     try {
       const src = unwrap(await ctx.client.from('meal_menu_template')
-        .select('weekday, meal_type, food_slot, food_name')
+        .select('weekday, meal_type, food_slot, food_name, bowl_weight_g')
         .eq('location', loc)) || [];
       if (!src.length) { note.textContent = `${LOCATION_NAMES[loc]} has no template to copy yet.`; return; }
       unwrap(await ctx.client.from('meal_menu_template').delete()
@@ -919,6 +1061,7 @@ function copyAreaCard(ctx, { loc, go }) {
         dests.flatMap(l => src.map(r => ({
           location: l, weekday: r.weekday, meal_type: r.meal_type,
           food_slot: r.food_slot, food_name: r.food_name,
+          bowl_weight_g: r.bowl_weight_g ?? null,
         }))),
         { onConflict: 'location,weekday,meal_type,food_slot' }));
       for (const l of dests) templateCache.delete(l);

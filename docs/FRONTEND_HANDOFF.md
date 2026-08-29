@@ -175,6 +175,83 @@ from index 0. Rendering it as a vertical column is the intuitive view.
 
 ---
 
+## 4b. Weight, and the Master Dashboard
+
+A dish carries a **per-bowl weight** alongside its name, and
+`public.slot_quantity` turns bowl counts into kilograms for the Master
+Dashboard. Three rules matter more than the rest.
+
+### Grams, as an integer
+
+`meal_food_mapping.bowl_weight_g` and `meal_menu_template.bowl_weight_g` store
+**whole grams**, not kilograms. The dashboard sums products across up to five
+devices and three areas per slot; doing that in binary floating point puts
+visible drift on a screen that shows one decimal. Divide by 1000 exactly once,
+at render. The column is bounded to 100 g … 50 000 g so a units mix-up
+(kilograms typed into a grams field, or the reverse) is a 400 at the edge
+rather than a dashboard reading 14 000 kg.
+
+### A missing weight is NULL, never zero
+
+The rule the whole schema is built on, and it bites hardest here. `0` would
+render a full counter as "0.0 kg remaining" the moment someone typed a dish
+name and forgot the weight — sending staff to refill something that is full.
+`NULL` renders as "weight not set" and prompts. Never coalesce it.
+
+### Grouped by slot number, across every area
+
+`slot_quantity` has **one row per `food_slot`**, not per `(location,
+food_slot)`. A slot number means the same dish position in all three halls, and
+the kitchen cooks against the site-wide figure. This is the one place its
+grouping differs from `slot_overview`, and the reason it is a separate view.
+
+Its arithmetic is **sum-then-multiply**, not multiply-then-sum:
+
+```
+slot_total = SUM over areas ( bowls(area, slot) x weight(area, slot) )
+```
+
+The obvious formula — total bowls × one weight — is wrong whenever the halls
+serve different dishes at the same position, which they do. If Darshanarthi
+runs Curry at 4.5 kg while Tiffin runs Bhaji at 3.0 kg, there is no single
+weight to multiply by. When the halls agree (the normal case) this reduces
+exactly to `total_bowls × W`, so nothing is lost.
+
+| Column | Meaning |
+|---|---|
+| `food_slot` | the grouping key |
+| `dishes` | distinct dish names at this position, sorted. Usually one; more is not an error |
+| `bowl_weight_g` | the per-bowl weight **only when every weighed area agrees**; NULL when they differ |
+| `bowls_trusted` | bowls across all areas, `stack_status = 'ok'` only. NULL, not 0, when nothing reported |
+| `est_weight_g` | the headline, in grams. NULL when no contributing area has a weight |
+| `capacity_weight_g` | the same sum against capacity, so a bar needs no hardcoded ceiling |
+| `est_is_partial` | **the total is a LOWER BOUND** — some area holds bowls that cannot be weighed |
+| `areas_without_weight` | which areas, so the UI can name them instead of saying "somewhere" |
+| `areas` | per-hall breakdown as jsonb: location, dish, `bowl_weight_g`, `bowls_trusted`, `bowls_capacity`, `devices`, plus **`weight_g`** — that hall's own mass, computed by the view so no screen re-derives it. NULL when the hall has no weight **or no reading**; never 0 |
+| `menu_meal_type` / `menu_meal_date` | which meal the dishes and weights came from |
+| `menu_is_live` | false when that meal is not the one currently running |
+
+There is deliberately **no site-wide total** — rice + dal + curry added
+together is arithmetically fine and operationally meaningless. Quantity is only
+meaningful per dish, so totals stop at the slot.
+
+**Render `est_is_partial` as `≥`.** It is the same notation `deviceStack()`
+already uses for a degraded stack's count, and reusing it beats inventing a
+second vocabulary for "real but incomplete". A total that silently drops an
+unweighed area reads as complete, and a kitchen under-orders against it.
+
+### Which slots appear
+
+A slot earns a row **once at least one of its devices has ever reported**
+(`having bool_or(coalesce(s.reported, false))`). That hides units that are
+registered and assigned but never powered on — the backups parked at slot 5 —
+so the screen carries no permanent "no data" row to learn to ignore.
+
+The gate is deliberately *has ever reported*, not *is reporting now*. A slot
+whose devices all die mid-service **keeps its row**, its last known figure and
+its offline flags. Vanishing at the moment something breaks is the one
+behaviour a stock screen must not have.
+
 ## 5. Writing configuration
 
 `authenticated` may update exactly these columns on `devices`:
@@ -280,6 +357,13 @@ it flips when a completed window passes with no report.
 ---
 
 ## 8. The views to build
+
+### Master view — quantity per dish position, in kilograms
+
+Reads `slot_quantity`. One card per slot number across all areas, itemised by
+serving hall, with that slot's own total and no site-wide one. See §4b — in
+particular, render `est_is_partial` as `≥` and never coalesce a NULL weight to
+zero.
 
 ### Stock view — the primary screen
 

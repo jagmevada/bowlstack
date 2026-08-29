@@ -35,7 +35,16 @@
 
   --radius: 12px;
   --font: system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  /* The one horizontal gutter. The top bar, the freshness line and the view
+     all use it, so the tab bar and the content share a single left edge —
+     change it here and all three move together. */
+  --gutter: max(.75rem, env(safe-area-inset-left));
 }
+
+/* Open the gutter a little on a large screen so content is not flush against
+   the bezel. The layout stays fluid — this is breathing room, not a cap. */
+@media (min-width: 1400px) { :root { --gutter: 1.5rem; } }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
@@ -212,7 +221,7 @@ button:disabled { opacity: .45; cursor: default; }
   z-index: 20;
   background: var(--plane);
   border-bottom: 1px solid var(--border);
-  padding: .5rem max(.75rem, env(safe-area-inset-left)) 0;
+  padding: .5rem var(--gutter) 0;
 }
 
 .topbar-row { display: flex; align-items: center; gap: .5rem; }
@@ -308,18 +317,29 @@ button:disabled { opacity: .45; cursor: default; }
 .freshness {
   font-size: .75rem;
   color: var(--ink-3);
-  padding: .35rem max(.75rem, env(safe-area-inset-left));
+  padding: .35rem var(--gutter);
   display: flex;
   gap: .5rem;
   align-items: center;
 }
 .freshness .err { color: var(--critical); }
 
+/* FLUID, not centred.
+   The view used to cap at 1180px and centre, which left a wide monitor
+   showing two slot cards and a lot of wallpaper. The screens here are grids
+   that already reflow — Master's slot cards, Stock's area grids, the Menu's
+   area columns — so every extra pixel becomes another column rather than a
+   longer line of text. The one thing width WOULD hurt, running prose, this
+   app does not have.
+
+   The horizontal padding matches .topbar and .freshness exactly, so the tab
+   bar, the freshness line and the content all share one left edge. Change one
+   and change all three. It opens up past 1400px purely so content is not
+   flush against the bezel on a large screen. */
 .view {
-  padding: 0 max(.75rem, env(safe-area-inset-left)) 3rem;
-  max-width: 1180px;
-  margin: 0 auto;
+  padding: 0 var(--gutter) 3rem;
 }
+
 .view.is-refetching { opacity: .6; transition: opacity .12s; }
 
 /* --- generic surfaces ---------------------------------------------- */
@@ -913,9 +933,13 @@ table.coverage .ghost { width: 100%; min-width: 2.2rem; }
 }
 .menu-col-head h3 { line-height: 1.2; }
 
+/* Four columns now: slot, dish, kg-per-bowl, marker. The weight box is
+   fixed-width and the dish keeps the stretch — a dish name is what people
+   scan the column for, and a number that never exceeds "50.0" has no use for
+   the extra space. */
 .row-form {
   display: grid;
-  grid-template-columns: 3rem 1fr auto;
+  grid-template-columns: 3rem 1fr 4.5rem auto;
   gap: .5rem;
   align-items: center;
   padding: .35rem 0;
@@ -923,6 +947,35 @@ table.coverage .ghost { width: 100%; min-width: 2.2rem; }
 }
 .row-form .slotno { font-size: .8rem; color: var(--ink-3); font-variant-numeric: tabular-nums; }
 .row-form.is-draft input { background: var(--warning-wash); }
+
+/* The one header row above each column's fields. Without it the kg box reads
+   as a second dish field. */
+.row-form.row-head {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: .2rem;
+  font-size: .7rem;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--ink-3);
+}
+
+.row-form .w-input {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+/* Spinner arrows steal a third of a 4.5rem box and are unusable with a thumb
+   anyway — the field is a number input for the mobile keypad it summons, not
+   for its stepper. */
+.row-form .w-input::-webkit-outer-spin-button,
+.row-form .w-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.row-form .w-input { -moz-appearance: textfield; }
+
+@media (max-width: 560px) {
+  /* On a phone the dish gets the full width and the weight tucks under it
+     beside the slot number, rather than squeezing both onto one line. */
+  .row-form { grid-template-columns: 3rem 1fr auto; }
+  .row-form .w-input { grid-column: 2 / 3; }
+}
 
 .assign-row {
   display: grid;
@@ -978,3 +1031,143 @@ table.coverage .ghost { width: 100%; min-width: 2.2rem; }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
 }
+
+
+/* ====================================================================
+   Master — the site total, in kilograms.
+
+   Deliberately NOT the Stock card grid. Stock is four-to-five cards per
+   area that someone scans; Master is one big figure plus a short list, and
+   giving it the same treatment made the two screens indistinguishable at a
+   glance on a tablet across the kitchen.
+   ==================================================================== */
+
+.mt-hint {
+  margin-top: .5rem;
+  font-size: .8rem; color: var(--ink-3);
+}
+.mt-hint a { margin-left: .35rem; }
+
+/* As many slot cards per row as fit, down to a floor that keeps each card
+   readable. */
+.master-rows {
+  display: grid;
+  gap: .5rem;
+  /* auto-fit, not a fixed count: with four dish positions this lands all four
+     abreast on a desktop, drops to two on a tablet and one on a phone, without
+     a breakpoint per screen size. 17rem is the narrowest a card can be before
+     its hall lines wrap — and a wrapped card is taller than the column it
+     saved, so the grid must never go below it. */
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  /* Cards in a row share a height. Without this a slot carrying per-hall dish
+     names stands taller than its neighbours and the row reads as ragged. */
+  align-items: stretch;
+}
+
+/* A slot card is denser than a general .card: it is one of four or five on
+   screen at once, and the padding is what pushes the last one below the fold. */
+.mslot { padding: .75rem .9rem; }
+
+/* A slot card: a header carrying the dish and this slot's own total, then
+   one line per serving hall. The halls are itemised because a refill is
+   dispatched to a hall, never to a slot number. */
+.mslot-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: .6rem;
+  align-items: start;
+}
+.mslot-id { min-width: 0; }
+.mrow-slot {
+  font-size: .75rem; color: var(--ink-3);
+  text-transform: uppercase; letter-spacing: .04em;
+  font-variant-numeric: tabular-nums;
+}
+.mrow-dish {
+  font-size: 1.05rem; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mrow-dish.unset { font-weight: 400; color: var(--ink-3); font-style: italic; }
+.mrow-figure {
+  display: flex; flex-direction: column; align-items: flex-end; gap: .1rem;
+  text-align: right;
+}
+.mrow-kg {
+  font-size: 1.35rem; font-weight: 650; line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+/* Red on a figure means exactly what it means everywhere else in this app:
+   this number is compromised. Never "nearly empty". */
+.mrow-kg.is-alert { color: var(--critical); }
+.mrow-kg.is-bound { color: var(--ink-2); }
+.mrow-kg.is-unset { font-size: 1.1rem; color: var(--ink-3); font-weight: 500; }
+.mslot-of { font-size: .78rem; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.mrow-fix { font-size: .75rem; white-space: nowrap; }
+.mrow-areas { font-size: .75rem; font-variant-numeric: tabular-nums; }
+
+.marea-list {
+  margin-top: .5rem;
+  border-top: 1px solid var(--border);
+}
+.marea {
+  display: grid;
+  /* THREE columns, and areaLine() emits exactly three children. The hall name
+     takes the slack; bowls and kilograms size to their content so they stay
+     aligned down the card. A fourth child here wraps the mass onto its own
+     row and doubles the height of every card — which is the bug this
+     comment exists to stop coming back. */
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  column-gap: .5rem;
+  align-items: baseline;
+  padding: .35rem 0;
+  border-bottom: 1px solid var(--border);
+  font-size: .85rem;
+}
+.marea:last-child { border-bottom: 0; padding-bottom: 0; }
+
+.marea-name { min-width: 0; }
+.marea-hall {
+  display: block;
+  color: var(--ink-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* Shown only when the halls serve DIFFERENT dishes: a quiet second line under
+   the hall it belongs to, never a column of its own. */
+.marea-dish {
+  display: block;
+  font-size: .72rem;
+  line-height: 1.3;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.marea-bowls {
+  color: var(--ink-3); font-variant-numeric: tabular-nums;
+  white-space: nowrap; font-size: .8rem;
+}
+.marea-kg {
+  font-weight: 600; font-variant-numeric: tabular-nums;
+  text-align: right; white-space: nowrap;
+  min-width: 4.5rem;
+}
+.marea-kg.is-alert { color: var(--critical); }
+.marea-kg.unset { font-weight: 400; color: var(--ink-3); font-size: .8rem; }
+.mt-hint { margin-top: .5rem; font-size: .8rem; color: var(--ink-3); }
+
+@media (max-width: 560px) {
+  .mrow-kg { font-size: 1.3rem; }
+}
+
+/* ====================================================================
+   Demo mode. Loud on purpose — the one state where every number on screen
+   is invented, and the only one a person could act on and be wrong.
+   ==================================================================== */
+.demo-strip {
+  padding: .4rem .8rem;
+  background: var(--warning-wash);
+  border-bottom: 1px solid var(--border);
+  color: var(--warning-ink);
+  font-size: .8rem;
+  text-align: center;
+}
+.demo-strip b { font-weight: 700; }
+/* No theme override needed: --warning-ink is already redefined for both dark
+   paths at the top of this file, so the token carries the theme by itself. */

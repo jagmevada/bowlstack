@@ -13,7 +13,7 @@ supabase/schema.sql            -- drops and rebuilds everything
 supabase/register_devices.sql  -- registers BWL-001 .. BWL-032
 supabase/assign_devices.sql    -- permanent location/food_slot assignment
 supabase/seed_meal_mapping.sql -- sample menus, for the front-end test bed
-supabase/smoke_test.sql        -- 20 assertions; run BEFORE flashing any device
+supabase/smoke_test.sql        -- 25 assertions; run BEFORE flashing any device
 ```
 
 On a database that is **already live**, never re-run `schema.sql`. Additive
@@ -23,7 +23,21 @@ changes ship as their own idempotent file — currently:
 supabase/weekly_menu_and_offline.sql  -- missed_last_service flag, window-edge
                                       -- fix, weekly menu template (applied
                                       -- 2026-08-02; safe to re-run)
+supabase/migrate_bowl_weight.sql      -- bowl_weight_g on both menu tables,
+                                      -- the weight through preload/apply, and
+                                      -- the slot_quantity view that powers the
+                                      -- Master Dashboard (safe to re-run)
 ```
+
+`migrate_bowl_weight.sql` adds a column, widens two functions and creates one
+view. No table is dropped and no existing row is rewritten, so it is safe to
+run mid-trial. It is also **reversible**: `supabase/rollback_bowl_weight.sql`
+restores the previous schema exactly — verified byte-for-byte against the
+pre-migration definition — losing only the per-bowl weights themselves. Both
+files are re-runnable, and you can migrate again after rolling back. `meal_mapping_preload()` is DROPped and recreated rather than
+replaced — Postgres refuses to `create or replace` a function whose `returns
+table` gains a column — but its signature is unchanged, so callers and grants
+still match.
 
 The template is materialised into `meal_food_mapping` every morning by
 **pg_cron**: job `bowlstack-apply-template`, schedule `5 0 * * *`

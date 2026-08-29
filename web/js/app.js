@@ -18,6 +18,8 @@ import { renderHealth } from './views/health.js';
 import { renderDevice, clearHistoryCache } from './views/device.js';
 import { renderMenu } from './views/menu.js';
 import { renderAssign } from './views/assign.js';
+import { renderMaster } from './views/master.js';
+import { isMockMode } from './mock.js';
 import { APP_VERSION } from './version.js';
 
 // Sized against the server's own alarm, not picked round. `offline` fires at
@@ -39,6 +41,13 @@ export function pollDelay(inService) { return inService ? POLL_MS : IDLE_POLL_MS
 const state = {
   devices: [],
   slots: [],
+  // slot_quantity — one row per food_slot across every area, in grams.
+  // Kept separate from `slots` rather than merged: the two are grouped
+  // differently (per area vs site-wide) and merging them would mean one of
+  // the two screens re-deriving the other's grouping.
+  quantity: [],
+  // Why slot_quantity came back empty, when it did. Null means it answered.
+  quantityError: null,
   template: [],
   loadedAt: null,
   error: null,
@@ -255,6 +264,18 @@ applyTheme();
 // one place to bump and the header can never disagree with the diagnostics.
 document.getElementById('app-version').textContent = `v${APP_VERSION}`;
 
+// Demo mode says so, permanently and at the top of the screen. Every other
+// "this data is not what you think" state in this app is announced — stale,
+// offline, last-known — and invented numbers are the strongest case for it:
+// a kitchen acting on a fabricated bowl count is the one failure this
+// dashboard must never cause.
+if (isMockMode()) {
+  document.documentElement.dataset.demo = '1';
+  el.app.prepend(h('div', { class: 'demo-strip' },
+    h('b', {}, 'Demo data'),
+    ' — invented figures that drift on a timer. Nothing here is a real reading.'));
+}
+
 document.querySelector('.menu-panel').addEventListener('click', async e => {
   const act = e.target.closest('button')?.dataset.act;
   if (!act) return;
@@ -299,15 +320,29 @@ async function refresh(manual = false) {
   // slow enough to be worth mentioning gets the treatment, and it is cancelled
   // below if the data arrives first.
   const slowHint = setTimeout(() => el.view.classList.add('is-refetching'), 1200);
+  let quantityError = null;
 
   try {
-    const [devices, slots, template] = await Promise.all([
+    const [devices, slots, quantity, template] = await Promise.all([
       client.from('device_overview').select('*')
         .order('location', { nullsFirst: false }).order('food_slot', { nullsFirst: false })
         .then(unwrap),
       client.from('slot_overview').select('*')
         .order('location').order('food_slot')
         .then(unwrap),
+      // The Master Dashboard's source. Tolerates the view not existing, the
+      // same way the template query does: a database that has not run
+      // migrate_bowl_weight.sql yet must still serve Stock and Health rather
+      // than failing the whole poll and blanking the screen.
+      //
+      // But the REASON is kept, not swallowed. Falling back to an empty array
+      // alone made an un-migrated database indistinguishable from a fleet that
+      // has never reported, and Master then blamed the hardware for a missing
+      // view -- sending someone to check stations when the fix is one SQL file.
+      client.from('slot_quantity').select('*').order('food_slot')
+        .then(r => { quantityError = r.error ? describeError(r.error) : null;
+                     return r.error ? [] : r.data || []; })
+        .catch(err => { quantityError = describeError(err); return []; }),
       // The weekly template, so Stock's empty state can say "the plan exists,
       // apply it" instead of a bare "No menu entered". Display still comes
       // ONLY from dated rows; this powers a hint, never a dish. Tolerates the
@@ -319,6 +354,8 @@ async function refresh(manual = false) {
     ]);
     state.devices = devices || [];
     state.slots = slots || [];
+    state.quantity = quantity || [];
+    state.quantityError = quantityError;
     state.template = template || [];
     state.loadedAt = Date.now();
     state.error = null;
@@ -375,7 +412,7 @@ document.addEventListener('visibilitychange', () => {
 // container, and never while the Menu page holds an unsaved draft — an
 // accidental swipe must not throw away half-typed dishes.
 
-const SWIPE_TABS = ['stock', 'health', 'menu', 'assign'];
+const SWIPE_TABS = ['stock', 'master', 'health', 'menu', 'assign'];
 
 /** Pure decision, exported for the smoke suite: the route a swipe lands on,
  *  or null when the gesture must be ignored. dx<0 is a leftward swipe. */
@@ -485,6 +522,7 @@ function parseRoute() {
 
 const VIEWS = {
   stock: renderStock,
+  master: renderMaster,
   health: renderHealth,
   device: renderDevice,
   menu: renderMenu,
@@ -551,6 +589,7 @@ function fleetDiagnostics() {
     site: { timezone: tz, in_service: inService, meal, local_time: fmtClock(new Date().toISOString(), tz) },
     summary: fleetSummary(state.devices),
     slots: state.slots,
+    quantity: state.quantity,
     devices: state.devices,
   }, null, 2);
 }

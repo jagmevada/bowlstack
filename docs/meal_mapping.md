@@ -194,6 +194,29 @@ export interface DeviceOverview {
 
 ---
 
+## 3b. Per-bowl weight
+
+Both `meal_food_mapping` and `meal_menu_template` carry `bowl_weight_g` —
+what ONE bowl of that dish weighs, in **whole grams**.
+
+It rides on the dish row, so the existing rules are unchanged: clearing a dish
+is still a DELETE, and it takes the weight with it. A weight typed against a
+blank dish is not a mapping — the `food_name` CHECK rejects it.
+
+`meal_mapping_preload()` returns it, and `meal_template_apply()` materialises
+it, so an inherited or templated menu arrives weighed as well as named.
+Carrying the name forward but not the weight would mean re-typing a figure
+that does not change from one day to the next.
+
+**NULL means "not configured" and must never be coalesced to zero.** Zero
+renders a full counter as "0.0 kg remaining" on the Master Dashboard and sends
+staff to refill something that is full. The column is bounded to
+100 g … 50 000 g so a kilograms-into-a-grams-field mix-up fails at the edge
+instead of reaching a screen.
+
+`public.slot_quantity` is what consumes it — see
+[FRONTEND_HANDOFF.md](FRONTEND_HANDOFF.md) §4b.
+
 ## 4. Queries
 
 All as the **`authenticated`** role. Anonymous requests read nothing — that role

@@ -135,6 +135,89 @@ export function slotStock(slot) {
   };
 }
 
+// --- weight ----------------------------------------------------------
+//
+// The Master Dashboard's currency. Everything crossing this boundary is in
+// GRAMS as an integer, exactly as the database stores it (schema.sql,
+// meal_food_mapping.bowl_weight_g), and is divided by 1000 exactly once —
+// here, at render. Carrying kilograms around as floats instead is what makes
+// fourteen bowls of 6.5 kg add up to 90.99999999999999 on screen.
+
+/** Grams → "6.5 kg". `partial` prefixes the ≥ that marks a lower bound — the
+ *  same notation deviceStack() already uses for a degraded stack's count.
+ *  One vocabulary for "real but incomplete", not two. */
+export function fmtWeight(grams, partial = false) {
+  if (grams == null) return '—';
+  const kg = Number(grams) / 1000;
+  if (!Number.isFinite(kg)) return '—';
+  return `${partial ? '≥' : ''}${kg.toFixed(1)} kg`;
+}
+
+/**
+ * What to render for one SLOT NUMBER across every serving area — the Master
+ * Dashboard's row. The arithmetic is slot_quantity's and nothing is re-summed
+ * here, for exactly the reason slotStock() re-sums nothing: two screens doing
+ * the same sum in two places is two screens that will eventually disagree.
+ *
+ * The branch order is the order an operator actually asks the questions: is
+ * the number broken, is there a number at all, can it be turned into
+ * kilograms, and only then — how much.
+ */
+export function slotQuantity(row) {
+  const trusted  = row.bowls_trusted == null ? null : Number(row.bowls_trusted);
+  const capacity = Number(row.bowls_capacity) || 0;
+  const grams    = row.est_weight_g == null ? null : Number(row.est_weight_g);
+  const capacityGrams =
+    row.capacity_weight_g == null ? null : Number(row.capacity_weight_g);
+  const partial  = !!row.est_is_partial;
+  const base = { trusted, capacity, grams, capacityGrams, partial };
+
+  if (trusted == null) {
+    // NULL is not zero — the distinction the whole schema is built around.
+    // One sends someone to refill, the other to investigate.
+    return { ...base, kind: 'nodata', severity: 'idle', headline: 'No data',
+      note: 'No stack at this position has reported.' };
+  }
+  if (grams == null) {
+    // Bowls are known; kilograms are not. "0.0 kg" here would be a
+    // measurement nobody made, so the row falls back to the count it does
+    // have and says what is missing.
+    return { ...base, kind: 'noweight', severity: 'idle',
+      headline: `${trusted} ${trusted === 1 ? 'bowl' : 'bowls'}`,
+      note: 'No per-bowl weight set for this dish — add one on the Menu tab.' };
+  }
+  // A FAULT NO LONGER SUPPRESSES THE FIGURE.
+  //
+  // It used to return "Fault" and no number, borrowed from slotStock(), where
+  // that is right: Stock shows one position's raw count and an impossible
+  // level pattern means there is no count to show. Here the number is
+  // different in kind — bowls_trusted already EXCLUDES the faulted stack, so
+  // this is what the healthy stacks hold, and Master itemises the halls
+  // underneath. Hiding a total while listing every part of it reads as a bug
+  // rather than as caution.
+  //
+  // So the figure stands, `kind` still says a fault is present, and the
+  // caller paints it red — the same treatment an offline stack's last known
+  // value already gets.
+  return { ...base,
+    kind: row.any_fault ? 'fault' : 'count',
+    severity: row.any_fault ? 'critical' : null,
+    headline: fmtWeight(grams, partial),
+    note: row.any_fault
+      ? 'A stack here is reporting an impossible level pattern — this figure '
+        + 'is what the remaining healthy stacks hold.'
+      : partial ? `A lower bound — ${areaList(row.areas_without_weight)} `
+                  + 'holds bowls with no per-bowl weight set.' : '' };
+}
+
+/** "Darshanarthi and Tiffin" from ['D','T']. Only slotQuantity() needs it,
+ *  so it is not exported. */
+function areaList(locs) {
+  const names = (locs || []).map(l => LOCATION_NAMES[l] || l);
+  if (names.length <= 1) return names[0] || 'an area';
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+}
+
 // There is deliberately NO quantity colour band any more. An earlier cut
 // tinted the count by bowls-per-stack (red when nearly empty); field feedback
 // killed it — a colour per meaning is all a human can register, and red now

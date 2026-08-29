@@ -17,6 +17,7 @@ warning when a station is running short.
 | [docs/frontend.md](docs/frontend.md) | front-end planning and open design questions |
 | [web/README.md](web/README.md) | the field-trial dashboard — bring-up, deployment, and what to collect |
 | [docs/FRONTEND_HANDOFF.md](docs/FRONTEND_HANDOFF.md) | **self-contained** contract for building the UI against Supabase |
+| [docs/PHASE1_BOWL_WEIGHT.md](docs/PHASE1_BOWL_WEIGHT.md) | per-bowl weight and the Master Dashboard — what shipped, how to run it, and what is deferred to the load cells |
 
 ---
 
@@ -37,6 +38,16 @@ Levels are numbered bottom-upward, `f1` through `f4`.
 
 The count reaches Supabase over WiFi, where a front-end presents live stock per
 serving area plus device health.
+
+Each dish also carries a **per-bowl weight**, entered on the Menu tab, so the
+**Master Dashboard** can state remaining stock in kilograms across the whole
+site — one row per slot number, summed over all three serving areas. Each area
+is weighed against its own dish before the sum, so a slot serving different
+dishes in different halls still totals correctly. See
+[docs/FRONTEND_HANDOFF.md](docs/FRONTEND_HANDOFF.md) §4b.
+
+The dashboard also runs with no backend at all: open `web/index.html?mock=1`
+for a demo fed by generated data that drifts on a timer.
 
 ---
 
@@ -117,13 +128,19 @@ supabase/register_devices.sql  -- BWL-001 .. BWL-032
 supabase/assign_devices.sql    -- permanent location/food_slot assignment
 supabase/seed_meal_mapping.sql -- sample menus, for the front-end test bed
 supabase/reset_spares.sql      -- restores awaiting_deployment for the reserved 8
-supabase/smoke_test.sql        -- 20 assertions; expect ALL PASS
+supabase/smoke_test.sql        -- 25 assertions; expect ALL PASS
 ```
 
 On a database that is **already live**, never re-run `schema.sql`. Additive
-changes ship as their own idempotent file — currently
-`supabase/weekly_menu_and_offline.sql` (weekly menu template, the
-`missed_last_service` flag, service-window edge fix; applied 2026-08-02).
+changes ship as their own idempotent file:
+
+```
+supabase/weekly_menu_and_offline.sql  -- weekly menu template, missed_last_service,
+                                      -- service-window edge fix; applied 2026-08-02
+supabase/migrate_bowl_weight.sql      -- per-bowl weight + slot_quantity (the Master
+                                      -- Dashboard); safe to run mid-trial
+```
+
 See [docs/supabase.md](docs/supabase.md) §1.
 
 > `schema.sql` **drops the `devices` registry too**, so re-running it always
