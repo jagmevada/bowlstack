@@ -91,4 +91,21 @@ void demoOverrideWifi(bool connected, int16_t rssi);
 // a sync lands, which is a state the bar has to be able to show.
 void demoOverrideTime(bool known, uint8_t hh, uint8_t mm);
 
+// What the board can see of the charger, stated by the firmware rather than
+// inherited from a fixture.
+//
+// IT RENDERED CORRECTLY BY LUCK, WHICH IS WHY THIS EXISTS. Nothing on hardware
+// set either field: demoOverrideState() copies the adapter's snapshot, and that
+// snapshot begins life as demoLatest()'s seed -- scenario 0, whose base() leaves
+// chargingKnown false. The panel therefore said "unknown", correctly, because
+// of the order the scenario list happens to be written in. sCharging() sets
+// chargingKnown true, so moving it to the front would have put a charging bolt
+// on a board whose ETA6098 STAT pin reaches no GPIO at all.
+//
+// `known` is board::CHARGER_STATUS_READABLE on the device, which is false until
+// somebody fits the one-resistor mod in todo.md. The simulator does not call
+// this, so its scenarios keep exercising both states -- which is what the
+// preview is for.
+void demoOverrideCharging(bool known, bool charging);
+
 }  // namespace ui

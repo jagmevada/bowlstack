@@ -24,9 +24,13 @@
 // factor is the one kind of wrong this codebase refuses everywhere else. Menu >
 // Settings > Scale > Tare, put the known mass on, then Calibrate.
 //
-// The WiFi and NTP halves are the bring-up harness's, unmodified: this image
-// links src/bringup/bringup_wifi.cpp and bringup_time.cpp rather than copies of
-// them. Only the measurement is new.
+// The WiFi and NTP halves live in src/bringup/bringup_wifi.cpp and
+// bringup_time.cpp -- linked by name rather than copied, so there is one
+// implementation of each. NTP is still the harness's. WiFi no longer is: it
+// gained the half that makes a station a product rather than a demonstration --
+// credentials that survive a power cycle, a ranked auto-join at boot, and a
+// bounded reconnect. See the note at the top of that file for why WiFiManager
+// and net.cpp are not part of it.
 // ---------------------------------------------------------------------------
 
 #include <Arduino.h>
@@ -40,9 +44,16 @@
 
 #include "battery_soc.h"
 #include "board_waveshare_s3.h"
+// Explicit, though battery_soc.h already pulls it in. This file reads
+// config::BATTERY_DIVIDER and config::BATTERY_SAMPLE_INTERVAL_MS directly, and a
+// header you depend on by name should be one you include by name -- otherwise
+// the day battery_soc.h stops needing it, this file breaks for a reason that has
+// nothing to do with anything in it.
+#include "config.h"
 #include "lgfx_waveshare_s3.h"
 #include "logo128.h"
 #include "scale.h"
+#include "scale_telemetry.h"
 #include "ui_calib.h"
 #include "ui_demo.h"
 #include "ui_pages.h"
@@ -132,6 +143,109 @@ uint16_t readBatteryPinMv() {
   uint32_t acc = 0;
   for (uint8_t i = 0; i < 16; i++) acc += analogReadMilliVolts(board::PIN_BATTERY_ADC);
   return (uint16_t)(acc / 16);
+}
+
+// THE BAND IS NOT COMPUTED HERE ANY MORE, and that is the whole point of this
+// block. It used to be three bare comparisons in loop() -- soc > 70 / 35 / 10 --
+// which are exactly config.h's FALLING edges with their rising partners
+// (75/40/15) never consulted. A classifier with one threshold per boundary
+// oscillates whenever its input rests on one, and a battery rests on one for
+// hours: battery_soc.h records the measured trace, a stationary cell alternating
+// low -> medium -> low -> medium on +/-23 mV of ADC noise. Every alternation
+// will be a Supabase write once the uplink lands, which is why this is worth
+// fixing BEFORE that rather than after.
+//
+// battery::Monitor is the classifier the discrete product already ships, and it
+// is header-only -- no new translation unit, no filter change, no link risk. It
+// carries four things the inline version had none of: an EMA over time, six
+// hysteretic band thresholds, a 500 ms presence dwell that survives the contact
+// bounce of a cell being plugged in, and the order-matters rule that presence is
+// decided on the RAW sample so the filter never learns from the absent regime.
+//
+// WHAT IT STILL CANNOT SEE, stated because the fix looks complete and is not:
+// with no cell fitted and USB power applied, the ETA6098 holds the BAT node at
+// its charge voltage, so the divider faithfully reports ~4.17 V and this
+// classifies a healthy `good` battery on a unit that has none. Nothing in
+// software distinguishes those; it needs the charger-sense mod in todo.md, where
+// "charging, pinned at 4.2 V, no droop under load" is what identifies it.
+battery::Monitor batteryMonitor_;
+
+// Rate limiter, the same shape as device_status::servicePower(). The interval is
+// not cosmetic: BATTERY_EMA_ALPHA is expressed in SAMPLES, so the 0.20 that
+// config.h describes as a ~500 ms time constant only is one at this 100 ms
+// cadence. The old 1000 ms loop made the identical alpha a five-second filter,
+// which is a different instrument wearing the same constant.
+uint32_t nextBatterySampleMs_ = 0;
+bool batteryEverSampled_ = false;
+
+ui::Battery toUiBattery(battery::Level l) {
+  switch (l) {
+    case battery::Level::Good: return ui::Battery::Good;
+    case battery::Level::Medium: return ui::Battery::Medium;
+    case battery::Level::Low: return ui::Battery::Low;
+    case battery::Level::Critical: return ui::Battery::Critical;
+    default: return ui::Battery::Unknown;
+  }
+}
+
+// --- the uplink task -------------------------------------------------------
+// CORE 0, AND NOT loop(). docs/firmware.md puts every piece of network work on
+// core 0, below anything that measures, and the discrete product's tasks.cpp
+// does exactly that for its telemetry. Here there is a second reason that is
+// specific to this board: loop() is the RENDER loop. One request can take the
+// full 8 s HTTP timeout, and inside loop() that is eight seconds of frozen
+// panel, frozen touch and a stalled 20 Hz publish -- on a device whose whole
+// point is a live readout.
+//
+// The scale task keeps owning the cells; this task only ever takes a snapshot,
+// which is the same immutable copy every other consumer gets.
+TaskHandle_t uplinkTask_ = nullptr;
+
+// Power, packed into ONE 32-bit word so the uplink task can read it without a
+// mutex -- the same trick, for the same reason, as bringup_time.cpp's clock.
+// Aligned 32-bit loads and stores are atomic on this core, so a reader either
+// sees the whole previous value or the whole new one, never a millivolt figure
+// from one sample beside a band from the next. A mutex here would let a task
+// doing TLS block the loop that writes it.
+//
+//   bits 0-15   cell millivolts, EMA-filtered
+//   bits 16-23  battery::Level as decided by the hysteresis
+volatile uint32_t powerPacked_ = 0;
+
+void publishPower(uint16_t cellMv, battery::Level level) {
+  powerPacked_ = ((uint32_t)level << 16) | (uint32_t)cellMv;
+}
+
+void uplinkTaskFn(void *) {
+  for (;;) {
+    // Nothing to report until the converters have published once. A
+    // zero-initialised snapshot would go out as `no_cells`, which is a claim
+    // about the hardware rather than about the fact that it has not spoken yet.
+    if (scale::ready()) {
+      const uint32_t p = powerPacked_;
+      scale_telemetry::loop(scale::snapshot(), millis() / 1000,
+                            (uint16_t)(p & 0xFFFF),
+                            (battery::Level)((p >> 16) & 0xFF));
+    }
+    // Four times a second. scale_telemetry::loop() does its own rate limiting,
+    // so this only bounds how promptly a change is NOTICED -- and the 5 s post
+    // floor means anything faster would just be waking to decide not to send.
+    vTaskDelay(pdMS_TO_TICKS(250));
+  }
+}
+
+void startUplinkTask() {
+  // 12 KB, the figure tasks.cpp arrived at for the same work on the discrete
+  // board: "TLS alone consumed ~5 KB the first time it ran, and a full
+  // handshake against a longer certificate chain can spike further". Priority 1
+  // on core 0, beside the time task and below everything that measures.
+  xTaskCreatePinnedToCore(uplinkTaskFn, "uplink", 12288, nullptr, 1, &uplinkTask_, 0);
+  Serial.println("uplink: task started on core 0");
+}
+
+uint32_t uplinkStackFreeBytes() {
+  // BYTES on ESP-IDF, not words -- see bringup_time::stackFreeBytes().
+  return uplinkTask_ ? uxTaskGetStackHighWaterMark(uplinkTask_) : 0;
 }
 
 // --- LVGL bindings ---------------------------------------------------------
@@ -385,6 +499,29 @@ void publishScale(uint32_t nowMs) {
   // then the bar shows "--:--" rather than a number it has not earned.
   s.timeKnown = false;
 
+  // THERE ARE NO ToF SENSORS ON THIS PRODUCT, so say so rather than carrying the
+  // fixture's answer. `s` starts life as a copy of demoLatest(), which on the
+  // first call is scenario 0 -- four VL53L0X reported online, an Ok stack and
+  // four Absent levels. demoOverrideState() then freezes the cycle, so those
+  // four claims about hardware this board does not have ride in the published
+  // snapshot for the rest of the power cycle.
+  //
+  // Nothing renders them today: the bowl page is not built in this image. That
+  // is exactly why it is worth setting them now -- an inherited value that is
+  // invisible is one that will be believed the first time something reads it,
+  // and the charge-state field beside them was already correct only by an
+  // accident of scenario ordering.
+  for (uint8_t i = 0; i < ui::LEVELS; i++) {
+    s.levels[i] = ui::Level::Unknown;
+    s.sensorOnline[i] = false;
+  }
+  s.sensorsOnline = 0;
+  s.stackCount = 0;
+  // Degraded, not Ok. "No trustworthy count" is the truth about a device with no
+  // level sensors; Ok would assert a count of zero bowls, which is a measurement
+  // nothing here made.
+  s.stack = ui::Stack::Degraded;
+
   ui::demoOverrideState(s);
 
   // The scope gets the same figures the dashboard does, in whichever unit the
@@ -598,11 +735,16 @@ void setup() {
   // down". A scan cannot tell those apart -- both look like silence -- and the
   // difference is the difference between a missing module and a wedged one.
   //
-  // Both lines should read 1. Bus A has 4.7k pull-ups fitted on the board
-  // (R29/R30); bus B has none, so a 1 there is the ESP32's internal pull-up if
-  // you have not fitted the resistors, which is weak but still reads high.
-  // A 0 on SDA is a slave holding the bus, and it takes the touch controller
-  // down with it.
+  // All four lines should read 1, and on this wiring every one of them is held
+  // up by a REAL resistor rather than by the ESP32's internal pull-up: the touch
+  // pair by R29/R30 and the cell trunk by R4/R5, the camera connector's, both
+  // 4.7k and both already fitted. A 0 is therefore a slave holding the line
+  // down, not a missing resistor.
+  //
+  // This paragraph described "bus A" and a pull-up-less "bus B" on GPIO11/12
+  // until the cells moved behind the mux. That bus no longer exists, and its
+  // caveat -- a 1 that is only the internal pull-up, so weak that 400 kHz NAKed
+  // -- no longer applies to anything printed below.
   {
     const int8_t pins[4] = {board::TP_SDA, board::TP_SCL, board::CELL_SDA, board::CELL_SCL};
     for (uint8_t i = 0; i < 4; i++) pinMode(pins[i], INPUT_PULLUP);
@@ -708,7 +850,9 @@ void setup() {
 
   bringup_wifi::begin();
   bringup_time::begin();
-  bootMark("wifi + time tasks started");
+  scale_telemetry::begin();
+  startUplinkTask();
+  bootMark("wifi + time + uplink tasks started");
 
   ui::perfBegin();
 
@@ -749,8 +893,44 @@ void setup() {
   // --- battery ------------------------------------------------------------
   analogSetPinAttenuation(board::PIN_BATTERY_ADC, ADC_11db);
   Serial.println("\n--- battery ---");
-  Serial.printf("  GPIO%d, on-board 200k/100k divider (ratio %.2f)\n",
-                board::PIN_BATTERY_ADC, board::BATTERY_DIVIDER_NOMINAL);
+  // BOTH RATIOS, side by side, because they answer different questions and a
+  // gap between them is itself the diagnosis. The nominal is what the resistors
+  // are; the calibration is what this unit measures, and it is the one actually
+  // applied. A unit whose calibration has drifted far from 3.0 has a divider
+  // fault or an ADC well outside its usual few per cent, and printing only the
+  // figure in use would hide that.
+  Serial.printf("  GPIO%d, on-board 200k/100k divider (nominal %.2f, using %.4f)\n",
+                board::PIN_BATTERY_ADC, board::BATTERY_DIVIDER_NOMINAL,
+                config::BATTERY_DIVIDER);
+
+  // THE CHARGER IS NOT WIRED TO ANYTHING THIS CHIP CAN READ, and the firmware
+  // says so rather than letting a fixture answer for it. The ETA6098's STAT
+  // output drives LED1's cathode and that net carries no module pin -- see
+  // board_waveshare_s3.h section 5 -- so `unknown` is the measurement, not a
+  // placeholder. Fitting the one-resistor mod in todo.md is what makes
+  // CHARGER_STATUS_READABLE true, and this line is then the only one that has to
+  // learn where the pin went.
+  ui::demoOverrideCharging(board::CHARGER_STATUS_READABLE, false);
+  Serial.printf("  charge state %s\n",
+                board::CHARGER_STATUS_READABLE
+                    ? "readable"
+                    : "NOT READABLE on this board -- reported as unknown, not as 'no'");
+
+  // One reading before the first loop, so the boot log carries a number rather
+  // than leaving the first power line 100 ms away and the panel showing the
+  // fixture until then.
+  {
+    const uint16_t pinMv = readBatteryPinMv();
+    const uint16_t cellMv = (uint16_t)lroundf((float)pinMv * config::BATTERY_DIVIDER);
+    Serial.printf("  pin %u mV -> cell %u mV\n", pinMv, cellMv);
+    if (cellMv < config::BATTERY_PRESENT_ABOVE_MV) {
+      // Named as the two different faults it can be. An open input and a wrong
+      // divider constant both land here, and they send somebody to opposite
+      // ends of the board.
+      Serial.println("  !! below the presence threshold -- either no cell is fitted,");
+      Serial.println("     or BOWLSTACK_BATTERY_CAL is wrong for this hardware.");
+    }
+  }
   bootMark("battery");
   Serial.println("\nready.\n");
 }
@@ -789,31 +969,45 @@ void loop() {
   ui::pagesTick(millis());
   ui::perfFrameEnd(millis());
 
-  // Once per second, not per frame. The 16-sample mean costs 16 ADC
-  // conversions, a cell moves over hours, and the battery page is the only
-  // thing that reads it.
-  static uint32_t nextBatt = 0;
-  if ((int32_t)(millis() - nextBatt) >= 0) {
-    nextBatt = millis() + 1000;
-    const uint16_t pinMv = readBatteryPinMv();
-    const uint16_t cellMv = (uint16_t)(pinMv * board::BATTERY_DIVIDER_NOMINAL);
+  // 10 Hz, not 1 Hz, and the rate is part of the filter rather than a sampling
+  // preference. BATTERY_EMA_ALPHA is expressed in samples, so config.h's 0.20
+  // is the ~500 ms time constant it claims to be only at this interval; at the
+  // 1 Hz this used to run at, the same constant was a five-second filter.
+  //
+  // It costs ~1.6 ms of ADC conversions per sample -- 16 reads at ~100 us --
+  // against a loop measured at ui 62%. That is the price of the presence dwell
+  // being able to see a contact bounce at all.
+  {
+    const uint32_t now = millis();
+    if (!batteryEverSampled_ || (int32_t)(now - nextBatterySampleMs_) >= 0) {
+      nextBatterySampleMs_ = now + config::BATTERY_SAMPLE_INTERVAL_MS;
+      batteryEverSampled_ = true;
 
-    // Bounded at BOTH ends. Below the floor the input is floating rather than
-    // measuring; above the ceiling no lithium cell can produce it, so the
-    // measurement is broken -- a real failure once read 6365 mV as "100%".
-    ui::Battery band = ui::Battery::Unknown;
-    int8_t pct = -1;
-    if (cellMv >= 2500 && cellMv <= 4400) {
-      const float soc = battery::socFromMillivolts(cellMv);
-      pct = (int8_t)(soc + 0.5f);
-      if (soc > 70.0f) band = ui::Battery::Good;
-      else if (soc > 35.0f) band = ui::Battery::Medium;
-      else if (soc > 10.0f) band = ui::Battery::Low;
-      else band = ui::Battery::Critical;
+      const uint16_t pinMv = readBatteryPinMv();
+      // ONE divider constant for the image. config::BATTERY_DIVIDER is what
+      // platformio.ini's -DBOWLSTACK_BATTERY_CAL sets, and it is the per-unit
+      // calibrated figure rather than board::BATTERY_DIVIDER_NOMINAL -- the
+      // nominal is what the resistors say, this is what this board measures.
+      // Using both would put two answers to one question in one file.
+      const uint16_t cellMv =
+          (uint16_t)lroundf((float)pinMv * config::BATTERY_DIVIDER);
+
+      // Presence, plausibility, filtering, hysteresis and the percentage
+      // deadband all happen inside here. The bounds this used to test inline
+      // (2500 / 4400) are Monitor's own, with the hysteresis partners the
+      // inline version dropped -- see config.h's BATTERY_*_MV block.
+      batteryMonitor_.update(cellMv, now);
+
+      lastPinMv_ = pinMv;
+      lastCellMv_ = batteryMonitor_.millivolts();
+      ui::demoOverrideBattery(batteryMonitor_.millivolts(), pinMv,
+                              batteryMonitor_.percent(),
+                              toUiBattery(batteryMonitor_.level()));
+      // The same two figures the screen just got, handed across to the uplink
+      // task. Published from here rather than read from lastCellMv_ directly,
+      // so the cross-core reader gets one consistent pair.
+      publishPower(batteryMonitor_.millivolts(), batteryMonitor_.level());
     }
-    ui::demoOverrideBattery(cellMv, pinMv, pct, band);
-    lastPinMv_ = pinMv;
-    lastCellMv_ = cellMv;
   }
 
   static uint32_t nextConsole = 0;
@@ -827,7 +1021,35 @@ void loop() {
     const scale::Snapshot sn = scale::snapshot();
     char perf[128];
     ui::perfFormat(perf, sizeof(perf));
-    Serial.printf("%s | esp-heap %u | batt %u mV\n", perf, ESP.getFreeHeap(), lastCellMv_);
+    Serial.printf("%s | esp-heap %u\n", perf, ESP.getFreeHeap());
+
+    // THE POWER LINE, and it prints exactly what the Battery page renders --
+    // pin voltage, cell voltage, percentage, band -- so the two can be compared
+    // at a glance instead of one of them having to be trusted. The discrete
+    // product has carried this since the beginning (device_status::printPower)
+    // and it is the only power telemetry visible without a network; this image
+    // was printing a bare millivolt figure and nothing else.
+    //
+    // IT IS ALSO HOW YOU TELL A WIRED READING FROM A STUCK ONE. On USB the
+    // ETA6098 holds the BAT node at its charge voltage, so a board with no cell
+    // fitted -- and a board with a full one -- both sit at ~4.16 V and do not
+    // move. That is a real measurement of a real node and it looks exactly like
+    // a fixture. Unplug USB and the number starts falling; that is the test.
+    if (batteryMonitor_.level() == battery::Level::Unknown) {
+      // The two ways a reading can be invalid, named apart. Too low is an open
+      // or unconnected input; too high means the divider constant is wrong or
+      // the pin is floating -- and they send somebody to opposite ends of the
+      // board.
+      Serial.printf("  battery: pin %u mV -> cell %u mV : %s\n", lastPinMv_, lastCellMv_,
+                    lastCellMv_ >= config::BATTERY_PRESENT_ABOVE_MV
+                        ? "IMPLAUSIBLE -- check the divider or BOWLSTACK_BATTERY_CAL"
+                        : "no cell detected");
+    } else {
+      Serial.printf("  battery: pin %u mV -> cell %u mV : %d%% -> %s   charging %s\n",
+                    lastPinMv_, lastCellMv_, batteryMonitor_.percent(),
+                    battery::levelName(batteryMonitor_.level()),
+                    board::CHARGER_STATUS_READABLE ? "?" : "unknown (no STAT pin)");
+    }
     for (uint8_t i = 0; i < scale::CELLS; i++) {
       const scale::CellSnapshot &c = sn.cell[i];
       const char *st = c.state == CellState::Online
@@ -873,7 +1095,32 @@ void loop() {
                     (long)(sn.cell[0].counts - sn.cell[0].platformZero - sn.cell[0].tare +
                            sn.cell[1].counts - sn.cell[1].platformZero - sn.cell[1].tare));
     }
-    Serial.printf("  stacks: scale %lu B free\n", (unsigned long)scale::stackFreeBytes());
+    // THE UPLINK LINE. A station that weighs perfectly and publishes nothing
+    // looks, from the panel, exactly like one doing both -- and the dashboard
+    // is the only place the difference shows, which is precisely where nobody
+    // standing at the device is looking.
+    //
+    // The post count is what separates "never worked" from "worked and
+    // stopped", and the age of the last one is what says which. Both are
+    // useless as a rate and are not printed as one.
+    {
+      const uint32_t lp = scale_telemetry::lastPostMs();
+      char age[24];
+      if (scale_telemetry::posts() == 0) snprintf(age, sizeof(age), "never");
+      else snprintf(age, sizeof(age), "%lus ago", (unsigned long)((now - lp) / 1000));
+      Serial.printf("  uplink: %s  %lu state, %lu samples, %u queued, last %s%s\n",
+                    bringup_wifi::connected() ? "online" : "OFFLINE (buffering history)",
+                    (unsigned long)scale_telemetry::posts(),
+                    (unsigned long)scale_telemetry::samplesPosted(),
+                    scale_telemetry::queued(), age,
+                    scale_telemetry::unprovisioned()
+                        ? "  !! NOT REGISTERED -- run supabase/register_loadcells.sql"
+                        : "");
+    }
+
+    Serial.printf("  stacks: scale %lu B free, uplink %lu B free\n",
+                  (unsigned long)scale::stackFreeBytes(),
+                  (unsigned long)uplinkStackFreeBytes());
   }
 
   // Sleep until LVGL actually wants attention, bounded at both ends: at least

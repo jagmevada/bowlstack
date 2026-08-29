@@ -1,13 +1,11 @@
 ﻿#include "telemetry.h"
 
 #include <ArduinoJson.h>
-#include <HTTPClient.h>
-#include <WiFiClientSecure.h>
 
 #include "battery_soc.h"
 #include "bowl_logic.h"
 #include "net.h"
-#include "secret.h"
+#include "uplink.h"
 #include "version.h"
 
 namespace telemetry {
@@ -87,22 +85,23 @@ const uint32_t UNPROVISIONED_RETRY_MS = 300000;
 // Matches the server-side clamp in tg_status_events_stamp().
 const uint32_t AGE_MAX_MS = 604800000;
 
-const uint32_t HTTP_TIMEOUT_MS = 8000;
-
 // The one channel a real unit owns. QueuedEvent and Channel now live in the
 // header, because the fleet simulator holds an array of them -- see the note
 // there on why there is one implementation rather than two.
 Channel default_;
 
-// Per-PROCESS, deliberately shared by every channel: one TLS session for the
-// whole device, since re-handshaking per request is what dominates egress.
-WiFiClientSecure *tls_ = nullptr;
-
+// THE TRANSPORT MOVED TO uplink.cpp, and nothing about it changed. The TLS
+// session, the URL normalisation, the timeout, the headers and the SQLSTATE
+// scrape are the same code in a file the load-cell image can also compile --
+// see uplink.h for why that image cannot include this one. What stayed here is
+// everything that is about BOWLS: the payload writers, the history queue, the
+// change detection and the backoff schedule.
+//
 // PostgREST answers 409 for BOTH a duplicate key (23505) and a foreign-key
 // violation (23503), which mean opposite things here: the first says the rows
 // are already stored and the buffer should be dropped, the second says the
 // device is not registered and the buffer must be KEPT. Only the SQLSTATE
-// separates them.
+// separates them, and it arrives in uplink::Result::pgCode.
 char lastPgCode_[8] = {0};
 
 const char *reasonName(Reason r) {
@@ -152,76 +151,19 @@ void writeCommon(JsonObject o, uint8_t stackCount, StackStatus stackStatus,
   o["firmware"] = BOWLSTACK_FW_VERSION;
 }
 
-// Supabase presents several URLs in its dashboard and only one of them is the
-// API origin. Normalising here means a unit configured with the REST endpoint
-// (".../rest/v1/") or a trailing slash still works, instead of silently
-// building ".../rest/v1//rest/v1/device_status" and failing every request --
-// a mistake worth tolerating once it is being repeated across 30 devices.
-String apiBase() {
-  String u = String(SUPABASE_URL);
-  while (u.endsWith("/")) u.remove(u.length() - 1);
-  if (u.endsWith("/rest/v1")) u.remove(u.length() - 8);
-  while (u.endsWith("/")) u.remove(u.length() - 1);
-  return u;
-}
-
-// Returns the HTTP status, or a negative HTTPClient error code.
-// `rangeOut`, when non-null, receives the Content-Range header, which is how a
-// PATCH reports how many rows it actually matched.
+// Thin wrapper over uplink::request, kept so the call sites below read exactly
+// as they did. It also latches the SQLSTATE into the file-scope buffer the
+// 23503/23505 handling already reads, rather than threading a Result through
+// four call sites that only ever want two fields of it.
+//
+// `zeroRowsOut`, when non-null, receives whether the request matched no rows --
+// which is how a PATCH reports that this device has no row to write to.
 int request(const char *method, const char *path, const char *query,
-            const char *prefer, const String &body, String *rangeOut = nullptr) {
-  if (!net::connected()) return -1000;
-
-  HTTPClient http;
-  String url = apiBase() + path;
-  if (query != nullptr && query[0] != '\0') {
-    url += "?";
-    url += query;
-  }
-
-  if (!http.begin(*tls_, url)) return -1001;
-
-  // Reuse keeps the TLS session alive across posts. Without it each request
-  // re-downloads the certificate chain, which dominates egress far more than
-  // the payloads themselves.
-  http.setReuse(true);
-  http.setTimeout(HTTP_TIMEOUT_MS);
-  http.addHeader("apikey", SUPABASE_ANON_KEY);
-  http.addHeader("Authorization", String("Bearer ") + SUPABASE_ANON_KEY);
-  http.addHeader("Content-Type", "application/json");
-  http.addHeader("Prefer", prefer);
-
-  static const char *kHeaders[] = {"Content-Range"};
-  http.collectHeaders(kHeaders, 1);
-
-  const int code = http.sendRequest(method, (uint8_t *)body.c_str(), body.length());
-
-  if (rangeOut != nullptr) *rangeOut = http.header("Content-Range");
-
-  lastPgCode_[0] = '\0';
-
-  // Only read the body on failure -- on success it is empty anyway thanks to
-  // return=minimal, and the error text is what we want for diagnosis.
-  if (code < 200 || code >= 300) {
-    const String err = http.getString();
-    Serial.printf("telemetry: %s %s -> %d %s\n", method, path, code,
-                  err.substring(0, 180).c_str());
-
-    // Extract the SQLSTATE so the caller can tell 23505 from 23503.
-    //
-    // Extracted here but ACTED ON by the caller. This function is per-process
-    // and knows nothing about channels, while "this device is not registered" is
-    // a fact about one installation -- and a batch carrying rows for several
-    // installations cannot attribute a foreign-key violation from the SQLSTATE
-    // alone. flushChannels() resolves that by re-sending one channel at a time.
-    const int at = err.indexOf("\"code\":\"");
-    if (at >= 0 && (int)err.length() >= at + 13) {
-      err.substring(at + 8, at + 13).toCharArray(lastPgCode_, sizeof(lastPgCode_));
-    }
-  }
-
-  http.end();
-  return code;
+            const char *prefer, const String &body, bool *zeroRowsOut = nullptr) {
+  const uplink::Result r = uplink::request(method, path, query, prefer, body);
+  memcpy(lastPgCode_, r.pgCode, sizeof(lastPgCode_));
+  if (zeroRowsOut != nullptr) *zeroRowsOut = r.matchedZeroRows;
+  return r.code;
 }
 
 // History. A plain INSERT -- no ON CONFLICT, because upserts require the anon
@@ -359,14 +301,13 @@ bool patchStatus(Channel &ch, const DeviceStatus &s) {
   // count=exact is what makes an unregistered device loud. A PATCH matching no
   // rows is a perfectly successful 204 -- without the count we could not tell
   // "reported" from "wrote nothing at all, forever".
-  String range;
+  bool zeroRows = false;
   const int code = request("PATCH", "/rest/v1/device_status", query.c_str(),
-                           "return=minimal,count=exact", body, &range);
+                           "return=minimal,count=exact", body, &zeroRows);
 
   if (code < 200 || code >= 300) return false;
 
-  // Content-Range looks like "0-0/1" on success, "*/0" when nothing matched.
-  if (range.endsWith("/0")) {
+  if (zeroRows) {
     Serial.printf("telemetry: no device_status row for '%s' - register it in "
                   "the devices table\n",
                   ch.deviceId);
@@ -385,22 +326,21 @@ void openChannel(Channel &ch, const char *deviceId) {
   // installation, and boot_id is half of the idempotency key -- sharing one
   // across 31 nodes would make (device_id, boot_id, seq) collide the moment two
   // nodes reached the same seq.
-  ch.bootId = esp_random();
+  ch.bootId = uplink::newBootId();
 }
 
 void begin() {
   openChannel(default_, BOWLSTACK_DEVICE_ID);
 
-  tls_ = new WiFiClientSecure();
-  // No certificate pinning: the anon key grants write-only access with no read
-  // path, so an intercepted session yields nothing readable and can at worst
-  // inject telemetry. Pin a root CA here if that ever changes.
-  tls_->setInsecure();
+  // The radio this image joins with. Named HERE rather than inside uplink.cpp,
+  // which is compiled into the panel image too and must not reach for net.h --
+  // that image has no WiFiManager and joins through bringup_wifi.cpp instead.
+  uplink::begin(&net::connected);
 
   // Print the EFFECTIVE base, not the raw macro: if normalisation changed it,
   // that difference is the first thing worth seeing when requests fail.
   Serial.printf("telemetry: boot_id=%u -> %s\n", default_.bootId,
-                apiBase().c_str());
+                uplink::apiBase());
 }
 
 void enqueue(Channel &ch, const DeviceStatus &s, Reason reason, uint32_t seq) {

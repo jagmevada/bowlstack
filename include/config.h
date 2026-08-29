@@ -87,13 +87,23 @@ static const uint8_t I2C1_SCL = 22;
 // measured 21.0 samples/s at 400 kHz and 20.9 at 100 kHz, because
 // TIMING_BUDGET_US dominates. ~2.2k pull-ups on I2C0 would make 400 kHz safe.
 //
-// IT DOES NOT REACH THE LOAD-CELL BOARD, and the merge that brought it here is
-// the reason to say so. config.h is not compiled into ws-s3-loadcell at all --
-// that image's filter admits only loadcell/, ui/ and the two converter drivers,
-// none of which include this file. The cells run at 400 kHz on their own
+// THIS CONSTANT DOES NOT REACH THE LOAD-CELL BOARD, and the merge that brought
+// it here is the reason to say so. The cells run at 400 kHz on their own
 // constant in scale.cpp, over a few centimetres of lead with real 4.7k pull-ups
 // rather than a metre of harness up a pipe, which is why the two products can
 // disagree about a bus speed and both be right.
+//
+// THE FILE ITSELF *IS* COMPILED INTO ws-s3-loadcell, which this note used to
+// deny. loadcell_main.cpp includes battery_soc.h, and battery_soc.h includes
+// config.h -- so every constant here is live in that image even though its
+// build_src_filter admits no .cpp that mentions this file by name. The
+// distinction matters: the load-cell station's battery band comes from
+// config::BAT_*_UP/DOWN and config::BATTERY_DIVIDER below, and a reader who
+// believed the old sentence would look for those numbers somewhere else.
+//
+// src/config.cpp is NOT linked there, so SENSORS and OFFSET_MM stay unresolved
+// declarations. That is fine only while nothing in the image references them;
+// the first one that does fails at LINK, not at compile.
 static const uint32_t I2C_HZ = 100000;
 
 // --- per-sensor wiring -----------------------------------------------------
@@ -351,8 +361,32 @@ static const uint32_t POWER_REPORT_MS = 10000;
 //   2. measure the cell with a multimeter
 //   3. factor = cell mV / pin mV
 //   4. platformio.ini: -DBOWLSTACK_BATTERY_CAL=1.9724f
+//
+// THE DEFAULT IS BOARD-BRANCHED, and it is the one battery constant that was
+// not. PIN_BATTERY_ADC and PIN_CHARGING above already differ per board; this sat
+// at the discrete figure for both, so the Waveshare image scaled its 200k/100k
+// divider by a number measured on a 10k/10k one.
+//
+// The failure that produced is 4 mV wide and looks nothing like a wrong
+// constant. A full 4100 mV cell presents 1366.7 mV at the Waveshare pin;
+// x1.9724 gives 2696 mV, four millivolts under BATTERY_PRESENT_ABOVE_MV, so
+// battery::Monitor never latches the cell as present and the panel reports
+// "no cell" with a full battery fitted. Only cells above ~4.1 V of TRUE voltage
+// would have registered at all -- which is to say, none.
+//
+// Both figures stay per-unit calibratable by -DBOWLSTACK_BATTERY_CAL; what the
+// branch removes is the possibility of getting the OTHER product's calibration
+// by saying nothing.
 #ifndef BOWLSTACK_BATTERY_CAL
+#if BOWLSTACK_BOARD_WAVESHARE_S3
+// Nominal (200k + 100k) / 100k. A starting point rather than an answer: the
+// divider's 66.7k source impedance is far outside the ~10k the SAR ADC wants,
+// so per-unit leakage error is LARGER here than on the discrete board, not
+// smaller. See board_waveshare_s3.h section 4.
+#define BOWLSTACK_BATTERY_CAL 3.0f
+#else
 #define BOWLSTACK_BATTERY_CAL 1.9724f
+#endif
 #endif
 //
 //     battery + --[10k]--+-- GPIO35
@@ -443,6 +477,24 @@ static const uint16_t BATTERY_PLAUSIBLE_BELOW_MV = 4300;    // invalid -> valid
 // impossible for a single Li-ion cell, so a dashboard seeing it still knows the
 // divider is broken -- which is the entire reason battery_mv is published.
 static const uint16_t BATTERY_PUBLISH_MAX_MV = 6000;
+
+// --- weight: the publishable range -----------------------------------------
+// Must match `check (weight_g between -5000 and 100000)` in
+// supabase/schema.sql, and for exactly the reason the battery ceiling above
+// exists: a value the firmware can produce but the CHECK rejects is not a
+// rejected weight, it is a 400 that fails the WHOLE PATCH -- so the station
+// stops reporting anything at all, including the weight_state that would have
+// explained why.
+//
+// A WEIGHT IS NOT CLAMPED, THOUGH, and that is the difference from battery_mv.
+// Clamping 6365 mV to 6000 keeps a diagnostic: no lithium cell reaches either
+// figure, so the dashboard still sees "the divider is broken". Clamping 400 kg
+// to 100 kg produces a number that looks like food. A reading outside this
+// range is not a heavy platform, it is a calibration factor that is wrong by
+// orders of magnitude -- so the firmware reports NO weight and says the total
+// is not a weight, which is what over_range already means.
+static const int32_t WEIGHT_PUBLISH_MIN_G = -5000;
+static const int32_t WEIGHT_PUBLISH_MAX_G = 100000;
 
 // --- telemetry sizing -------------------------------------------------------
 // Depth of the per-device offline history buffer. A real unit gets 32; the fleet

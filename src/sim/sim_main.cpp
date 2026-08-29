@@ -58,7 +58,12 @@ int main(int, char **) {
   lv_sdl_keyboard_create();
 
   ui::wifiSetMac("28:84:85:47:ab:bc");
-  ui::wifiSetSetupAp("Bowlstack-BWL-001", "bowlstack");
+  // BUILT FROM THE SAME EXPRESSION THE DEVICE USES, not typed. This read
+  // "Bowlstack-BWL-001" while the panel showed "Bowlstack-LDC-001", so the
+  // preview's QR encoded a different network from the product's -- exactly the
+  // silent divergence CLAUDE.md's "one fixture, two targets" rule exists to
+  // stop, and invisible because a QR does not look wrong when it is wrong.
+  ui::wifiSetSetupAp("Bowlstack-" BOWLSTACK_DEVICE_ID, "bowlstack");
   ui::demoInstallWifiMocks();
 
   ui::perfBegin();

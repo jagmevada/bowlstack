@@ -31,6 +31,9 @@ bool battOverride_ = false;
 uint16_t ovCellMv_ = 0, ovPinMv_ = 0;
 int8_t ovPct_ = -1;
 Battery ovBand_ = Battery::Unknown;
+bool haveCharging_ = false;
+bool chargingKnown_ = false;
+bool charging_ = false;
 
 State base() {
   State s = unknownState();
@@ -309,16 +312,18 @@ void demoInstallWifiMocks() {
 
 void demoOverrideState(const State &s) {
   latest_ = s;
-  // The radio is a separate source from the sensors and arrives at its own
-  // rate, so the adapter must not be able to stamp stale link state over it.
-  if (haveWifi_) {
-    latest_.wifiConnected = wifiConnected_;
-    latest_.wifiRssi = wifiRssi_;
-  }
   haveLatest_ = true;
   // Stops demoTick() from cycling. Real data outranks fixtures, and the two
   // must not take turns on the same screen.
   stateOverride_ = true;
+  // THE WIFI RE-APPLICATION USED TO BE HERE and has moved into demoLatest(),
+  // beside the other three. It worked, but only positionally: the adapter also
+  // writes timeKnown = false, and the clock survived that solely because
+  // demoLatest() re-applied it AFTERWARDS and because loop() happens to publish
+  // the time before the scale. Two overrides re-applied in two different places
+  // is an ordering dependency nobody can see from either of them -- and this
+  // file already records what that shape cost once, a 60x clock on a board with
+  // no RTC. One site, one order.
 }
 
 void demoOverrideTime(bool known, uint8_t hh, uint8_t mm) {
@@ -340,6 +345,12 @@ void demoOverrideBattery(uint16_t cellMv, uint16_t pinMv, int8_t pct, Battery ba
   ovPinMv_ = pinMv;
   ovPct_ = pct;
   ovBand_ = band;
+}
+
+void demoOverrideCharging(bool known, bool charging) {
+  haveCharging_ = true;
+  chargingKnown_ = known;
+  charging_ = charging;
 }
 
 uint8_t demoCount() { return (uint8_t)(sizeof(SCENARIOS) / sizeof(SCENARIOS[0])); }
@@ -396,8 +407,24 @@ const State &demoLatest(uint32_t nowMs) {
     }
   }
 
-  // A real clock outranks both the fixture and the sensor adapter's
-  // timeKnown = false. Applied last so nothing downstream can undo it.
+  // --- the platform overrides, all four, in one place ------------------------
+  // EVERY measured value outranks both the fixture and the adapter's snapshot,
+  // and they are re-applied HERE rather than at their setters so that ordering
+  // stops being a property of who calls what first. The adapter writes
+  // timeKnown = false on every publish and only survived because this block ran
+  // after it; the WiFi pair was re-applied inside demoOverrideState() instead,
+  // which meant two of the four had different rules. Nothing downstream can undo
+  // any of them now.
+  //
+  // Each is guarded by its own `have` flag, because the four arrive from four
+  // places at four rates and any of them can legitimately be absent -- the
+  // simulator supplies none and keeps its fixtures, which is what lets a
+  // charging cell or a flat one be looked at without owning either.
+  if (haveWifi_) {
+    latest_.wifiConnected = wifiConnected_;
+    latest_.wifiRssi = wifiRssi_;
+  }
+
   if (haveTime_) {
     latest_.timeKnown = timeKnown_;
     latest_.hh = timeHH_;
@@ -409,6 +436,11 @@ const State &demoLatest(uint32_t nowMs) {
     latest_.batteryPinMv = ovPinMv_;
     latest_.batteryPercent = ovPct_;
     latest_.battery = ovBand_;
+  }
+
+  if (haveCharging_) {
+    latest_.chargingKnown = chargingKnown_;
+    latest_.charging = charging_;
   }
 
   latest_.uptimeSec = nowMs / 1000;
