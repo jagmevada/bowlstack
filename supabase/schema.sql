@@ -87,6 +87,9 @@ drop function if exists public.current_meal_type(text, timestamptz) cascade;
 drop function if exists public.current_meal_date(text, timestamptz) cascade;
 drop function if exists public.meal_mapping_preload(text, text, date) cascade;
 drop function if exists public.last_served_meal(text, timestamptz) cascade;
+-- Without this entry a second run of schema.sql leaves the previous definition
+-- in place, which is the one way this file stops being idempotent.
+drop function if exists public.weight_mismatch_tolerance() cascade;
 
 -- ---------------------------------------------------------------------
 -- 1. devices -- human-managed registry. No device ever writes here.
@@ -120,7 +123,28 @@ create table public.devices (
 
   timezone    text not null default 'Asia/Kolkata',
   last_mac    text,
-  created_at  timestamptz not null default now()
+  created_at  timestamptz not null default now(),
+
+  -- WHAT THIS INSTALLATION MEASURES, and therefore which half of
+  -- device_status is a measurement and which half is simply absent.
+  --
+  --   stack  four VL53L0X up a pipe, reporting a bowl COUNT. Leaves every
+  --          weight_* column NULL.
+  --   scale  three NAU7802 under a platform, reporting GRAMS. Leaves every
+  --          stack_* column NULL.
+  --
+  -- A hardware fact fixed at registration, never a setting. No device writes
+  -- it -- `devices` has no anon policy at all.
+  --
+  -- DEFAULT 'stack' so the 24 bowl counters already registered are correct
+  -- the moment the column appears, which is what makes migrate_loadcell.sql
+  -- safe to run mid-trial.
+  --
+  -- LAST, matching where ALTER TABLE ADD COLUMN puts it, so a rebuilt database
+  -- and a migrated one have the same column order and `select *` cannot tell
+  -- them apart.
+  kind        text not null default 'stack'
+                constraint devices_kind_ck check (kind in ('stack','scale'))
 );
 
 comment on column public.devices.location is
@@ -185,7 +209,71 @@ create table public.device_status (
   charging       boolean,
 
   firmware       text,
-  mac            text
+  mac            text,
+
+  -- --- the load-cell half -------------------------------------------------
+  -- Nullable, like everything above, and for a sharper reason: a bowl counter
+  -- never writes any of these and a load cell never writes the stack_* columns
+  -- above. One row shape, two products, and `kind` in `devices` says which
+  -- half to read.
+  --
+  -- THE STATE IS ALWAYS KNOWN; THE NUMBER IS NOT. A scale that has never seen
+  -- a known mass has counts and no grams -- deliberately, because inventing a
+  -- factor produces a confident wrong weight. So weight_state is what the
+  -- device always sends and weight_g is present only when the state is 'ok'.
+  --
+  -- ZERO IS A REAL WEIGHT. An empty, tared, calibrated platform reads 0 g and
+  -- that is a measurement: the counter is empty and needs refilling. NULL
+  -- means nobody knows. Same distinction bowls_trusted already draws, and the
+  -- CHECK below is what stops the two collapsing.
+  weight_g       integer,
+  weight_state   text,
+  cells_online   smallint,
+  counts_per_gram numeric(9,3),
+  net_counts     bigint,
+
+  -- Reported in priority order, the fault NEAREST THE HARDWARE first, because
+  -- that is the one somebody can act on:
+  --   no_cells       no converter is producing conversions at all
+  --   cells_partial  fewer than three are. Cells under one platform SUM, so a
+  --                  missing cell makes the total silently LOW, not noisy
+  --   over_range     a converter hit the end of its 24-bit range, so the
+  --                  total has stopped rising
+  --   settling       the automatic power-up tare has not concluded
+  --   uncalibrated   no counts-to-gram factor on this unit; no grams exist
+  --   untared        calibrated, so right about CHANGE and wrong about the
+  --                  absolute -- it still includes the platform
+  --   ok             a weight
+  constraint device_status_weight_state_ck
+    check (weight_state is null or weight_state in
+           ('ok','uncalibrated','untared','settling',
+            'cells_partial','no_cells','over_range')),
+
+  -- THE HONESTY RULE, MADE STRUCTURAL. A gram figure exists exactly when the
+  -- state says it does. Without this a firmware bug could publish weight_g
+  -- beside 'uncalibrated' and put an invented number on the dashboard with
+  -- nothing objecting; and 'ok' with a NULL weight would be a state claiming a
+  -- measurement it did not carry. An equality of two booleans rather than two
+  -- CHECKs, so both directions fail at the edge as a 400.
+  constraint device_status_weight_agrees_ck
+    check (weight_state is null
+           or (weight_state = 'ok') = (weight_g is not null)),
+
+  -- Sanity rails, the role bowl_weight_g's 100..50000 plays. Three 20 kg cells
+  -- is 60 kg of rating, so 100 kg is unreachable and identifies a units mix-up
+  -- or a wild calibration factor. The negative floor exists because a tared
+  -- platform legitimately drifts a few grams below zero, and because removing
+  -- something present at tare time is a real thing to do.
+  --
+  -- COUPLED TO FIRMWARE exactly as battery_mv's 0..6000 bound is: a value the
+  -- device can produce but this rejects is not a rejected weight, it is a 400
+  -- that fails the whole PATCH -- so the station stops reporting anything at
+  -- all, including the state that would have explained why.
+  constraint device_status_weight_range_ck
+    check (weight_g is null or weight_g between -5000 and 100000),
+
+  constraint device_status_cells_online_ck
+    check (cells_online is null or cells_online between 0 and 8)
 );
 
 -- Columns are nullable because the row exists before the device has ever
@@ -952,6 +1040,21 @@ grant update (boot_id, uptime_s, stack_count, stack_status, levels, sensors_ok,
               sensors_online, battery_mv, battery_level, charging, firmware, mac)
   on public.device_status to anon;
 
+-- The load-cell half, as a SECOND grant on the same table. Column grants
+-- ACCUMULATE, so this adds to the list above rather than replacing it -- which
+-- is also what makes migrate_loadcell.sql idempotent, since re-granting is a
+-- no-op.
+--
+-- No policy change accompanies it: device_status_update_device is row-scoped
+-- `using (true) with check (true)`, and policies scope ROWS while grants scope
+-- COLUMNS, so columns added later are already covered.
+--
+-- `grant select (device_id)` above deliberately stays at ONE column. A scale
+-- cannot read its own weight back any more than a stack can read its own bowl
+-- count, and smoke assertion 27 is what proves that stayed true.
+grant update (weight_g, weight_state, cells_online, counts_per_gram, net_counts)
+  on public.device_status to anon;
+
 -- Plain INSERT; no SELECT of any kind. A duplicate raises 23505, which is the
 -- idempotency mechanism.
 grant insert (device_id, boot_id, seq, age_ms, reason, stack_count,
@@ -1085,7 +1188,19 @@ select d.device_id,
                 and s.updated_at <
                     public.last_service_window_end(d.timezone, d.device_id)
                       - public.offline_after(),
-                false) as missed_last_service
+                false) as missed_last_service,
+
+       -- The load-cell half, appended in one block below everything above --
+       -- so the diff against the pre-load-cell body is purely additive, a
+       -- reader can see at a glance which half describes which product, and
+       -- the live database's CREATE OR REPLACE VIEW (which may only ADD
+       -- columns at the end) and this rebuild agree exactly.
+       d.kind,
+       s.weight_g,
+       s.weight_state,
+       s.cells_online,
+       s.counts_per_gram,
+       s.net_counts
   from public.devices d
   left join public.device_status s using (device_id)
   left join public.meal_food_mapping m
@@ -1113,39 +1228,71 @@ select d.location,
        d.food_slot,
        max(m.food_name)                                        as current_food,
        public.current_meal_type(max(d.timezone))               as current_meal,
-       count(*)                                                as devices,
-       count(*) filter (where coalesce(s.reported, false))     as devices_reported,
+       count(*) filter (where d.kind = 'stack')                as devices,
+       count(*) filter (where d.kind = 'stack'
+                          and coalesce(s.reported, false))     as devices_reported,
 
-       -- Ceiling for this slot, so a progress bar need not hardcode one. If a
-       -- fourth stack joins Darshanarthi slot 1 the achievable total rises, and a
-       -- UI with "max 12" baked in would misreport the busiest position in the
-       -- hall.
-       (count(*) * 4)::bigint                                  as bowls_capacity,
+       (count(*) filter (where d.kind = 'stack') * 4)::bigint  as bowls_capacity,
 
-       -- The trustworthy total. NULL, not 0, when no device reported: no data is
-       -- not an empty counter, and the two send staff to do opposite things.
        sum(s.stack_count) filter (where s.stack_status = 'ok') as bowls_trusted,
        sum(s.stack_count)                                      as bowls_reported,
 
        bool_or(s.stack_status = 'discontiguous')               as any_fault,
        bool_or(s.stack_status = 'degraded')                    as any_degraded,
+       -- Battery and liveness are NOT filtered by kind. A load cell has a
+       -- battery and can go dark exactly like a stack, and a slot whose scale
+       -- is flat is a slot that needs somebody -- so these keep meaning "any
+       -- device here", which is what they already said.
        bool_or(s.battery_level in ('low','critical'))          as any_battery_warn,
        bool_or(coalesce(s.reported, false)
                and public.in_service_window(now(), d.timezone, d.device_id)
                and s.updated_at < now() - public.offline_after()) as any_offline,
        min(s.updated_at)                                       as oldest_update,
 
-       -- Some stack at this position slept through the last completed
-       -- window. The stock screen keeps the last count but must say it is
-       -- last-known, not live. Appended last -- see device_overview, whose
-       -- deployment gate is restated here so the two cannot drift.
        bool_or(coalesce(coalesce(s.reported, false)
                and d.location in ('D','M','T')
                and d.food_slot is not null
                and s.updated_at <
                    public.last_service_window_end(d.timezone, d.device_id)
                      - public.offline_after(),
-               false))                                         as any_missed_service
+               false))                                         as any_missed_service,
+
+       -- Appended: what the scales at this position say. NULL rather than 0
+       -- when none of them has a usable weight -- sum() over an empty filter
+       -- is NULL, which is the answer we want.
+       count(*) filter (where d.kind = 'scale')                as scales,
+       count(*) filter (where d.kind = 'scale'
+                          and s.weight_state = 'ok')           as scales_ok,
+       sum(s.weight_g) filter (where d.kind = 'scale'
+                                 and s.weight_state = 'ok')    as measured_weight_g,
+       -- Why any scale here is NOT contributing a weight, so the screen can
+       -- name the fault instead of showing a silently smaller total. 'ok' is
+       -- removed because it is not an issue.
+       array_remove(array_agg(distinct s.weight_state)
+                    filter (where d.kind = 'scale'), 'ok')     as scale_issues,
+
+       -- THE SAME ARITHMETIC slot_quantity DOES, one grouping down. Stock is
+       -- per HALL per position where Master is per position across halls, and
+       -- both screens must answer "how much food is here" with the same
+       -- number -- so the sum is computed once per row here rather than in the
+       -- client, which is the rule slot_overview already follows for bowls.
+       max(m.bowl_weight_g)                                    as bowl_weight_g,
+       (sum(s.stack_count) filter (where s.stack_status = 'ok'))
+         * max(m.bowl_weight_g)                                as buffer_g,
+       -- coalesce per TERM, never on the sum: a position with a counter and no
+       -- valued buffer has a real total, and so does the reverse. NULL only
+       -- when neither term exists -- which for this view means the dish has no
+       -- per-bowl weight AND no scale is reporting, and the card falls back to
+       -- showing bowls.
+       case when max(m.bowl_weight_g) is null
+                 and sum(s.weight_g) filter (where d.kind = 'scale'
+                                               and s.weight_state = 'ok') is null
+            then null
+            else coalesce((sum(s.stack_count) filter (where s.stack_status = 'ok'))
+                            * max(m.bowl_weight_g), 0)
+               + coalesce(sum(s.weight_g) filter (where d.kind = 'scale'
+                                                    and s.weight_state = 'ok'), 0)
+       end                                                     as weight_g
   from public.devices d
   left join public.device_status s using (device_id)
   left join public.meal_food_mapping m
@@ -1213,6 +1360,54 @@ revoke all on function public.last_served_meal(text, timestamptz) from public, a
 grant execute on function public.last_served_meal(text, timestamptz) to authenticated;
 
 -- ---------------------------------------------------------------------
+--  weight_mismatch_tolerance -- one threshold, one place.
+--
+--  Modelled on offline_after(), for the same reason: a number that decides
+--  whether the dashboard raises a flag belongs in exactly one object where it
+--  can be found and changed, not inline in a view and again in the client.
+--
+--  WHAT A MISMATCH MEANS. Where a dish position has BOTH a load cell and bowl
+--  counters with a per-bowl weight typed in, there are two independent answers
+--  to one question. Agreement is worth nothing; DISAGREEMENT is the signal, and
+--  it has exactly two causes worth chasing -- a miscalibrated cell, or a wrong
+--  per-bowl weight in the menu. Neither is visible from either number alone,
+--  and neither shows up as a fault anywhere else in this schema.
+--
+--  A PAIR, because a single test misfires at one end or the other: at 2 kg a
+--  25% band is 500 g and any half-full bowl trips it, while at 80 kg a flat
+--  2 kg band trips on rounding. The rule is "outside BOTH".
+--
+--  2000 g is roughly the lightest thing anybody stacks in these bowls, so a
+--  difference under one bowl's worth cannot distinguish a calibration error
+--  from an integer bowl count. 0.25 is one bowl in four, about the resolution a
+--  bowl count has when the menu weight is typed by hand.
+-- ---------------------------------------------------------------------
+create or replace function public.weight_mismatch_tolerance(
+  out abs_g integer, out frac numeric)
+returns record
+language sql immutable
+set search_path = ''
+as $$ select 2000, 0.25::numeric $$;
+
+comment on function public.weight_mismatch_tolerance() is
+  'How far a measured weight and a bowls-times-weight estimate may differ '
+  'before the dashboard calls it a disagreement. A difference must exceed '
+  'BOTH the absolute band and the fractional one -- a single percentage '
+  'misfires on light slots and a single gram figure misfires on heavy ones.';
+
+-- REVOKED FROM PUBLIC FIRST, like every other function in this schema. A fresh
+-- CREATE FUNCTION carries Postgres's default of EXECUTE for PUBLIC, so a bare
+-- GRANT to authenticated ADDS a privilege without removing that one -- and this
+-- was, briefly, the only function here anon could call.
+--
+-- It returns two constants and leaks nothing, which is exactly why it is worth
+-- fixing rather than excusing: the value of a uniform posture is that the one
+-- exception does not have to be reasoned about, and "harmless" is the argument
+-- that erodes it.
+revoke all on function public.weight_mismatch_tolerance() from public, anon;
+grant execute on function public.weight_mismatch_tolerance() to authenticated;
+
+-- ---------------------------------------------------------------------
 -- 9b. public.slot_quantity -- the Master Dashboard's source.
 --
 -- WHY THIS IS GROUPED BY food_slot ALONE
@@ -1275,15 +1470,40 @@ with per_area as (
          max(d.timezone)                                         as timezone,
          max(lm.meal_date)                                       as menu_meal_date,
          max(lm.meal_type)                                       as menu_meal_type,
-         count(*)                                                as devices,
+
+         -- STACKS ONLY -- note A. A load cell bolted at this position is not a
+         -- fourth bowl counter, and four more bowls of capacity is exactly
+         -- what counting it would claim.
+         count(*) filter (where d.kind = 'stack')                as devices,
          bool_or(coalesce(s.reported, false))                    as any_reported,
-         (count(*) * 4)::bigint                                  as bowls_capacity,
+         (count(*) filter (where d.kind = 'stack') * 4)::bigint  as bowls_capacity,
 
          -- Trusted only: a degraded stack's count is a lower bound and a
          -- discontiguous one is not a count at all. Folding either into a
          -- WEIGHT would dress an unreliable number up as kilograms, which
          -- reads far more precise than it is.
          sum(s.stack_count) filter (where s.stack_status = 'ok') as bowls_trusted,
+
+         -- What the load cells here actually weighed. NULL, never 0, when none
+         -- has a usable figure -- sum() over an empty filter is NULL, which is
+         -- the answer we want. weight_state = 'ok' is the whole gate: an
+         -- uncalibrated or partly-dead scale reports its state and no grams,
+         -- and must never contribute a silently low total.
+         sum(s.weight_g) filter (where d.kind = 'scale'
+                                   and s.weight_state = 'ok')    as measured_weight_g,
+         count(*) filter (where d.kind = 'scale')                as scales,
+         count(*) filter (where d.kind = 'scale'
+                            and s.weight_state = 'ok')           as scales_ok,
+         -- `weight_state is not null` is part of the FILTER, not an
+         -- afterthought: array_agg(distinct ...) keeps a NULL, and
+         -- array_remove strips only 'ok' -- so a scale that has never reported
+         -- would put a NULL element in this array. That is not merely untidy;
+         -- see the note on slot_issues below for what an extra element used to
+         -- cost.
+         array_remove(array_agg(distinct s.weight_state)
+                      filter (where d.kind = 'scale'
+                                and s.weight_state is not null), 'ok')
+                                                                 as scale_issues,
 
          bool_or(s.stack_status = 'discontiguous')               as any_fault,
          bool_or(s.stack_status = 'degraded')                    as any_degraded,
@@ -1301,10 +1521,6 @@ with per_area as (
          min(s.updated_at)                                       as oldest_update
     from public.devices d
     left join public.device_status s using (device_id)
-    -- The meal whose menu describes the food actually on the stations --
-    -- the current one during service, the one that just finished outside it.
-    -- See last_served_meal(): a NULL current meal used to strip every dish
-    -- name and weight off this screen for two thirds of the day.
     left join lateral public.last_served_meal(d.timezone) lm on true
     left join public.meal_food_mapping m
            on m.location  = d.location
@@ -1315,118 +1531,248 @@ with per_area as (
      and d.food_slot is not null
      and d.location in ('D','M','T')
    group by d.location, d.food_slot
-)
-select p.food_slot,
+),
+-- The derivations, one level up, because every input to them is an aggregate
+-- of the CTE above and a SELECT cannot reference its own output aliases.
+--
+-- TWO ESTIMATES, NOT ONE, and the difference is not redundancy. The SLOT total
+-- treats a silent hall as contributing nothing (coalesce to 0) while the
+-- hall's own LINE shows a dash, because "no reading" is not "an empty
+-- counter". slot_quantity already drew that distinction before load cells
+-- existed, and the precedence rule has to preserve both halves of it.
+per_area_w as (
+  select p.*,
+         case when p.bowl_weight_g is not null
+              then coalesce(p.bowls_trusted, 0)::bigint * p.bowl_weight_g
+         end                                                     as est_total_g,
+         case when p.bowl_weight_g is not null
+               and p.bowls_trusted is not null
+              then p.bowls_trusted::bigint * p.bowl_weight_g
+         end                                                     as est_line_g,
+         -- ADDED, NOT CHOSEN, and this replaced a precedence rule that was
+         -- simply wrong about the hardware.
+         --
+         -- The two terms are DIFFERENT FOOD IN DIFFERENT PLACES: the stack
+         -- counts bowls held in reserve, the platform weighs what is on the
+         -- serving counter. Neither substitutes for the other, so picking one
+         -- discards the other.
+         --
+         -- Measured on the live database the evening this was found: D/1 held
+         -- two buffered bowls at 18 kg each and an empty counter, and Master
+         -- reported 18.0 kg for the slot instead of 54.0 kg -- because a scale
+         -- was present and reading zero, so "measured beats estimated" threw
+         -- away 36 kg of real food. A kitchen reading that number orders more
+         -- rice it already has.
+         --
+         -- NULL only when NEITHER term exists. coalesce per TERM rather than
+         -- on the sum, so a hall with a counter and no valued buffer still has
+         -- a total, and so does the reverse.
+         case when p.measured_weight_g is null and p.bowl_weight_g is null
+              then null
+              else coalesce(p.measured_weight_g, 0)
+                 + coalesce(case when p.bowl_weight_g is not null
+                                 then coalesce(p.bowls_trusted, 0)::bigint * p.bowl_weight_g
+                            end, 0)
+         end                                                     as weight_total_g,
+         case when p.measured_weight_g is null
+               and (p.bowl_weight_g is null or p.bowls_trusted is null)
+              then null
+              else coalesce(p.measured_weight_g, 0)
+                 + coalesce(case when p.bowl_weight_g is not null
+                                  and p.bowls_trusted is not null
+                                 then p.bowls_trusted::bigint * p.bowl_weight_g
+                            end, 0)
+         end                                                     as weight_line_g
+    from per_area p
+),
+-- THE MISMATCH CHECK IS GONE, and its removal is the point worth recording.
+--
+-- It compared each hall's measured counter weight against its bowls-times-
+-- weight estimate and flagged a disagreement as a miscalibrated cell or a
+-- wrong menu figure. That reasoning assumed the two describe the SAME food.
+-- They do not: the stack counts bowls held in reserve and the platform weighs
+-- what is on the serving counter, so they are different food in different
+-- places and a difference between them carries no information at all.
+--
+-- What it actually produced, live: D/1 held two buffered bowls at 18 kg and an
+-- empty counter, and the dashboard announced "Darshanarthi's scale disagrees
+-- by 36.0 kg" about two instruments that were both perfectly correct.
+--
+-- A genuine cross-check between the two is possible and is a different
+-- calculation entirely -- it would compare bowls REMOVED from the buffer
+-- against grams ADDED to the counter over the same interval, which does
+-- describe one movement of one lot of food. That needs the derivative of both
+-- series, not their levels, and it is not attempted here.
+-- THE DISTINCT REASONS, AGGREGATED ONCE PER SLOT AND JOINED ONCE.
+--
+-- This used to be `left join lateral unnest(p.scale_issues)` inside per_slot,
+-- which is a row multiplier: a hall with two distinct non-ok states produced
+-- TWO copies of that hall's row, and every sum in the group counted it twice.
+-- Measured on a three-hall slot with one uncalibrated and one silent scale at
+-- Darshanarthi: devices 6 -> 10, bowls_capacity 24 -> 40, bowls_trusted 4 -> 8.
+--
+-- The bowl count doubling is the part that matters. It is the number the
+-- kitchen reads, it stayed internally consistent, and nothing about it looked
+-- wrong -- the slot simply appeared to be holding twice the food it had,
+-- whenever two of its scales were unhappy in two different ways.
+slot_issues as (
+  select p.food_slot,
+         array_agg(distinct i order by i) as scale_issues
+    from per_area_w p
+   cross join lateral unnest(p.scale_issues) as i
+   group by p.food_slot
+),
+per_slot as (
+  select p.food_slot,
 
-       public.current_meal_type(max(p.timezone))                 as current_meal,
-
-       -- Which meal the dishes and weights below actually came from, and
-       -- whether that meal is the one running now. When it is not, the UI
-       -- must name it ("Dinner, 22 Aug") rather than letting a figure from
-       -- last night read as live.
-       max(p.menu_meal_date)                                     as menu_meal_date,
-       max(p.menu_meal_type)                                     as menu_meal_type,
-       coalesce(max(p.menu_meal_type)
-                  = public.current_meal_type(max(p.timezone))
-                and max(p.menu_meal_date)
-                  = public.current_meal_date(max(p.timezone)), false)
+         public.current_meal_type(max(p.timezone))               as current_meal,
+         max(p.menu_meal_date)                                   as menu_meal_date,
+         max(p.menu_meal_type)                                   as menu_meal_type,
+         coalesce(max(p.menu_meal_type)
+                    = public.current_meal_type(max(p.timezone))
+                  and max(p.menu_meal_date)
+                    = public.current_meal_date(max(p.timezone)), false)
                                                                  as menu_is_live,
 
-       -- The distinct dishes at this position, sorted. Usually one. More than
-       -- one is not an error -- the areas genuinely differ at slot 3 -- so the
-       -- UI lists them rather than flagging them.
-       array_agg(distinct p.food_name)
-         filter (where p.food_name is not null)                  as dishes,
+         array_agg(distinct p.food_name)
+           filter (where p.food_name is not null)                as dishes,
 
-       -- The per-bowl weight, but ONLY when every weighed area agrees on it.
-       -- NULL when they differ, because there is no single "kg per bowl" to
-       -- print for the slot -- the total is still exact (each area was weighed
-       -- against its own dish), it just has no one-line unit.
-       (case when count(distinct p.bowl_weight_g) = 1
-             then max(p.bowl_weight_g) end)                      as bowl_weight_g,
+         (case when count(distinct p.bowl_weight_g) = 1
+               then max(p.bowl_weight_g) end)                    as bowl_weight_g,
 
-       sum(p.devices)                                            as devices,
-       sum(p.bowls_capacity)                                     as bowls_capacity,
+         sum(p.devices)                                          as devices,
+         sum(p.bowls_capacity)                                   as bowls_capacity,
+         sum(p.bowls_trusted)                                    as bowls_trusted,
 
-       -- NULL, not 0, when no area reported: sum() over all-NULL is NULL,
-       -- which is the answer we want. No data is not an empty counter.
-       sum(p.bowls_trusted)                                      as bowls_trusted,
+         sum(p.est_total_g)                                      as est_weight_g,
+         sum(p.bowls_capacity * p.bowl_weight_g)
+           filter (where p.bowl_weight_g is not null)            as capacity_weight_g,
 
-       -- The headline. NULL when not one contributing area has a weight;
-       -- otherwise the sum of what CAN be weighed.
-       sum(coalesce(p.bowls_trusted, 0)::bigint * p.bowl_weight_g)
-         filter (where p.bowl_weight_g is not null)              as est_weight_g,
+         -- A LOWER BOUND -- but only where a weight is actually OWED.
+         --
+         -- THREE CONDITIONS, and the third was missing. A hall is short a
+         -- weight when it holds bowls, cannot weigh them, AND IS SERVING A
+         -- DISH. Without that last clause a hall that is simply not serving
+         -- this meal got counted as unweighed: breakfast runs at Darshanarthi
+         -- only, so Mahatma held a bowl with no dish against it, and the slot
+         -- reported ">=36.4 kg" with a "Set weight" link pointing at a hall
+         -- where there is nothing to set a weight FOR.
+         --
+         -- The bound was wrong as well as the prompt. ">=" claims there is
+         -- more food than shown; a hall with no dish is not holding
+         -- unmeasured food, so the figure was exact and said it was not.
+         --
+         -- food_name IS the test for "is this hall serving": it comes from
+         -- meal_food_mapping through last_served_meal(), which is the same
+         -- resolution the Menu tab writes and the dish names above are read
+         -- from. A hall with a dish and no kg/bowl still prompts, which is the
+         -- case the prompt exists for.
+         bool_or(p.weight_total_g is null
+                 and coalesce(p.bowls_trusted, 0) > 0
+                 and p.food_name is not null)                    as est_is_partial,
+         array_remove(array_agg(
+           case when p.weight_total_g is null
+                 and coalesce(p.bowls_trusted, 0) > 0
+                 and p.food_name is not null
+                then p.location end), null)                      as areas_without_weight,
 
-       sum(p.bowls_capacity * p.bowl_weight_g)
-         filter (where p.bowl_weight_g is not null)              as capacity_weight_g,
+         jsonb_agg(jsonb_build_object(
+           'location',       p.location,
+           'food_name',      p.food_name,
+           'bowl_weight_g',  p.bowl_weight_g,
+           'bowls_trusted',  p.bowls_trusted,
+           'bowls_capacity', p.bowls_capacity,
+           'devices',        p.devices,
+           -- THE HALL'S OWN MASS, and it is now the precedence answer rather
+           -- than the estimate it used to be. Same key, better number: a hall
+           -- with a load cell shows what was weighed there. Still NULL when the
+           -- hall has neither a measurement nor a reading to multiply -- never
+           -- 0, which beside a bowl count of "--" is a contradiction that sends
+           -- somebody to refill a station nobody has heard from.
+           'weight_g',          p.weight_line_g,
+           'est_weight_g',      p.est_line_g,
+           'measured_weight_g', p.measured_weight_g,
+           'scales',            p.scales,
+           'capacity_weight_g', case when p.bowl_weight_g is not null
+                                     then p.bowls_capacity * p.bowl_weight_g end
+         ) order by p.location)                                  as areas,
 
-       -- The total above is a LOWER BOUND: some area is holding bowls we
-       -- cannot weigh. The UI renders these as ">=45.0 kg", the same way a
-       -- degraded stack's count already renders as ">=3" -- this codebase
-       -- already has a vocabulary for a number that is real but incomplete,
-       -- and inventing a second one would be worse than reusing it.
-       bool_or(p.bowl_weight_g is null
-               and coalesce(p.bowls_trusted, 0) > 0)             as est_is_partial,
+         bool_or(p.any_fault)                                    as any_fault,
+         bool_or(p.any_degraded)                                 as any_degraded,
+         bool_or(p.any_battery_warn)                             as any_battery_warn,
+         bool_or(p.any_offline)                                  as any_offline,
+         bool_or(p.any_missed_service)                           as any_missed_service,
+         min(p.oldest_update)                                    as oldest_update,
 
-       -- Which areas need a weight typed in, so the UI can name them instead
-       -- of saying "somewhere".
-       array_remove(array_agg(
-         case when p.bowl_weight_g is null
-               and coalesce(p.bowls_trusted, 0) > 0
-              then p.location end), null)                        as areas_without_weight,
+         sum(p.scales)                                           as scales,
+         sum(p.scales_ok)                                        as scales_ok,
+         sum(p.measured_weight_g)                                as measured_weight_g,
+         sum(p.weight_total_g)                                   as weight_g,
 
-       -- Per-area breakdown: the "D 9 / M 3 / T 2" line, and the dish list
-       -- when the areas diverge. Assembled here rather than by a second query
-       -- because the client must never re-derive an area's share of a total
-       -- it did not compute.
-       jsonb_agg(jsonb_build_object(
-         'location',       p.location,
-         'food_name',      p.food_name,
-         'bowl_weight_g',  p.bowl_weight_g,
-         'bowls_trusted',  p.bowls_trusted,
-         'bowls_capacity', p.bowls_capacity,
-         'devices',        p.devices,
-         -- This hall's own mass. Computed HERE rather than multiplied in the
-         -- client for the same reason the slot total is: the moment a screen
-         -- does its own arithmetic on stock, it can disagree with the screen
-         -- next to it. NULL when the hall has no weight -- never 0, which
-         -- would read as an empty counter.
-         -- NULL when this hall has no weight OR no reading. Not zero: a hall
-         -- whose stack is silent has not reported an empty counter, and
-         -- "0.0 kg" beside a bowl count of "—" is a contradiction that sends
-         -- someone to refill a station nobody has heard from.
-         'weight_g',       case when p.bowl_weight_g is not null
-                                 and p.bowls_trusted is not null
-                                then p.bowls_trusted::bigint * p.bowl_weight_g end,
-         'capacity_weight_g', case when p.bowl_weight_g is not null
-                                   then p.bowls_capacity * p.bowl_weight_g end
-       ) order by p.location)                                    as areas,
 
-       bool_or(p.any_fault)                                      as any_fault,
-       bool_or(p.any_degraded)                                   as any_degraded,
-       bool_or(p.any_battery_warn)                               as any_battery_warn,
-       bool_or(p.any_offline)                                    as any_offline,
-       bool_or(p.any_missed_service)                             as any_missed_service,
-       min(p.oldest_update)                                      as oldest_update
-  from per_area p
- group by p.food_slot
-having bool_or(p.any_reported)
- order by p.food_slot;
+         -- The two pools, kept separate as well as summed, so a screen can
+         -- say "36 kg buffered, nothing on the counter" rather than only the
+         -- total. weight_g above is their sum.
+         sum(p.est_total_g)                                      as buffer_g,
+         sum(p.measured_weight_g)                                as counter_g
+    from per_area_w p
+   group by p.food_slot
+  having bool_or(p.any_reported)
+)
+select q.food_slot,
+       q.current_meal,
+       q.menu_meal_date,
+       q.menu_meal_type,
+       q.menu_is_live,
+       q.dishes,
+       q.bowl_weight_g,
+       q.devices,
+       q.bowls_capacity,
+       q.bowls_trusted,
+       q.est_weight_g,
+       q.capacity_weight_g,
+       q.est_is_partial,
+       q.areas_without_weight,
+       q.areas,
+       q.any_fault,
+       q.any_degraded,
+       q.any_battery_warn,
+       q.any_offline,
+       q.any_missed_service,
+       q.oldest_update,
 
-revoke all on public.slot_quantity from anon, authenticated, public;
-grant select on public.slot_quantity to authenticated;
+       -- APPENDED, so CREATE OR REPLACE VIEW is legal against a live database:
+       -- it may add columns at the end and may not reorder or retype the ones
+       -- above.
+       q.scales,
+       q.scales_ok,
+       q.measured_weight_g,
+       q.weight_g,
+       q.buffer_g,
+       q.counter_g,
+       -- LEFT joined, one row per slot, so it cannot multiply anything. NULL
+       -- when every scale here is healthy, which is the common case.
+       si.scale_issues
+  from per_slot q
+  left join slot_issues si on si.food_slot = q.food_slot
+ order by q.food_slot;
+
 
 comment on view public.slot_quantity is
-  'Master Dashboard source. One row per food_slot across ALL serving areas, '
-  'with remaining stock in grams. Weight is summed per area against that '
-  'area''s own dish, so a slot serving different dishes in different halls '
-  'still totals correctly. Slots whose devices have never reported are '
-  'excluded, which hides the undeployed backup units.';
+  'Master Dashboard source: quantity per dish position across every serving '
+  'area, in grams. weight_g is the authoritative figure and applies the '
+  'measured-beats-estimated rule PER AREA; est_weight_g and measured_weight_g '
+  'are the two inputs, kept so a screen can say which it is showing. '
+  'weight_mismatch flags a position where both exist and disagree beyond '
+  'weight_mismatch_tolerance() -- a miscalibrated cell or a wrong per-bowl '
+  'weight, invisible from either number alone.';
 
 revoke all on public.device_overview from anon, authenticated, public;
 revoke all on public.slot_overview   from anon, authenticated, public;
+revoke all on public.slot_quantity   from anon, authenticated, public;
 grant select on public.device_overview to authenticated;
 grant select on public.slot_overview   to authenticated;
+grant select on public.slot_quantity   to authenticated;
 
 commit;
 

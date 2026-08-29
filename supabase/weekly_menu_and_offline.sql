@@ -6,8 +6,23 @@
 --  Run as owner in the Supabase SQL editor. schema.sql has been updated to
 --  produce the same result on a fresh rebuild, so nothing here can drift.
 --
+--  ORDERING: RUN migrate_bowl_weight.sql AND migrate_loadcell.sql FIRST.
+--  This file carries full copies of device_overview and slot_overview, and
+--  those bodies now read devices.kind and device_status.weight_*, which only
+--  exist after the load-cell migration. It also recreates
+--  meal_mapping_preload with the bowl_weight_g column the weight migration
+--  added. Run out of order it aborts on a missing column -- so section 0
+--  below checks first and says which file to run, rather than leaving a
+--  reader to decode "column d.kind does not exist".
+--
 --  TWO CHANGES, ONE FILE -- because both rewrite the same two views, and
 --  two files each holding "the" view body is how definitions fork.
+--
+--  THAT FORK IS NOT HYPOTHETICAL AND IT NOW CUTS BOTH WAYS. These copies must
+--  be updated in step with schema.sql whenever either view changes: a column
+--  added there and not here means running this file silently REVERTS it. The
+--  load-cell migration is the first change to hit that, and the kind filters
+--  in slot_overview are the thing that would quietly come undone.
 --
 --  A. MISSED-SERVICE VISIBILITY.
 --     `offline` is gated on in_service_window(now()), which is correct for
@@ -63,6 +78,33 @@
 -- =====================================================================
 
 begin;
+
+-- ---------------------------------------------------------------------
+-- 0. Prerequisites.
+--
+-- Checked BEFORE anything is written, so an out-of-order run leaves the
+-- database exactly as it found it and says what to do. Without this the file
+-- gets as far as section 6 and aborts on `column d.kind does not exist`, which
+-- names a symptom two hundred lines from its cause and reads like a corrupt
+-- schema rather than a missing migration.
+-- ---------------------------------------------------------------------
+do $$
+begin
+  if not exists (select 1 from information_schema.columns
+                  where table_schema = 'public' and table_name = 'devices'
+                    and column_name = 'kind') then
+    raise exception
+      'Run supabase/migrate_loadcell.sql before this file: the view bodies '
+      'below read devices.kind and device_status.weight_*, which it adds.';
+  end if;
+  if not exists (select 1 from information_schema.columns
+                  where table_schema = 'public' and table_name = 'meal_food_mapping'
+                    and column_name = 'bowl_weight_g') then
+    raise exception
+      'Run supabase/migrate_bowl_weight.sql before this file: '
+      'meal_mapping_preload below returns bowl_weight_g, which it adds.';
+  end if;
+end $$;
 
 -- ---------------------------------------------------------------------
 -- 1. in_service_window: asymmetric edges.
@@ -279,25 +321,53 @@ grant select, insert, update, delete on public.meal_menu_template to authenticat
 --    forward), not what this week's template says -- the template is
 --    present-tense configuration and must not masquerade as history.
 -- ---------------------------------------------------------------------
-create or replace function public.meal_mapping_preload(
+-- DROP THEN CREATE, not CREATE OR REPLACE, and this file used to get it wrong.
+-- migrate_bowl_weight.sql widened this function's OUT parameters with a
+-- bowl_weight_g column, and Postgres refuses to REPLACE a function whose row
+-- type has changed -- so against any database carrying that migration (which
+-- is every database built from schema.sql) this file failed outright with
+--
+--     cannot change return type of existing function
+--
+-- and stopped before it reached the views below. That made the promise at the
+-- top of this file -- ADDITIVE and IDEMPOTENT, safe to run on the live
+-- database -- false for as long as the weight migration had been applied.
+--
+-- The body is now schema.sql's, weight column and all, so re-running this
+-- file converges rather than reverting the menu editor to a name-only draft.
+drop function if exists public.meal_mapping_preload(text, text, date);
+
+create function public.meal_mapping_preload(
   p_location  text,
   p_meal_type text,
   p_meal_date date
 ) returns table (
-  food_slot   smallint,
-  food_name   text,
-  source_date date,
-  is_saved    boolean
+  food_slot     smallint,
+  food_name     text,
+  -- Weight rides with the dish through all three branches below, so an
+  -- inherited or templated menu arrives weighed as well as named. Carrying
+  -- the name forward but not the weight would mean re-typing a figure that
+  -- does not change from one day to the next.
+  bowl_weight_g integer,
+  source_date   date,
+  is_saved      boolean
 ) language sql stable set search_path = '' as $$
   with exact as (
-    select m.food_slot, m.food_name, m.meal_date as source_date, true as is_saved
+    select m.food_slot, m.food_name, m.bowl_weight_g,
+           m.meal_date as source_date, true as is_saved
       from public.meal_food_mapping m
      where m.location  = p_location
        and m.meal_type = p_meal_type
        and m.meal_date = p_meal_date
   ),
+  -- The weekly template, for TODAY-OR-FUTURE dates only. source_date is the
+  -- target date itself -- the marker the UI reads as "from the template"
+  -- (carry-forward always carries an earlier date). Past gaps never see the
+  -- template: what was probably served then is what was served around it,
+  -- not what this week's configuration says.
   templ as (
-    select t.food_slot, t.food_name, p_meal_date as source_date, false as is_saved
+    select t.food_slot, t.food_name, t.bowl_weight_g,
+           p_meal_date as source_date, false as is_saved
       from public.meal_menu_template t
      where t.location  = p_location
        and t.meal_type = p_meal_type
@@ -310,7 +380,8 @@ create or replace function public.meal_mapping_preload(
   -- (there are no rows for the date), so refresh brought the zombie back.
   -- Field report: slots blanked and saved kept "restoring from 26 Jul".
   previous as (
-    select m.food_slot, m.food_name, m.meal_date as source_date, false as is_saved
+    select m.food_slot, m.food_name, m.bowl_weight_g,
+           m.meal_date as source_date, false as is_saved
       from public.meal_food_mapping m
      where m.location  = p_location
        and m.meal_type = p_meal_type
@@ -331,6 +402,16 @@ create or replace function public.meal_mapping_preload(
                            and not exists (select 1 from templ)
   order by food_slot
 $$;
+
+-- REQUIRED BY THE DROP ABOVE, and easy to lose with it. CREATE OR REPLACE
+-- preserves a function's privileges; DROP takes them with it, and the fresh
+-- CREATE gets Postgres's default of EXECUTE for PUBLIC -- which hands anon back
+-- the menu preload that schema.sql section 8 deliberately revoked. A device has
+-- no business reading the menu, and this is the one line standing between it
+-- and that. Restated here rather than assumed, because this file is meant to be
+-- runnable on its own.
+revoke all on function public.meal_mapping_preload(text, text, date) from public, anon;
+grant execute on function public.meal_mapping_preload(text, text, date) to authenticated;
 
 -- ---------------------------------------------------------------------
 -- 5. meal_template_apply: freeze the template into dated rows.
@@ -457,21 +538,35 @@ select d.device_id,
        d.food_slot,
        d.label,
        d.timezone,
+
+       -- What this device's slot is serving RIGHT NOW. NULL outside service
+       -- hours, or when nobody has entered a mapping -- both mean "no current
+       -- dish", which is not the same as a dish with no name.
        m.food_name                          as current_food,
        public.current_meal_type(d.timezone) as current_meal,
+
        s.reported,
        s.updated_at,
        now() - s.updated_at as stale_for,
        public.in_service_window(now(), d.timezone, d.device_id) as in_service,
 
-       -- Alarm only when the device SHOULD be reporting and is not. Devices
-       -- are dark ~16h/day by design, so plain staleness is not a fault.
+       -- Alarm only when the device SHOULD be reporting and is not. Devices are
+       -- dark ~16h/day by design, so plain staleness is not a fault.
+       --
+       -- s.reported gates this so a device that has NEVER reported does not
+       -- alarm: that is a registered-but-not-yet-deployed unit, not a failure.
+       -- Without it, pre-registering the fleet would light up every unbuilt
+       -- station as offline and bury the ones that genuinely went down.
        (coalesce(s.reported, false)
         and public.in_service_window(now(), d.timezone, d.device_id)
         and s.updated_at < now() - public.offline_after()) as offline,
 
+       -- Registered but never heard from -- i.e. awaiting installation.
        (not coalesce(s.reported, false)) as awaiting_deployment,
 
+       -- Outside service hours these numbers are the last known state from the
+       -- previous service, not live data. Say so rather than letting a
+       -- coordinator read a stale count as current.
        (not public.in_service_window(now(), d.timezone, d.device_id)
         and s.updated_at is not null) as data_is_stale,
 
@@ -480,34 +575,45 @@ select d.device_id,
        s.uptime_s, s.firmware, s.mac,
 
        -- Slept through the most recently completed service window. Unlike
-       -- `offline` this survives the dark hours: a device dead since
-       -- Tuesday stays flagged on Friday morning, instead of becoming
-       -- indistinguishable from a healthy unit between meals. Coalesced
-       -- because a NULL anchor (a device with no applicable window at all)
-       -- must read as "not flagged", not as NULL.
+       -- `offline` this survives the dark hours: a device dead since Tuesday
+       -- stays flagged on Friday morning, instead of becoming
+       -- indistinguishable from a healthy unit between meals. Appended LAST
+       -- so the live database's CREATE OR REPLACE VIEW (which cannot reorder
+       -- columns) and this rebuild agree exactly. Coalesced because a NULL
+       -- anchor (no applicable window at all) must read "not flagged".
        --
        -- GATED ON DEPLOYMENT: a unit parked at 'R' or stripped of its slot
        -- (the swap-a-failed-board workflow) keeps reported = true with a
-       -- frozen updated_at forever, and without this gate it would carry a
-       -- permanent fleet-wide alarm that only reset_spares.sql could clear.
-       -- A unit that serves no position has no service to miss.
+       -- frozen updated_at forever, and without the gate it would carry a
+       -- permanent fleet-wide alarm only reset_spares.sql could clear. A
+       -- unit that serves no position has no service to miss.
        --
        -- KNOWN LIMITS, both deliberate: a site holiday flags every deployed
-       -- device until the next served meal (a closure looks exactly like a
-       -- fleet outage, and during a trial arguably is one); and a device
-       -- that died MIDWAY through a window is not flagged between that
-       -- window's close and the next window's open -- it reported during
-       -- the anchored window, and anchoring later (on the window END) would
+       -- device until the next served meal; and a device that died MIDWAY
+       -- through a window is unflagged from that window's close to the next
+       -- window's open -- anchoring on the window END instead would
        -- false-alarm every time staff power a station down early. It was
-       -- red while the window ran (`offline`) and goes red again the moment
-       -- the next window opens.
+       -- red while its window ran (`offline`) and goes red again the moment
+       -- the next one opens.
        coalesce(coalesce(s.reported, false)
                 and d.location in ('D','M','T')
                 and d.food_slot is not null
                 and s.updated_at <
                     public.last_service_window_end(d.timezone, d.device_id)
                       - public.offline_after(),
-                false) as missed_last_service
+                false) as missed_last_service,
+
+       -- The load-cell half, appended in one block below everything above --
+       -- so the diff against the pre-load-cell body is purely additive, a
+       -- reader can see at a glance which half describes which product, and
+       -- the live database's CREATE OR REPLACE VIEW (which may only ADD
+       -- columns at the end) and this rebuild agree exactly.
+       d.kind,
+       s.weight_g,
+       s.weight_state,
+       s.cells_online,
+       s.counts_per_gram,
+       s.net_counts
   from public.devices d
   left join public.device_status s using (device_id)
   left join public.meal_food_mapping m
@@ -522,13 +628,36 @@ select d.location,
        d.food_slot,
        max(m.food_name)                                        as current_food,
        public.current_meal_type(max(d.timezone))               as current_meal,
-       count(*)                                                as devices,
-       count(*) filter (where coalesce(s.reported, false))     as devices_reported,
-       (count(*) * 4)::bigint                                  as bowls_capacity,
+
+       -- STACKS ONLY, and the filter is load-bearing. A load cell may share a
+       -- served position -- (location, food_slot) is deliberately not unique --
+       -- and counting it here would claim four more bowls of capacity that no
+       -- bowl counter is watching. The numerator would stay RIGHT the whole
+       -- time, because a scale writes NULL to stack_count and is already
+       -- excluded from the sum below, so the bar would simply read low forever:
+       -- 9 of 16 where the truth is 9 of 12. A wrong denominator under a
+       -- correct numerator is the hardest kind of wrong to notice.
+       count(*) filter (where d.kind = 'stack')                as devices,
+       count(*) filter (where d.kind = 'stack'
+                          and coalesce(s.reported, false))     as devices_reported,
+
+       -- Ceiling for this slot, so a progress bar need not hardcode one. If a
+       -- fourth stack joins Darshanarthi slot 1 the achievable total rises, and a
+       -- UI with "max 12" baked in would misreport the busiest position in the
+       -- hall.
+       (count(*) filter (where d.kind = 'stack') * 4)::bigint  as bowls_capacity,
+
+       -- The trustworthy total. NULL, not 0, when no device reported: no data is
+       -- not an empty counter, and the two send staff to do opposite things.
        sum(s.stack_count) filter (where s.stack_status = 'ok') as bowls_trusted,
        sum(s.stack_count)                                      as bowls_reported,
+
        bool_or(s.stack_status = 'discontiguous')               as any_fault,
        bool_or(s.stack_status = 'degraded')                    as any_degraded,
+       -- NOT filtered by kind, unlike the counts above. A load cell has a
+       -- battery and can go dark exactly like a stack, and a slot whose scale
+       -- is flat is a slot that needs somebody -- so these keep meaning "any
+       -- device at this position", which is what they already said.
        bool_or(s.battery_level in ('low','critical'))          as any_battery_warn,
        bool_or(coalesce(s.reported, false)
                and public.in_service_window(now(), d.timezone, d.device_id)
@@ -537,16 +666,29 @@ select d.location,
 
        -- Some stack at this position slept through the last completed
        -- window. The stock screen keeps the last count but must say it is
-       -- last-known, not live. The deployment gate matches device_overview's
-       -- exactly (the WHERE below already restricts to assigned rows; the
-       -- gate is restated so the two expressions cannot drift).
+       -- last-known, not live. Appended last -- see device_overview, whose
+       -- deployment gate is restated here so the two cannot drift.
        bool_or(coalesce(coalesce(s.reported, false)
                and d.location in ('D','M','T')
                and d.food_slot is not null
                and s.updated_at <
                    public.last_service_window_end(d.timezone, d.device_id)
                      - public.offline_after(),
-               false))                                         as any_missed_service
+               false))                                         as any_missed_service,
+
+       -- What the load cells at this position say. NULL rather than 0 when
+       -- none has a usable weight -- sum() over an empty filter is NULL, which
+       -- is the answer we want and the distinction the whole schema turns on.
+       count(*) filter (where d.kind = 'scale')                as scales,
+       count(*) filter (where d.kind = 'scale'
+                          and s.weight_state = 'ok')           as scales_ok,
+       sum(s.weight_g) filter (where d.kind = 'scale'
+                                 and s.weight_state = 'ok')    as measured_weight_g,
+       -- Why a scale here is NOT contributing, so the screen can name the
+       -- fault rather than show a silently smaller total. 'ok' is removed
+       -- because it is not an issue.
+       array_remove(array_agg(distinct s.weight_state)
+                    filter (where d.kind = 'scale'), 'ok')     as scale_issues
   from public.devices d
   left join public.device_status s using (device_id)
   left join public.meal_food_mapping m

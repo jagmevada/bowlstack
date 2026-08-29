@@ -1,5 +1,5 @@
 -- =====================================================================
---  Bowlstack -- schema smoke test.  25 assertions.
+--  Bowlstack -- schema smoke test.  32 assertions.
 --
 --  Run after schema.sql, and BEFORE flashing any device. Paste the whole file
 --  into the Supabase SQL editor; it returns one table of PASS/FAIL rows plus a
@@ -20,6 +20,16 @@
 --    17-19  the VIEWS, which are the front-end's whole interface: slot_overview
 --           sums the stacks sharing a dish position, keeps untrustworthy counts
 --           out of that total, and device_overview resolves the assignment
+--    20-24  per-bowl weight: the units-mix-up rails, the preload, and
+--           slot_quantity's cross-area, sum-then-multiply arithmetic
+--    25-31  LOAD CELLS -- the second product sharing this schema. The kind
+--           discriminator; the constraint that makes "a gram figure exists
+--           exactly when the state says so" structural rather than a
+--           convention; zero surviving as a real weight; the device write
+--           path; and the two things that would be silently wrong if `kind`
+--           were added and nothing else -- a scale inflating bowl capacity,
+--           and the two pools being ADDED rather than one chosen over
+--           the other -- a scale reading empty must not erase a full buffer
 --
 --  Several assertions are SUPPOSED to fail: a device must NOT be able to read
 --  your data. Each is wrapped in an exception handler so the run continues, and
@@ -71,16 +81,38 @@ declare
   DEV5  constant text := 'BWL-SMOKE5';
   -- Registered, assigned, and never heard from -- the undeployed-backup case.
   DEV6  constant text := 'BWL-SMOKE6';
+  -- LOAD CELLS. SDEV1 stays a stack deliberately -- it is the fixture for "the
+  -- kind column defaults correctly", which needs a row inserted the way every
+  -- pre-load-cell script inserts one. SDEV2 is a scale parked at 'R' with no
+  -- slot, so it touches no dish position. SDEV3 is a scale AT D/8, beside DEV4,
+  -- which is what makes the capacity and precedence assertions possible.
+  SDEV1 constant text := 'BWL-SMOKEKIND';
+  SDEV2 constant text := 'LDC-SMOKE1';
+  SDEV3 constant text := 'LDC-SMOKE2';
+  SDEV4 constant text := 'LDC-SMOKE3';
+  -- Whether migrate_loadcell.sql has been applied. Assertions 25-31 SKIP
+  -- rather than FAIL without it, for the reason docs/PHASE1_BOWL_WEIGHT.md
+  -- gives about the Master tab: "an un-migrated database says which of these
+  -- you are looking at". Six red rows on a database that is simply older sends
+  -- somebody hunting for a fault instead of to the SQL editor.
+  v_lc  boolean;
   -- Menu fixtures live at location 'R' on an absurd date, so they cannot collide
   -- with a real menu even if this runs against a populated database.
   MDAY  constant date := date '1999-01-01';
 begin
   execute 'reset role';
 
-  -- Clean slate, in case a previous run died before its cleanup.
+  -- Clean slate, in case a previous run died before its cleanup. The scale
+  -- fixtures are listed here too: a run that dies between assertion 25 and the
+  -- cleanup would otherwise leave SDEV3 sitting at D/8, where the next run's
+  -- capacity assertion would count it and fail for a reason that has nothing
+  -- to do with the code.
   delete from public.status_events where device_id in (DEV, DEV2, DEV3, DEV4, DEV5, DEV6);
-  delete from public.device_status where device_id in (DEV, DEV2, DEV3, DEV4, DEV5, DEV6);
-  delete from public.devices       where device_id in (DEV, DEV2, DEV3, DEV4, DEV5, DEV6);
+  delete from public.device_status
+   where device_id in (DEV, DEV2, DEV3, DEV4, DEV5, DEV6, SDEV1, SDEV2, SDEV3, SDEV4);
+  delete from public.devices
+   where device_id in (DEV, DEV2, DEV3, DEV4, DEV5, DEV6, SDEV1, SDEV2, SDEV3, SDEV4,
+                       'BWL-SMOKEBAD');
 
   -- 'R' (reserved) with no food_slot. A transient fixture must not claim a real
   -- serving position, and location is a D/M/T/R enum, so a descriptive string
@@ -781,13 +813,263 @@ begin
                      else st end);
 
   ------------------------------------------------------------------
+  -- 25-30. LOAD CELLS. Everything below is about the second product
+  --        sharing this schema -- see supabase/migrate_loadcell.sql.
+  ------------------------------------------------------------------
+  select exists (select 1 from information_schema.columns
+                  where table_schema = 'public' and table_name = 'devices'
+                    and column_name = 'kind')
+    into v_lc;
+
+  if not v_lc then
+    -- Not migrated. Say so once per assertion so the numbering stays stable
+    -- and the verdict is not diluted by rows that were never applicable.
+    for v_n in 25..31 loop
+      res := res || jsonb_build_object('n', v_n, 'r','SKIP',
+               'c','load cells: ' || case v_n
+                     when 25 then 'devices.kind defaults to stack; a bad value is refused'
+                     when 26 then 'weight_g exists exactly when weight_state is ok'
+                     when 27 then 'a measured empty platform stores 0, not null'
+                     when 28 then 'a scale may write its weight and may not read it'
+                     when 29 then 'a scale does not inflate bowl capacity'
+                     when 30 then 'slot_quantity ADDS buffered stock and the counter'
+                     else         'two bad scales in one hall do not double its bowls'
+                   end,
+               'd','migrate_loadcell.sql has not been run on this database');
+    end loop;
+  else
+
+  -- 25. The discriminator, and its closed vocabulary.
+  execute 'reset role';
+  st := 'OK';
+  begin
+    insert into public.devices (device_id, location, food_slot)
+    values (SDEV1, 'R', null);
+    select kind into v_txt from public.devices where device_id = SDEV1;
+    if v_txt is distinct from 'stack' then
+      st := 'default was ' || coalesce(v_txt, 'null') || ', want stack';
+    end if;
+    begin
+      insert into public.devices (device_id, kind) values ('BWL-SMOKEBAD', 'weighbridge');
+      st := 'a kind outside the vocabulary was ACCEPTED';
+    exception when check_violation then null;
+    end;
+  exception when others then st := sqlstate || ' ' || sqlerrm;
+  end;
+  res := res || jsonb_build_object('n',25,
+           'r', case when st = 'OK' then 'PASS' else 'FAIL' end,
+           'c','devices.kind defaults to stack; a bad value is refused',
+           'd', case when st = 'OK' then 'default stack, 23514 on nonsense' else st end);
+
+  -- 26. THE HONESTY RULE, MADE STRUCTURAL. A gram figure exists exactly when
+  --     weight_state says it does -- both directions. This is the constraint
+  --     that stops a firmware bug putting an invented number on the dashboard,
+  --     and the one scale_telemetry.cpp::weightState() is written to mirror.
+  st := 'OK';
+  begin
+    insert into public.devices (device_id, location, food_slot, kind)
+    values (SDEV2, 'R', null, 'scale');
+    begin
+      update public.device_status set weight_state = 'uncalibrated', weight_g = 1234
+       where device_id = SDEV2;
+      st := 'grams alongside a non-ok state were ACCEPTED';
+    exception when check_violation then null;
+    end;
+    if st = 'OK' then
+      begin
+        update public.device_status set weight_state = 'ok', weight_g = null
+         where device_id = SDEV2;
+        st := '''ok'' with no grams was ACCEPTED';
+      exception when check_violation then null;
+      end;
+    end if;
+  exception when others then st := sqlstate || ' ' || sqlerrm;
+  end;
+  res := res || jsonb_build_object('n',26,
+           'r', case when st = 'OK' then 'PASS' else 'FAIL' end,
+           'c','weight_g exists exactly when weight_state is ok',
+           'd', case when st = 'OK' then 'both directions refused with 23514' else st end);
+
+  -- 27. ZERO IS A REAL WEIGHT. A measured, tared, empty platform reads 0 g and
+  --     means "refill me"; NULL means nobody knows. The whole schema turns on
+  --     keeping those apart, and a scale is where they are easiest to collapse.
+  st := 'OK';
+  begin
+    update public.device_status
+       set weight_state = 'ok', weight_g = 0, cells_online = 3
+     where device_id = SDEV2;
+    select weight_g into v_n from public.device_status where device_id = SDEV2;
+    if v_n is null then st := '0 g came back as NULL';
+    elsif v_n <> 0 then st := '0 g came back as ' || v_n; end if;
+  exception when others then st := sqlstate || ' ' || sqlerrm;
+  end;
+  res := res || jsonb_build_object('n',27,
+           'r', case when st = 'OK' then 'PASS' else 'FAIL' end,
+           'c','a measured empty platform stores 0, not null',
+           'd', case when st = 'OK' then '0 g survives as 0' else st end);
+
+  -- 28. The device write path, twin of assertions 3 and 4. A scale must be
+  --     able to WRITE its weight and must not be able to READ it back.
+  st := 'OK';
+  begin
+    execute 'set local role anon';
+    update public.device_status
+       set weight_state = 'ok', weight_g = 4321, cells_online = 3,
+           counts_per_gram = 106.857, net_counts = 182771
+     where device_id = SDEV2;
+    get diagnostics v_n = row_count;
+    if v_n <> 1 then st := 'PATCH matched ' || v_n || ' rows, want 1'; end if;
+    if st = 'OK' then
+      begin
+        select weight_g into v_n from public.device_status where device_id = SDEV2;
+        st := 'anon READ the weight back';
+      exception when insufficient_privilege then null;
+      end;
+    end if;
+    execute 'reset role';
+  exception when others then
+    st := sqlstate || ' ' || sqlerrm;
+    execute 'reset role';
+  end;
+  res := res || jsonb_build_object('n',28,
+           'r', case when st = 'OK' then 'PASS' else 'FAIL' end,
+           'c','a scale may write its weight and may not read it',
+           'd', case when st = 'OK' then '1 row updated; SELECT denied 42501' else st end);
+
+  -- 29. A SCALE IS NOT A STACK. The filter that would have been missed by
+  --     adding the column and nothing else: a load cell sharing a served
+  --     position must not add four bowls of capacity that no counter watches.
+  --     The numerator stays right either way, so the only symptom of getting
+  --     this wrong is a progress bar reading low forever.
+  st := 'OK';
+  begin
+    insert into public.devices (device_id, location, food_slot, kind)
+    values (SDEV3, 'D', 8, 'scale');
+    update public.device_status
+       set weight_state='ok', weight_g=12000, cells_online=3, reported=true
+     where device_id = SDEV3;
+    select devices, bowls_capacity, scales, measured_weight_g
+      into v_devs, v_cap, v_n, v_trusted
+      from public.slot_overview where location = 'D' and food_slot = 8;
+    -- DEV4 is the only STACK at D/8, so one device and four bowls of capacity.
+    if v_devs <> 1 or v_cap <> 4 then
+      st := 'devices=' || v_devs || ' capacity=' || v_cap || ', want 1 and 4';
+    elsif v_n <> 1 or v_trusted <> 12000 then
+      st := 'scales=' || v_n || ' measured=' || coalesce(v_trusted::text,'null');
+    end if;
+  exception when others then st := sqlstate || ' ' || sqlerrm;
+  end;
+  res := res || jsonb_build_object('n',29,
+           'r', case when st = 'OK' then 'PASS' else 'FAIL' end,
+           'c','a scale does not inflate bowl capacity',
+           'd', case when st = 'OK'
+                     then 'D/8: 1 stack, capacity 4, 1 scale at 12000 g' else st end);
+
+  -- 30. BUFFER PLUS COUNTER, PER AREA -- added, never chosen between.
+  --     D/8 holds 4 trusted bowls at 5000 g (20000 g buffered) AND a scale
+  --     reading 12000 g on the counter: 32000 g at that hall. M/8 adds 3 bowls
+  --     x 4000 g = 12000 g. Slot total 44000 g.
+  --
+  --     THE REGRESSION THIS GUARDS. An earlier cut applied a precedence rule
+  --     -- measured beats estimated -- and D/8 would have reported 12000 g,
+  --     silently discarding 20 kg of buffered food because a scale happened to
+  --     be present. Found live, where an empty counter beside two 18 kg bowls
+  --     made Master read 18 kg for a position holding 54 kg.
+  st := 'OK';
+  begin
+    select weight_g, buffer_g, counter_g, est_weight_g
+      into v_trusted, v_devs, v_cap, v_reported
+      from public.slot_quantity where food_slot = 8;
+    -- GATED ON THE ESTIMATE, not on weight_g. The measurement arrives whatever
+    -- the clock says -- a scale needs no menu -- so weight_g is non-null even
+    -- when the fixture menu could not be created, and this assertion would then
+    -- fail with "12000, measured" for a reason that is about the hour of the
+    -- day rather than about the precedence rule. The half that depends on the
+    -- service window is the ESTIMATE, so that is what decides the skip.
+    if v_reported is null then
+      st := 'SKIP';   -- no current meal, so no menu fixture; see assertion 24
+    elsif v_trusted <> 44000 then
+      st := 'weight_g=' || coalesce(v_trusted::text,'null') || ', want 44000'
+         || ' (buffer ' || coalesce(v_devs::text,'null')
+         || ' + counter ' || coalesce(v_cap::text,'null') || ')';
+    elsif v_devs <> 32000 or v_cap <> 12000 then
+      st := 'buffer=' || coalesce(v_devs::text,'null')
+         || ' counter=' || coalesce(v_cap::text,'null') || ', want 32000/12000';
+    end if;
+  exception when others then st := sqlstate || ' ' || sqlerrm;
+  end;
+  res := res || jsonb_build_object('n',30,
+           'r', case when st = 'OK' then 'PASS'
+                     when st = 'SKIP' then 'SKIP' else 'FAIL' end,
+           'c','slot_quantity ADDS buffered stock and the counter',
+           'd', case when st = 'OK'
+                     then 'D 20000 buffered + 12000 counter, M 12000 = 44000'
+                     when st = 'SKIP'
+                     then 'outside service hours - no current meal to resolve'
+                     else st end);
+
+  -- 31. TWO UNHAPPY SCALES IN ONE HALL MUST NOT DOUBLE ITS BOWL COUNT.
+  --
+  --     The regression test for the worst bug found in review. slot_quantity
+  --     collected the distinct non-ok scale states with a lateral unnest inside
+  --     the grouped query, which is a row multiplier: a hall with TWO distinct
+  --     bad states produced two copies of that hall's row, and every sum in the
+  --     group counted it twice -- devices, bowls_capacity and bowls_trusted
+  --     alike.
+  --
+  --     The bowl count is what makes it serious. It stayed internally
+  --     consistent and nothing looked wrong; the position simply appeared to
+  --     hold twice the food it had, whenever two of its scales were unhappy in
+  --     two different ways.
+  st := 'OK';
+  begin
+    insert into public.devices (device_id, location, food_slot, kind)
+    values (SDEV4, 'D', 8, 'scale');
+    -- Two DISTINCT non-ok states at the same hall. One alone cannot show this.
+    update public.device_status
+       set weight_state = 'uncalibrated', weight_g = null, reported = true
+     where device_id = SDEV3;
+    update public.device_status
+       set weight_state = 'no_cells', weight_g = null, cells_online = 0, reported = true
+     where device_id = SDEV4;
+
+    select devices, bowls_capacity, bowls_trusted
+      into v_devs, v_cap, v_trusted
+      from public.slot_quantity where food_slot = 8;
+    if v_devs is null then
+      st := 'SKIP';                    -- no current meal; see assertion 24
+    elsif v_devs <> 2 or v_cap <> 8 then
+      -- DEV4 at D/8 and DEV5 at M/8 are the only STACKS: 2 devices, 8 bowls.
+      st := 'devices=' || v_devs || ' capacity=' || v_cap || ', want 2 and 8'
+         || ' (the per-area row was counted once per bad scale state)';
+    elsif v_trusted <> 7 then
+      st := 'bowls_trusted=' || v_trusted || ', want 7 (4 at D + 3 at M)';
+    end if;
+  exception when others then st := sqlstate || ' ' || sqlerrm;
+  end;
+  res := res || jsonb_build_object('n',31,
+           'r', case when st = 'OK' then 'PASS'
+                     when st = 'SKIP' then 'SKIP' else 'FAIL' end,
+           'c','two bad scales in one hall do not double its bowls',
+           'd', case when st = 'OK'
+                     then '2 stacks, capacity 8, 7 bowls -- unchanged by 2 scale faults'
+                     when st = 'SKIP'
+                     then 'outside service hours - no current meal to resolve'
+                     else st end);
+
+  end if;   -- v_lc: the load-cell schema is present
+
+  ------------------------------------------------------------------
   -- Cleanup. Deliberately no enclosing ROLLBACK: that would discard the
   -- results along with the test data.
   ------------------------------------------------------------------
   execute 'reset role';
   delete from public.status_events where device_id in (DEV, DEV2, DEV3, DEV4, DEV5, DEV6);
-  delete from public.device_status where device_id in (DEV, DEV2, DEV3, DEV4, DEV5, DEV6);
-  delete from public.devices       where device_id in (DEV, DEV2, DEV3, DEV4, DEV5, DEV6);
+  delete from public.device_status
+   where device_id in (DEV, DEV2, DEV3, DEV4, DEV5, DEV6, SDEV1, SDEV2, SDEV3, SDEV4);
+  delete from public.devices
+   where device_id in (DEV, DEV2, DEV3, DEV4, DEV5, DEV6, SDEV1, SDEV2, SDEV3, SDEV4,
+                       'BWL-SMOKEBAD');
   delete from public.meal_food_mapping
    where location = 'R' and meal_date in (MDAY, MDAY + 1);
   -- Assertion 24 writes into TODAY's real menu at slot 8 to exercise the
