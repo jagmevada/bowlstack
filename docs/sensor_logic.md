@@ -114,13 +114,21 @@ nonlinear.
 Each level is thresholded with **hysteresis** (a Schmitt trigger):
 
 ```
-distance < PRESENT_BELOW_MM   ->  present
-distance > ABSENT_ABOVE_MM    ->  absent
+distance < PRESENT_BELOW_MM   ->  present      (200 mm)
+distance > ABSENT_ABOVE_MM    ->  absent       (400 mm)
 in between                    ->  hold previous state
 ```
 
 A single threshold would chatter on measurement noise alone, and every flap
 would be a spurious change report all the way to the server.
+
+`PRESENT_BELOW_MM` was raised from 100 mm to **200 mm** after field testing — a
+bowl face does not sit as close to its sensor as the bench mock-up suggested. The
+dead band narrows from 300 mm to 200 mm as a result, which is still wide against
+a measurement noise of a few millimetres, but leaves less margin than before: if
+a level settles near 200 mm it will hold whichever state it last had rather than
+resolving. Worth re-checking per level, since the bowl taper means each may
+settle at a slightly different present-distance.
 
 ### Both directions are debounced, separately
 

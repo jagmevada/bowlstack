@@ -9,11 +9,50 @@ Schema, write model, security and setup. For what produces the numbers see
 ## 1. Setup order
 
 ```
-supabase/schema.sql            -- drops and rebuilds everything; idempotent
+supabase/schema.sql            -- drops and rebuilds everything
 supabase/register_devices.sql  -- registers BWL-001 .. BWL-032
-supabase/smoke_test.sql        -- 14 assertions; run BEFORE flashing any device
-supabase/diagnose.sql          -- privilege/trigger state when something is wrong
+supabase/assign_devices.sql    -- permanent location/food_slot assignment
+supabase/seed_meal_mapping.sql -- sample menus, for the front-end test bed
+supabase/smoke_test.sql        -- 25 assertions; run BEFORE flashing any device
 ```
+
+On a database that is **already live**, never re-run `schema.sql`. Additive
+changes ship as their own idempotent file — currently:
+
+```
+supabase/weekly_menu_and_offline.sql  -- missed_last_service flag, window-edge
+                                      -- fix, weekly menu template (applied
+                                      -- 2026-08-02; safe to re-run)
+supabase/migrate_bowl_weight.sql      -- bowl_weight_g on both menu tables,
+                                      -- the weight through preload/apply, and
+                                      -- the slot_quantity view that powers the
+                                      -- Master Dashboard (safe to re-run)
+```
+
+`migrate_bowl_weight.sql` adds a column, widens two functions and creates one
+view. No table is dropped and no existing row is rewritten, so it is safe to
+run mid-trial. It is also **reversible**: `supabase/rollback_bowl_weight.sql`
+restores the previous schema exactly — verified byte-for-byte against the
+pre-migration definition — losing only the per-bowl weights themselves. Both
+files are re-runnable, and you can migrate again after rolling back. `meal_mapping_preload()` is DROPped and recreated rather than
+replaced — Postgres refuses to `create or replace` a function whose `returns
+table` gains a column — but its signature is unchanged, so callers and grants
+still match.
+
+The template is materialised into `meal_food_mapping` every morning by
+**pg_cron**: job `bowlstack-apply-template`, schedule `5 0 * * *`
+(00:05 UTC = 05:35 IST), running `meal_template_apply` per serving area for
+the current day — saved meals are skipped, past dates refused, so a manual
+edit always survives the cron. Created 2026-08-02 from the commented snippet
+at the end of `weekly_menu_and_offline.sql`; check firings in
+`cron.job_run_details`.
+
+Files outside the sequence:
+
+| | |
+| --- | --- |
+| `diagnose.sql` | read-only; run any time something is wrong. Checks objects, RLS, every grant, view security, deployment totals and **menu coverage** — a blank dish name on the dashboard is almost always an unentered menu rather than a fault |
+| `reset_spares.sql` | a repair tool. On a fresh rebuild nothing has reported, so `awaiting_deployment` is already correct and this does nothing |
 
 > **`schema.sql` drops the `devices` registry too.** Re-running it always
 > leaves the fleet empty and every device unprovisioned — `register_devices.sql`
@@ -43,14 +82,37 @@ plain `UPDATE` instead of an upsert.
 | Column | Notes |
 | --- | --- |
 | `device_id` | PK, `^[A-Za-z0-9_-]{3,32}$` — the installation's identity |
-| `area` | `D` Darshanarthi, `T` Tiffin, `M` Mahtma |
-| `item_slot` | 1–5, the physical label on the station |
-| `label`, `location` | free text, set from the front-end |
+| `location` | `D` Darshanarthi, `M` Mahatma, `T` Tiffin, `R` reserved/future |
+| `food_slot` | 1–8, the dish position on the station |
+| `label` | free text, names the **position** — never the dish |
 | `timezone` | IANA zone, default `Asia/Kolkata` |
 | `last_mac`, `created_at` | |
 
-A partial unique index enforces one device per `(area, item_slot)`, partial so
-unassigned spares coexist.
+**`(location, food_slot)` is deliberately not unique.** Darshanarthi runs three
+counters per dish position, so three stacks share a slot and remaining stock for a
+dish is the **sum** across them — see `slot_overview`. Do not add a unique
+constraint here: it encodes one stack per position, which is wrong about the
+building.
+
+### `meal_food_mapping` — what each slot serves, per meal per day
+
+PK `(location, meal_date, meal_type, food_slot)`. Devices never store food names;
+a device stores a slot number and the dashboard resolves the dish. Keyed by date so
+a past bowl count stays joinable to the dish that was actually in that slot. Full
+detail and the front-end contract: [meal_mapping.md](meal_mapping.md).
+
+### `meal_menu_template` — the fixed weekly menu, per weekday
+
+PK `(location, weekday, meal_type, food_slot)`, weekday `0–6` with **0 = Sunday**
+(Postgres `extract(dow)` and JS `getDay()` agree, so neither side converts).
+Configuration that *produces* `meal_food_mapping` rows — the dashboard views
+never read it, because a weekday has no date: resolving dishes from it directly
+would let a service pass with a dish name on screen and no dated row behind it,
+permanently breaking historical attribution. It is materialised by the menu
+editor's Save (which preloads from it) or `meal_template_apply(location, from,
+to, overwrite)`, which refuses past dates and today's already-completed meals,
+and skips any meal already entered unless `overwrite`. Locations `D/M/T` only —
+a reserved unit serves nothing. Staff-only CRUD; anon has no access of any kind.
 
 ### `device_status` — current state, one row per device
 
@@ -87,8 +149,69 @@ Fleet defaults plus optional per-device overrides.
 **Current state is UPDATED in place; history is appended only on change.**
 
 Appending every report would be ~30 devices × 8640/day ≈ **259k rows/day**,
-exhausting the free tier in about ten days. The heartbeat is **60 s** and only
-proves liveness, since the firmware posts immediately on any real change.
+exhausting the free tier in about ten days.
+
+The heartbeat is **20 s** — the longest a device may stay silent. Real changes
+post immediately, so it fires only when nothing has changed, and any successful
+post resets it. It is therefore a ceiling on the gap between writes, not a
+schedule stacked on top of the change traffic.
+
+### Offline detection
+
+Two flags, two failure shapes:
+
+- `offline` — died **mid-window**. `public.offline_after()` sets how long a
+  device may be silent, while it *should* be reporting, before it goes true.
+  A function rather than a literal so it can be retuned with one
+  `CREATE OR REPLACE` in the SQL editor instead of re-running `schema.sql`,
+  which drops every table including the history. Clears when the window closes.
+- `missed_last_service` — **slept through a whole window**. True when a
+  reported, deployed device's `updated_at` precedes the start of the most
+  recently completed window (own timezone; see `last_service_window_start()`).
+  No threshold, no clearing at dusk: a device dead since Tuesday is still
+  flagged on Friday morning, which `offline` alone could never say.
+
+```
+detection (worst case) = offline_after() + front-end poll interval
+offline_after()        > heartbeat + one retry backoff
+```
+
+That lower bound is not optional: a threshold shorter than the gap a **healthy**
+device leaves between posts makes every device alarm between its own heartbeats.
+
+At 20 s heartbeat, 15 s retry backoff, a 40 s threshold and the dashboard's 15 s
+poll, a dead device is flagged in **40–55 s**. Below ~40 s an ordinary WiFi
+reconnection starts reading as an outage.
+
+> **Raising the heartbeat rate costs requests, not rows.** `device_status` is
+> updated in place, one row per device, and `status_events` is still appended
+> only on real change. Across 24 deployed units at ~8 h of service a day, 20 s
+> is ~35k PATCHes/day — and identical storage.
+
+### One telemetry round per 5 s per device
+
+`POST_MIN_INTERVAL_MS` puts a hard floor between rounds. A round is at most two
+requests — the queued history batch, then the current-state PATCH.
+
+This throttles the **wake-up, not the data**. Every change is still enqueued the
+instant it is observed, with its own `age_ms`, so `recorded_at` keeps full
+resolution; changes falling inside one window are simply **clubbed into the next
+round**. The whole batch goes in one POST and the state row carries the latest
+values by construction, so nothing is merged away or dropped.
+
+> The floor exists because an unstable input turns into one HTTP request per
+> transition. Measured: eight `ok`/`discontiguous` flips in 45 s from a
+> misaligned sensor, and separately dozens of battery-band flips per minute from
+> a cell resting on a threshold.
+>
+> An earlier version of this limiter **did not work**. It lived inside
+> `requestImmediateUpsert()` and gated only the PATCH, leaving the event POST
+> completely unthrottled — so a flapping input still produced a request per
+> transition, which is the exact thing it was written to prevent. There is now
+> one limiter, in `telemetry::loop()`, covering both paths.
+
+The floor does not delay the boot report: the first round after power-up is
+always immediate.
 
 ### No upserts anywhere — this is deliberate
 
@@ -162,9 +285,22 @@ false alarm on every healthy device for two thirds of the day and bury a
 genuinely dead unit among 30 of them. The device has no clock, so the logic is
 entirely server-side.
 
-`in_service_window(at, tz, device_id, margin)` evaluates wall-clock windows in
+`in_service_window(at, tz, device_id, margin)` evaluates wall-clock windows with
+asymmetric edges: `margin` (default 90 s) is a boot grace after opening, and the
+close is sharp — the old ±10 min symmetric widening false-alarmed the fleet at
+both edges of every meal. Its sibling `last_service_window_start(tz, device_id)`
+anchors `missed_last_service`: a reported, deployed device whose `updated_at`
+precedes the start of the most recently completed window slept through a service
+it should have attended — the alarm that, unlike `offline`, survives the dark
+hours. It evaluates wall-clock windows in
 each installation's timezone. Adding any `service_windows` row for a device
 replaces the fleet defaults for that device entirely — list all three meals.
+
+> **Trial state (2026-08-02):** the live project temporarily runs debug
+> windows — breakfast 06:30–09:30, lunch 11:30–14:30, dinner **16:30**–21:30 —
+> so offline behaviour could be exercised in the afternoon. Restore the real
+> windows (06:00–09:00 / 11:30–14:00 / 18:30–21:00) before collecting clean
+> trial data.
 
 ---
 
@@ -179,6 +315,16 @@ The device holds only the **anon key**. It gets:
 | `status_events` | `INSERT(payload columns)` |
 
 **No read path to any telemetry column, ever.**
+
+### The dashboard's read path — anonymous sign-in
+
+The dashboard ships the same anon *key* but never runs as the anon *role*: on
+load it calls `auth.signInAnonymously()`, and the minted session carries
+`authenticated` — where every read grant lives. **Authentication → Allow
+anonymous sign-ins** must stay ON (or an email account be configured in
+`config.js`) or the dashboard reads nothing, which on screen is
+indistinguishable from a dead fleet. Not one grant or policy special-cases
+this path.
 
 > **Grants and policies are independent gates and you need both.** Supabase
 > bootstraps every new public table with `ALTER DEFAULT PRIVILEGES ... GRANT ALL
@@ -222,3 +368,8 @@ at the end of `schema.sql`.
 
 `device_status` deliberately has **no index beyond its PK** — 32 rows always
 seq-scan, and a second index would break HOT under that update rate.
+
+Dashboard egress is service-hour shaped: the UI polls `device_overview` +
+`slot_overview` + `meal_menu_template` every 15 s during service, idles to one
+poll per 10 minutes outside meal windows (powered-off devices cannot change
+the rows), and does not poll at all while its tab is hidden.

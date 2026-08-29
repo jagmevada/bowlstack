@@ -28,6 +28,19 @@ class BowlLogic {
  public:
   void update(const SensorArray &sensors);
 
+  // Same logic, fed directly rather than through the hardware class.
+  //
+  // Exists so the fleet simulator can be a DIGITAL TWIN rather than a plausible
+  // imitation: it synthesises distances and sensor health, then runs this --
+  // the production presence hysteresis, contiguity rule, count and status --
+  // instead of reimplementing them. A reimplementation drifts, and it did:
+  // the simulator's own copy disagreed with recompute() on 23 of the 80
+  // reachable states, including reintroducing a bug this file had already
+  // fixed. There is now one implementation, so that cannot recur.
+  //
+  // update(SensorArray) forwards here, so the production path is unchanged.
+  void update(const SensorState *states, const Reading *readings);
+
   uint8_t count() const { return count_; }
   StackStatus status() const { return status_; }
   LevelState level(uint8_t i) const { return level_[i]; }

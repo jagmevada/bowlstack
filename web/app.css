@@ -1,0 +1,1173 @@
+/* ====================================================================
+   Bowlstack dashboard.
+
+   Colour comes from a validated palette. The status colours are fixed and
+   never themed. They are deliberately only three — good / warning /
+   critical — and a status colour NEVER carries meaning on its own: every
+   badge pairs it with a glyph and a word. See the note above .badge.
+   ==================================================================== */
+
+:root {
+  color-scheme: light;
+
+  --surface:     #fcfcfb;   /* card surface */
+  --plane:       #f9f9f7;   /* page plane  */
+  --sunken:      #f2f1ed;
+  --ink:         #0b0b0b;
+  --ink-2:       #52514e;
+  --ink-3:       #898781;
+  --grid:        #e1e0d9;
+  --axis:        #c3c2b7;
+  --border:      rgba(11, 11, 11, .10);
+  --shadow:      0 1px 2px rgba(11, 11, 11, .05), 0 1px 8px rgba(11, 11, 11, .04);
+
+  --good:        #0ca30c;
+  --warning:     #fab219;
+  --warning-ink: #8a6400;   /* amber a GLYPH can wear on the light surface
+                               (~5:1); --warning itself is 1.8:1 there and
+                               only ever safe as a wash or on dark */
+  --critical:    #d03b3b;
+  --series-1:    #2a78d6;   /* the one plotted series */
+
+  --good-wash:     rgba(12, 163, 12, .10);
+  --warning-wash:  rgba(250, 178, 25, .16);
+  --critical-wash: rgba(208, 59, 59, .10);
+
+  --radius: 12px;
+  --font: system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  /* The one horizontal gutter. The top bar, the freshness line and the view
+     all use it, so the tab bar and the content share a single left edge —
+     change it here and all three move together. */
+  --gutter: max(.75rem, env(safe-area-inset-left));
+}
+
+/* Open the gutter a little on a large screen so content is not flush against
+   the bezel. The layout stays fluid — this is breathing room, not a cap. */
+@media (min-width: 1400px) { :root { --gutter: 1.5rem; } }
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --surface: #1a1a19;
+    --plane:   #0d0d0d;
+    --sunken:  #232322;
+    --ink:     #ffffff;
+    --ink-2:   #c3c2b7;
+    --ink-3:   #898781;
+    --grid:    #2c2c2a;
+    --axis:    #383835;
+    --border:  rgba(255, 255, 255, .10);
+    --shadow:  none;
+    --series-1: #3987e5;
+    --warning-ink: #fab219;
+    --good-wash:     rgba(12, 163, 12, .16);
+    --warning-wash:  rgba(250, 178, 25, .16);
+    --critical-wash: rgba(208, 59, 59, .18);
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface: #1a1a19;
+  --plane:   #0d0d0d;
+  --sunken:  #232322;
+  --ink:     #ffffff;
+  --ink-2:   #c3c2b7;
+  --ink-3:   #898781;
+  --grid:    #2c2c2a;
+  --axis:    #383835;
+  --border:  rgba(255, 255, 255, .10);
+  --shadow:  none;
+  --series-1: #3987e5;
+  --warning-ink: #fab219;
+  --good-wash:     rgba(12, 163, 12, .16);
+  --warning-wash:  rgba(250, 178, 25, .16);
+  --critical-wash: rgba(208, 59, 59, .18);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  background: var(--plane);
+  color: var(--ink);
+  font-family: var(--font);
+  font-size: 16px;
+  -webkit-text-size-adjust: 100%;
+}
+
+body { padding-bottom: env(safe-area-inset-bottom); }
+
+h1, h2, h3 { margin: 0; font-weight: 600; line-height: 1.25; }
+h1 { font-size: 1.5rem; }
+h2 { font-size: 1.05rem; }
+h3 { font-size: .95rem; }
+
+a { color: inherit; }
+.muted    { color: var(--ink-2); }
+.dim      { color: var(--ink-3); }
+.nowrap   { white-space: nowrap; }
+.spacer   { flex: 1; }
+[hidden]  { display: none !important; }
+
+/* --- controls ------------------------------------------------------ */
+
+button, select, input, textarea {
+  font: inherit;
+  color: inherit;
+  border-radius: 9px;
+}
+
+button { cursor: pointer; }
+
+input, select, textarea {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  padding: .5rem .6rem;
+  min-height: 40px;
+  width: 100%;
+}
+
+input:focus-visible, select:focus-visible, button:focus-visible, a:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--series-1);
+  outline-offset: 2px;
+}
+
+button.primary {
+  background: var(--ink);
+  color: var(--plane);
+  border: 1px solid var(--ink);
+  padding: .65rem 1rem;
+  min-height: 44px;
+  font-weight: 600;
+}
+
+button.ghost {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  padding: .45rem .75rem;
+  min-height: 40px;
+}
+
+button.ghost[aria-pressed="true"] {
+  background: var(--ink);
+  color: var(--plane);
+  border-color: var(--ink);
+}
+
+button.linkish {
+  background: none;
+  border: 0;
+  color: var(--ink-2);
+  text-decoration: underline;
+  padding: .4rem;
+  min-height: 36px;
+}
+
+button.danger-text {
+  background: none;
+  border: 0;
+  color: var(--critical);
+  padding: .35rem .5rem;
+  min-height: 36px;
+}
+
+button:disabled { opacity: .45; cursor: default; }
+
+.icon-btn {
+  background: none;
+  border: 1px solid transparent;
+  color: var(--ink-2);
+  font-size: 1.1rem;
+  line-height: 1;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  list-style: none;
+}
+.icon-btn::-webkit-details-marker { display: none; }
+
+/* --- gates (setup / login) ----------------------------------------- */
+
+.gate {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 1.25rem;
+}
+
+.gate-card { width: min(420px, 100%); display: grid; gap: .85rem; }
+.gate-card label { display: grid; gap: .3rem; font-size: .85rem; color: var(--ink-2); }
+.gate-card .hint  { font-size: .8rem; color: var(--ink-3); margin: 0; }
+.gate-card p      { margin: 0; }
+
+.form-error {
+  background: var(--critical-wash);
+  color: var(--ink);
+  border-left: 3px solid var(--critical);
+  padding: .55rem .7rem;
+  font-size: .85rem;
+  border-radius: 0 8px 8px 0;
+}
+
+/* --- chrome -------------------------------------------------------- */
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: var(--plane);
+  border-bottom: 1px solid var(--border);
+  padding: .5rem var(--gutter) 0;
+}
+
+.topbar-row { display: flex; align-items: center; gap: .5rem; }
+
+.brand { font-weight: 600; text-decoration: none; letter-spacing: -.01em; }
+
+.meal {
+  font-size: .8rem;
+  color: var(--ink-2);
+  padding: .15rem .5rem;
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  white-space: nowrap;
+}
+
+.version {
+  font-size: .72rem;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.menu { position: relative; }
+.menu-panel {
+  position: absolute;
+  right: 0;
+  top: 44px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  display: grid;
+  min-width: 220px;
+  padding: .3rem;
+  z-index: 30;
+}
+.menu-panel button {
+  background: none;
+  border: 0;
+  text-align: left;
+  padding: .6rem .7rem;
+  border-radius: 8px;
+  min-height: 42px;
+}
+.menu-panel button:hover { background: var(--sunken); }
+.menu-user {
+  padding: .5rem .7rem;
+  font-size: .78rem;
+  color: var(--ink-3);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: .3rem;
+  overflow-wrap: anywhere;
+}
+
+/* The capsules are the ONE place fleet counts are itemized. They may wrap to
+   a second row on a phone, but a chip never breaks internally. */
+.chips { display: flex; gap: .4rem; flex-wrap: wrap; padding: .5rem 0 .1rem; }
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: .35rem;
+  font-size: .78rem;
+  padding: .25rem .55rem;
+  border-radius: 99px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--ink-2);
+  cursor: pointer;
+  min-height: 30px;
+  white-space: nowrap;
+}
+@media (max-width: 480px) {
+  .chips { gap: .25rem .3rem; }
+  .chip { font-size: .72rem; padding: .2rem .45rem; min-height: 26px; gap: .25rem; }
+}
+.chip b { color: var(--ink); font-weight: 600; }
+.chip.is-critical { background: var(--critical-wash); border-color: transparent; }
+.chip.is-warning  { background: var(--warning-wash);  border-color: transparent; }
+.chip.is-good     { background: var(--good-wash);     border-color: transparent; }
+
+.tabs { display: flex; gap: .25rem; overflow-x: auto; margin-top: .35rem; }
+.tabs a {
+  text-decoration: none;
+  color: var(--ink-2);
+  padding: .55rem .7rem;
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
+  font-size: .92rem;
+}
+.tabs a.active { color: var(--ink); border-bottom-color: var(--ink); font-weight: 600; }
+
+.freshness {
+  font-size: .75rem;
+  color: var(--ink-3);
+  padding: .35rem var(--gutter);
+  display: flex;
+  gap: .5rem;
+  align-items: center;
+}
+.freshness .err { color: var(--critical); }
+
+/* FLUID, not centred.
+   The view used to cap at 1180px and centre, which left a wide monitor
+   showing two slot cards and a lot of wallpaper. The screens here are grids
+   that already reflow — Master's slot cards, Stock's area grids, the Menu's
+   area columns — so every extra pixel becomes another column rather than a
+   longer line of text. The one thing width WOULD hurt, running prose, this
+   app does not have.
+
+   The horizontal padding matches .topbar and .freshness exactly, so the tab
+   bar, the freshness line and the content all share one left edge. Change one
+   and change all three. It opens up past 1400px purely so content is not
+   flush against the bezel on a large screen. */
+.view {
+  padding: 0 var(--gutter) 3rem;
+}
+
+.view.is-refetching { opacity: .6; transition: opacity .12s; }
+
+/* --- generic surfaces ---------------------------------------------- */
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1rem;
+  box-shadow: var(--shadow);
+}
+
+.section { margin-top: 1.25rem; }
+.section-head {
+  display: flex;
+  align-items: baseline;
+  gap: .6rem;
+  margin-bottom: .5rem;
+  flex-wrap: wrap;
+}
+.section-head .count { font-size: .8rem; color: var(--ink-3); }
+
+/* The problem strip on Stock: one thin red bar that routes to Health. Thin is
+   the point — it must register during a busy service without eating the
+   screen the way a full banner would. Colour never travels alone: glyphs and
+   words ride in it, and it is a real button. */
+.alert-strip {
+  display: flex;
+  align-items: center;
+  gap: .45rem;
+  width: 100%;
+  text-align: left;
+  background: var(--critical-wash);
+  border: 0;
+  border-left: 3px solid var(--critical);
+  border-radius: 8px;
+  padding: .3rem .6rem;
+  margin: .6rem 0;
+  min-height: 34px;
+  font-size: .8rem;
+  color: var(--ink);
+}
+/* One line always: the message ellipsizes before anything is allowed to
+   wrap — on a phone the old itemized strip shattered into a word per row. */
+.alert-strip .msg {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.alert-strip .g { color: var(--critical); flex: none; }
+.alert-strip .go {
+  margin-left: auto;
+  color: var(--ink-2);
+  font-size: .75rem;
+  white-space: nowrap;
+}
+
+/* Health: the line that says OFFLINE in words. The word is bold ink (small
+   red text fails contrast in dark mode); the glyph carries the red. */
+.dev-offline-line {
+  font-size: .78rem;
+  font-weight: 600;
+  display: flex;
+  align-items: baseline;
+  gap: .3rem;
+  flex-wrap: wrap;
+}
+.dev-offline-line .g { color: var(--critical); }
+
+.banner {
+  border-radius: var(--radius);
+  padding: .6rem .8rem;
+  font-size: .85rem;
+  margin: .75rem 0;
+  display: flex;
+  gap: .5rem;
+  align-items: flex-start;
+  line-height: 1.4;
+}
+.banner .g { flex: none; }
+.banner.is-info     { background: var(--sunken); }
+.banner.is-warning  { background: var(--warning-wash); }
+.banner.is-critical { background: var(--critical-wash); }
+
+.empty {
+  padding: 2rem 1rem;
+  text-align: center;
+  color: var(--ink-3);
+  font-size: .9rem;
+}
+
+.toolbar {
+  display: flex;
+  gap: .5rem;
+  flex-wrap: wrap;
+  align-items: center;
+  margin: .75rem 0;
+}
+.toolbar select, .toolbar input { width: auto; min-width: 8.5rem; }
+.toolbar .grow { flex: 1; min-width: 0; }
+
+/* --- status badge (colour is NEVER alone: glyph + word) ------------- */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: .3rem;
+  font-size: .75rem;
+  padding: .15rem .45rem;
+  border-radius: 6px;
+  background: var(--sunken);
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+.badge .g { font-size: .8em; line-height: 1; }
+.badge.is-good     { background: var(--good-wash); }
+.badge.is-warning  { background: var(--warning-wash); }
+.badge.is-critical { background: var(--critical-wash); color: var(--ink); }
+/* Three tones, not four. The status palette cannot carry a four-way
+   distinction on hue — warning and serious measure ΔE 13.6 to normal vision,
+   below the floor at which two colours are reliably told apart, and good
+   against critical is the classic red/green pair under deuteranopia. Neither
+   is fixable by re-picking a step. So the tones stay at three, matching what
+   the domain actually says (fine / watch / act now), and severity ORDER is
+   carried by list position, which needs no colour at all.
+
+   Every badge therefore pairs its colour with a distinct glyph and a word.
+   That pairing is the mechanism; the colour is the accelerator. */
+.badge.is-good     .g { color: var(--good); }
+.badge.is-warning  .g { color: var(--warning); }
+.badge.is-critical .g { color: var(--critical); }
+
+/* The battery glyph: 4 segments in a case with a nub. Level = how many
+   segments are filled (the non-colour channel) + which colour; a dashed
+   case means no cell detected. The bolt overlays when the charger is on. */
+.batt {
+  position: relative;
+  display: inline-flex;
+  gap: 1px;
+  padding: 1px;
+  width: 20px;
+  height: 9px;
+  border: 1px solid var(--ink-3);
+  border-radius: 2px;
+  flex: none;
+  box-sizing: content-box;
+  vertical-align: -1px;
+}
+.batt::after {
+  content: '';
+  position: absolute;
+  right: -3px;
+  top: 2px;
+  width: 2px;
+  height: 5px;
+  background: var(--ink-3);
+  border-radius: 0 1px 1px 0;
+}
+.batt i { flex: 1; border-radius: 1px; background: transparent; }
+.batt.lvl-good     i:nth-child(-n+4) { background: var(--good); }
+.batt.lvl-medium   i:nth-child(-n+3) { background: var(--good); }
+.batt.lvl-low      i:nth-child(-n+2) { background: var(--warning-ink); }
+.batt.lvl-critical i:nth-child(-n+1) { background: var(--critical); }
+.batt.lvl-none     { border-style: dashed; }
+.batt .bolt {
+  position: absolute;
+  inset: -2px 0;
+  display: grid;
+  place-items: center;
+  font-size: 9px;
+  line-height: 1;
+  color: var(--ink);
+  text-shadow: 0 0 2px var(--surface), 0 0 2px var(--surface), 0 0 3px var(--surface);
+}
+
+/* Per-area washes: place, not status. A faint tint per serving area plus a
+   matching dot on the heading, so an area is found without reading — and no
+   hue the status palette already owns (red/green/amber mean things). */
+.area {
+  border-radius: 14px;
+  padding: .55rem .6rem .7rem;
+  margin-bottom: .9rem;
+  background: var(--area-wash, transparent);
+}
+.area-D { --area-wash: rgba(42, 120, 214, .07);  --area-accent: #2a78d6; }
+.area-M { --area-wash: rgba(150, 86, 209, .08);  --area-accent: #8b4fc0; }
+.area-T { --area-wash: rgba(13, 148, 136, .08);  --area-accent: #0d9488; }
+:root[data-theme="dark"] .area-D { --area-wash: rgba(57, 135, 229, .13); --area-accent: #5f9fe8; }
+:root[data-theme="dark"] .area-M { --area-wash: rgba(163, 106, 224, .14); --area-accent: #b183e0; }
+:root[data-theme="dark"] .area-T { --area-wash: rgba(20, 184, 166, .13); --area-accent: #2dd4bf; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .area-D { --area-wash: rgba(57, 135, 229, .13); --area-accent: #5f9fe8; }
+  :root:not([data-theme="light"]) .area-M { --area-wash: rgba(163, 106, 224, .14); --area-accent: #b183e0; }
+  :root:not([data-theme="light"]) .area-T { --area-wash: rgba(20, 184, 166, .13); --area-accent: #2dd4bf; }
+}
+/* Frozen-row behaviour: while an area is on screen its heading stays
+   latched just under the top bar, so mid-scroll you always know WHOSE
+   slots you are reading. The gradient re-creates wash-over-plane opaquely,
+   so cards slide underneath without showing through. */
+.area .area-head {
+  position: sticky;
+  top: var(--topbar-h, 96px);
+  z-index: 5;
+  background: linear-gradient(0deg, var(--area-wash, transparent), var(--area-wash, transparent)), var(--plane);
+  border-radius: 10px;
+  padding: .35rem .5rem;
+  margin: -.2rem -.15rem .4rem;
+}
+
+.area .area-head h2::before {
+  content: '';
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 99px;
+  margin-right: .45rem;
+  background: var(--area-accent, var(--ink-3));
+}
+
+/* --- stock view ---------------------------------------------------- */
+
+.area-head {
+  display: flex;
+  align-items: baseline;
+  gap: .5rem;
+  margin: 1.25rem 0 .5rem;
+}
+.area-head h2 { font-size: 1.15rem; white-space: nowrap; }
+/* Small and single-line, ellipsis before wrapping: a subtitle that sometimes
+   took two rows made the latched area headings different heights. */
+.area-head .area-sub {
+  font-size: .7rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.slot-grid {
+  display: grid;
+  gap: .7rem;
+  grid-template-columns: repeat(auto-fill, minmax(215px, 1fr));
+}
+
+.slot {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: .8rem;
+  display: grid;
+  gap: .5rem;
+  text-align: left;
+  width: 100%;
+  box-shadow: var(--shadow);
+}
+.slot-top { display: flex; align-items: baseline; gap: .4rem; }
+.slot-pos { font-size: .72rem; color: var(--ink-3); letter-spacing: .04em; text-transform: uppercase; }
+.slot-food { font-weight: 600; font-size: 1.02rem; overflow-wrap: anywhere; }
+.slot-food.unset { color: var(--ink-3); font-weight: 400; font-style: italic; }
+
+.slot-figure { display: flex; align-items: baseline; gap: .4rem; }
+.slot-count {
+  font-size: 2.6rem;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -.02em;
+}
+.slot-of { font-size: .85rem; color: var(--ink-3); }
+.slot-nodata { font-size: 1.15rem; font-weight: 600; color: var(--ink-3); }
+.slot-fault  { font-size: 1.15rem; font-weight: 600; color: var(--critical); }
+
+/* Red on a numeral means exactly ONE thing everywhere: this figure is
+   compromised — the device is offline, degraded or faulted. Quantity never
+   colours a number: a colour per meaning is all a human can register. The
+   old dashed underline is gone — it existed to separate "red = empty" from
+   "red = stale", and with one meaning per colour there is nothing left to
+   separate; the ✕ caption and the badges carry the words. */
+.slot-count.is-alert,
+.dev-count.is-offline,
+.hero.is-offline {
+  color: var(--critical);
+}
+
+/* State glyph colours, shared by the page legend and the device strip.
+   Each state owns a distinct SHAPE as well as a colour, so the pairing
+   survives colour-blindness; the words appear once, in the legend. */
+.st-ok    { color: var(--good); }
+.st-off   { color: var(--critical); }
+.st-fault { color: var(--critical); }
+.st-deg   { color: var(--warning-ink); }
+.st-none  { color: var(--ink-3); }
+
+/* The legend: the one place on Stock where symbols meet words. */
+.legend-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .4rem 1rem;
+  font-size: .72rem;
+  /* ink-2, not ink-3: at .72rem these words need 4.5:1 and ink-3 is 3.5:1
+     on the light surface — the same bar the old .slot-stale comment held. */
+  color: var(--ink-2);
+  margin-top: .25rem;
+}
+.legend-line b { font-weight: 400; }
+
+/* The device strip: one symbolic line per stack — glyph, id, count,
+   battery. Deliberately not chips: no borders, no backgrounds, no words. */
+.dev-strip { display: grid; gap: 2px; margin-top: .1rem; }
+.dev-line {
+  display: grid;
+  grid-template-columns: 1rem 2.6rem 1fr auto;
+  align-items: center;
+  gap: .35rem;
+  min-height: 20px;
+  font-size: .75rem;
+  color: var(--ink-2);
+  text-decoration: none;
+  font-variant-numeric: tabular-nums;
+}
+.dev-line .st { text-align: center; }
+.dev-line .ct { text-align: right; padding-right: .1rem; }
+.dev-line:hover .id { text-decoration: underline; }
+
+/* The capsule bar carries DATA CONFIDENCE, deliberately not a quantity
+   colour band:
+     solid green   bowls confirmed by live, healthy stacks
+     red stripes   the share of the position whose data is NOT valid — each
+                   offline/degraded/faulted stack's whole capacity
+     grey track    confirmed empty space
+   Three stacks with one silent: a third of the bar is striped, and the
+   reader sees exactly how much of the figure to trust. */
+.meter {
+  height: 8px;
+  border-radius: 99px;
+  background: var(--sunken);
+  overflow: hidden;
+  display: flex;
+}
+.meter > i { display: block; height: 100%; flex: none; }
+.meter .fill { background: var(--good); }
+.meter .invalid {
+  background: repeating-linear-gradient(45deg,
+    var(--critical) 0 3px, transparent 3px 6px);
+}
+
+.slot-notes { display: flex; flex-wrap: wrap; gap: .3rem; }
+.slot-sub { font-size: .78rem; color: var(--ink-2); line-height: 1.35; }
+
+/* --- health list ---------------------------------------------------- */
+
+.dev-list { display: grid; gap: .5rem; }
+.dev-list.compact { gap: .3rem; }
+
+/* The Health roster row: glyph, id, position, levels, count, battery — one
+   symbolic line per device so a phone shows the fleet without scrolling.
+   Words live in the tooltip and on the device page. */
+.dev.devc {
+  grid-template-columns: 1rem auto 2.2rem auto 1fr auto;
+  align-items: center;
+  gap: .55rem;
+  padding: .3rem .6rem;
+  min-height: 34px;
+}
+.dev.devc .st { text-align: center; }
+.dev.devc .devc-pos {
+  font-size: .75rem;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+/* The count sits NEXT TO its level strip (they are one fact); only the
+   battery holds the right edge. */
+.dev.devc .dev-count { font-size: 1.05rem; text-align: left; }
+.dev.devc .batt-slot { width: 26px; }
+
+.dev {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: .7rem;
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--axis);
+  border-radius: var(--radius);
+  padding: .6rem .75rem;
+  text-align: left;
+  width: 100%;
+  box-shadow: var(--shadow);
+}
+.dev.sev-critical { border-left-color: var(--critical); }
+.dev.sev-warning  { border-left-color: var(--warning); }
+.dev.sev-good     { border-left-color: var(--good); }
+.dev.sev-idle     { border-left-color: var(--axis); opacity: .72; }
+
+.dev-id { font-weight: 600; font-size: .9rem; font-variant-numeric: tabular-nums; }
+.dev-where { font-size: .78rem; color: var(--ink-3); }
+.dev-mid { min-width: 0; display: grid; gap: .25rem; }
+.dev-badges { display: flex; gap: .3rem; flex-wrap: wrap; }
+.dev-right { display: flex; align-items: center; gap: .6rem; }
+.dev-count {
+  font-size: 1.5rem;
+  font-weight: 600;
+  min-width: 1.3ch;
+  text-align: right;
+}
+.dev-count.na { font-size: .95rem; color: var(--ink-3); font-weight: 500; }
+
+/* --- level column (levels[0] is the BOTTOM bowl) -------------------- */
+
+.levels {
+  display: grid;
+  gap: 2px;                       /* the 2px surface gap, not a border */
+  width: 22px;
+  flex: none;
+}
+.levels i {
+  display: block;
+  height: 9px;
+  border-radius: 2px;
+  background: var(--sunken);
+}
+.levels i.present { background: var(--series-1); }
+.levels i.absent  { background: var(--sunken); }
+.levels i.unknown {
+  background: repeating-linear-gradient(45deg,
+    var(--axis) 0 2px, transparent 2px 4px);
+}
+.levels.lg { width: 74px; gap: 3px; }
+.levels.lg i { height: 26px; border-radius: 4px; }
+/* Roster variant: the same four cells laid on their side so a row stays one
+   line tall. Children arrive top-of-stack first (f4), so rtl flow puts f1
+   at the LEFT — reading order matches the station's bottom-up numbering. */
+.levels.mini {
+  grid-auto-flow: column;
+  grid-auto-columns: 9px;
+  width: auto;
+  direction: rtl;
+}
+.levels.mini i { height: 13px; }
+
+.level-rows { display: grid; gap: 3px; }
+/* Capsule per level, no words: blue capsule = bowl present, striped = the
+   sensor is not answering, blank = confirmed empty. The words appear once
+   in the caption under the card; each row's title repeats its own. */
+.level-row {
+  display: grid;
+  grid-template-columns: 2.1rem 64px;
+  align-items: center;
+  gap: .5rem;
+  font-size: .82rem;
+}
+.level-row .k { color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.level-row .bar {
+  height: 20px;
+  border-radius: 99px;
+  background: transparent;
+  border: 1px solid transparent;   /* reserve the pixel so rows align */
+}
+/* A HEALTHY sensor seeing no bowl draws the empty outline — measured
+   emptiness, not absence of data. Only a sensor that is not answering
+   leaves stripes, and only unknown-everything leaves nothing. */
+.level-row .bar.absent  { border-color: var(--axis); }
+.level-row .bar.present { background: var(--series-1); border-color: transparent; }
+.level-row .bar.unknown {
+  background: repeating-linear-gradient(45deg,
+    var(--axis) 0 3px, transparent 3px 6px);
+}
+
+/* --- detail --------------------------------------------------------- */
+
+.detail-grid {
+  display: grid;
+  gap: .7rem;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  align-items: start;
+}
+
+.kv { display: grid; grid-template-columns: auto 1fr; gap: .3rem .8rem; font-size: .85rem; }
+.kv dt { color: var(--ink-3); }
+.kv dd { margin: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+
+.hero {
+  font-size: 3.2rem;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -.02em;
+}
+
+.back {
+  display: inline-flex;
+  gap: .35rem;
+  align-items: center;
+  text-decoration: none;
+  color: var(--ink-2);
+  font-size: .85rem;
+  padding: .6rem 0;
+}
+
+/* --- charts --------------------------------------------------------- */
+
+.chart-card { display: grid; gap: .5rem; }
+.chart-title { font-size: .9rem; font-weight: 600; }
+.chart-sub   { font-size: .78rem; color: var(--ink-3); }
+.chart-wrap  { position: relative; overflow-x: auto; }
+.chart-wrap svg { display: block; }
+.tick { fill: var(--ink-3); font-size: 10px; font-variant-numeric: tabular-nums; }
+.gridline { stroke: var(--grid); stroke-width: 1; }
+.axisline { stroke: var(--axis); stroke-width: 1; }
+
+.chart-tip {
+  position: absolute;
+  pointer-events: none;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  padding: .4rem .55rem;
+  font-size: .75rem;
+  line-height: 1.35;
+  white-space: nowrap;
+  transform: translate(-50%, -115%);
+  z-index: 5;
+}
+
+.legend { display: flex; gap: .75rem; flex-wrap: wrap; font-size: .75rem; color: var(--ink-2); }
+.legend span { display: inline-flex; align-items: center; gap: .3rem; }
+.legend i { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+
+/* --- tables --------------------------------------------------------- */
+
+.table-wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: .82rem; }
+th, td {
+  text-align: left;
+  padding: .4rem .55rem;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+th { color: var(--ink-3); font-weight: 500; position: sticky; top: 0; background: var(--surface); }
+td.num { text-align: right; font-variant-numeric: tabular-nums; }
+tbody tr:last-child td { border-bottom: 0; }
+
+details.table-view > summary {
+  cursor: pointer;
+  font-size: .8rem;
+  color: var(--ink-2);
+  padding: .4rem 0;
+}
+
+/* --- forms: menu + device assignment -------------------------------- */
+
+/* The template coverage map. The generic table styles left-align headers and
+   right-align .num cells, which slid every count away from its weekday label
+   — Sunday's number appeared to sit under Monday. Day columns share one
+   width and CENTER both header and count, so a label and its data cannot
+   drift apart. */
+table.coverage th,
+table.coverage td {
+  text-align: center;
+  width: 11.5%;
+}
+table.coverage th:first-child,
+table.coverage td:first-child {
+  text-align: left;
+  width: auto;
+}
+table.coverage td { padding: .15rem .2rem; }
+table.coverage .ghost { width: 100%; min-width: 2.2rem; }
+
+/* The daily menu grid: one column per selected area, so the current meal is
+   verifiable across the whole site in one glance. Columns stack on a narrow
+   phone rather than crushing the inputs. */
+.menu-grid {
+  display: grid;
+  gap: .7rem;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  align-items: start;
+  margin-top: .75rem;
+}
+/* Title and status chip stack vertically, and the head has a FIXED minimum
+   height: a long chip ("From template — save to record") must not push one
+   column's slot rows below its neighbours' — the whole point of the grid is
+   that slot 1 lines up with slot 1 across every area. */
+.menu-col-head {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: .3rem;
+  min-height: 3.9rem;
+  margin-bottom: .3rem;
+}
+.menu-col-head h3 { line-height: 1.2; }
+
+/* Four columns now: slot, dish, kg-per-bowl, marker. The weight box is
+   fixed-width and the dish keeps the stretch — a dish name is what people
+   scan the column for, and a number that never exceeds "50.0" has no use for
+   the extra space. */
+.row-form {
+  display: grid;
+  grid-template-columns: 3rem 1fr 4.5rem auto;
+  gap: .5rem;
+  align-items: center;
+  padding: .35rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.row-form .slotno { font-size: .8rem; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.row-form.is-draft input { background: var(--warning-wash); }
+
+/* The one header row above each column's fields. Without it the kg box reads
+   as a second dish field. */
+.row-form.row-head {
+  border-bottom: 1px solid var(--border);
+  padding-bottom: .2rem;
+  font-size: .7rem;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  color: var(--ink-3);
+}
+
+.row-form .w-input {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+/* Spinner arrows steal a third of a 4.5rem box and are unusable with a thumb
+   anyway — the field is a number input for the mobile keypad it summons, not
+   for its stepper. */
+.row-form .w-input::-webkit-outer-spin-button,
+.row-form .w-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.row-form .w-input { -moz-appearance: textfield; }
+
+@media (max-width: 560px) {
+  /* On a phone the dish gets the full width and the weight tucks under it
+     beside the slot number, rather than squeezing both onto one line. */
+  .row-form { grid-template-columns: 3rem 1fr auto; }
+  .row-form .w-input { grid-column: 2 / 3; }
+}
+
+.assign-row {
+  display: grid;
+  grid-template-columns: 6.5rem 6rem 5rem 1fr auto;
+  gap: .5rem;
+  align-items: center;
+  padding: .45rem 0;
+  border-bottom: 1px solid var(--border);
+}
+.assign-row .did { font-size: .85rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.assign-row.dirty { background: var(--warning-wash); border-radius: 8px; }
+
+@media (max-width: 640px) {
+  .assign-row { grid-template-columns: 1fr 1fr; }
+  .assign-row .did { grid-column: 1 / -1; }
+  .assign-row .lbl, .assign-row .act { grid-column: 1 / -1; }
+  .dev { grid-template-columns: auto 1fr; }
+  .dev-right { grid-column: 1 / -1; justify-content: flex-end; }
+}
+
+.sticky-actions {
+  position: sticky;
+  bottom: 0;
+  background: var(--plane);
+  border-top: 1px solid var(--border);
+  padding: .6rem 0 max(.6rem, env(safe-area-inset-bottom));
+  display: flex;
+  gap: .5rem;
+  align-items: center;
+  flex-wrap: wrap;
+  z-index: 10;
+}
+
+/* --- toast ---------------------------------------------------------- */
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: max(1rem, env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  background: var(--ink);
+  color: var(--plane);
+  padding: .6rem .9rem;
+  border-radius: 10px;
+  font-size: .85rem;
+  max-width: min(560px, 92vw);
+  z-index: 100;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, .25);
+  overflow-wrap: anywhere;
+}
+.toast.err { background: var(--critical); color: #fff; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
+
+
+/* ====================================================================
+   Master — the site total, in kilograms.
+
+   Deliberately NOT the Stock card grid. Stock is four-to-five cards per
+   area that someone scans; Master is one big figure plus a short list, and
+   giving it the same treatment made the two screens indistinguishable at a
+   glance on a tablet across the kitchen.
+   ==================================================================== */
+
+.mt-hint {
+  margin-top: .5rem;
+  font-size: .8rem; color: var(--ink-3);
+}
+.mt-hint a { margin-left: .35rem; }
+
+/* As many slot cards per row as fit, down to a floor that keeps each card
+   readable. */
+.master-rows {
+  display: grid;
+  gap: .5rem;
+  /* auto-fit, not a fixed count: with four dish positions this lands all four
+     abreast on a desktop, drops to two on a tablet and one on a phone, without
+     a breakpoint per screen size. 17rem is the narrowest a card can be before
+     its hall lines wrap — and a wrapped card is taller than the column it
+     saved, so the grid must never go below it. */
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  /* Cards in a row share a height. Without this a slot carrying per-hall dish
+     names stands taller than its neighbours and the row reads as ragged. */
+  align-items: stretch;
+}
+
+/* A slot card is denser than a general .card: it is one of four or five on
+   screen at once, and the padding is what pushes the last one below the fold. */
+.mslot { padding: .75rem .9rem; }
+
+/* A slot card: a header carrying the dish and this slot's own total, then
+   one line per serving hall. The halls are itemised because a refill is
+   dispatched to a hall, never to a slot number. */
+.mslot-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: .6rem;
+  align-items: start;
+}
+.mslot-id { min-width: 0; }
+.mrow-slot {
+  font-size: .75rem; color: var(--ink-3);
+  text-transform: uppercase; letter-spacing: .04em;
+  font-variant-numeric: tabular-nums;
+}
+.mrow-dish {
+  font-size: 1.05rem; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mrow-dish.unset { font-weight: 400; color: var(--ink-3); font-style: italic; }
+.mrow-figure {
+  display: flex; flex-direction: column; align-items: flex-end; gap: .1rem;
+  text-align: right;
+}
+.mrow-kg {
+  font-size: 1.35rem; font-weight: 650; line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+/* Red on a figure means exactly what it means everywhere else in this app:
+   this number is compromised. Never "nearly empty". */
+.mrow-kg.is-alert { color: var(--critical); }
+.mrow-kg.is-bound { color: var(--ink-2); }
+.mrow-kg.is-unset { font-size: 1.1rem; color: var(--ink-3); font-weight: 500; }
+.mslot-of { font-size: .78rem; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.mrow-fix { font-size: .75rem; white-space: nowrap; }
+.mrow-areas { font-size: .75rem; font-variant-numeric: tabular-nums; }
+
+.marea-list {
+  margin-top: .5rem;
+  border-top: 1px solid var(--border);
+}
+.marea {
+  display: grid;
+  /* THREE columns, and areaLine() emits exactly three children. The hall name
+     takes the slack; bowls and kilograms size to their content so they stay
+     aligned down the card. A fourth child here wraps the mass onto its own
+     row and doubles the height of every card — which is the bug this
+     comment exists to stop coming back. */
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  column-gap: .5rem;
+  align-items: baseline;
+  padding: .35rem 0;
+  border-bottom: 1px solid var(--border);
+  font-size: .85rem;
+}
+.marea:last-child { border-bottom: 0; padding-bottom: 0; }
+
+.marea-name { min-width: 0; }
+.marea-hall {
+  display: block;
+  color: var(--ink-2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* Shown only when the halls serve DIFFERENT dishes: a quiet second line under
+   the hall it belongs to, never a column of its own. */
+.marea-dish {
+  display: block;
+  font-size: .72rem;
+  line-height: 1.3;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.marea-bowls {
+  color: var(--ink-3); font-variant-numeric: tabular-nums;
+  white-space: nowrap; font-size: .8rem;
+}
+.marea-kg {
+  font-weight: 600; font-variant-numeric: tabular-nums;
+  text-align: right; white-space: nowrap;
+  min-width: 4.5rem;
+}
+.marea-kg.is-alert { color: var(--critical); }
+.marea-kg.unset { font-weight: 400; color: var(--ink-3); font-size: .8rem; }
+.mt-hint { margin-top: .5rem; font-size: .8rem; color: var(--ink-3); }
+
+@media (max-width: 560px) {
+  .mrow-kg { font-size: 1.3rem; }
+}
+
+/* ====================================================================
+   Demo mode. Loud on purpose — the one state where every number on screen
+   is invented, and the only one a person could act on and be wrong.
+   ==================================================================== */
+.demo-strip {
+  padding: .4rem .8rem;
+  background: var(--warning-wash);
+  border-bottom: 1px solid var(--border);
+  color: var(--warning-ink);
+  font-size: .8rem;
+  text-align: center;
+}
+.demo-strip b { font-weight: 700; }
+/* No theme override needed: --warning-ink is already redefined for both dark
+   paths at the top of this file, so the token carries the theme by itself. */

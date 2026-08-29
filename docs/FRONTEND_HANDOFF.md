@@ -35,6 +35,13 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
 > only for the devices, which have write-only access. If a query returns empty
 > where you expect rows, check the session first.
 
+The shipped dashboard gets its session with `auth.signInAnonymously()` —
+**Authentication → Sign In / Providers → Allow anonymous sign-ins** must stay
+ON in the project. An anonymous *session* carries the `authenticated` role
+(this is unrelated to the anon *key* the devices hold); there are no staff
+accounts. Email/password sign-in remains a supported fallback
+([../web/README.md](../web/README.md) §3).
+
 ---
 
 ## 3. The one thing to read: `device_overview`
@@ -48,16 +55,18 @@ const { data } = await supabase.from('device_overview').select('*')
 | Column | Type | Meaning |
 | --- | --- | --- |
 | `device_id` | text | `BWL-001` … `BWL-032`. Stable identity — survives board replacement |
-| `area` | text | `D` Darshanarthi, `T` Tiffin, `M` Mahtma. `null` until deployed |
-| `item_slot` | int | 1–5, physical label on the station. `null` until deployed |
+| `location` | text | `D` Darshanarthi, `M` Mahatma, `T` Tiffin, `R` reserved. `null` until deployed |
+| `food_slot` | int | 1–8 dish position on the station. **Not unique** — see below. `null` for reserved |
+| `current_food` | text | what this slot is serving right now, or `null` outside service hours |
+| `current_meal` | text | `Breakfast` / `Lunch` / `Dinner`, or `null` |
 | `label` | text | free text you set |
-| `location` | text | free text you set |
 | `timezone` | text | IANA zone, drives service-hour logic |
 | `reported` | bool | has this device *ever* reported |
 | `updated_at` | timestamptz | last report |
 | `stale_for` | interval | `now() - updated_at` |
 | `in_service` | bool | is it currently within a meal-service window |
-| `offline` | bool | **should be reporting and is not** — the alarm |
+| `offline` | bool | **should be reporting right now and is not** — the in-window alarm |
+| `missed_last_service` | bool | slept through the most recently completed service window — the alarm that survives the dark hours |
 | `awaiting_deployment` | bool | registered, never heard from — not a fault |
 | `data_is_stale` | bool | outside service hours: numbers are last-known, not live |
 | `stack_count` | int | **0–4 bowls — the primary number** |
@@ -78,18 +87,36 @@ const { data } = await supabase.from('device_overview').select('*')
 These distinctions are the difference between a useful dashboard and one that
 cries wolf.
 
-### `offline` vs `awaiting_deployment` vs `data_is_stale`
+### `offline` vs `missed_last_service` vs `awaiting_deployment` vs `data_is_stale`
 
 | State | Meaning | UI treatment |
 | --- | --- | --- |
 | `awaiting_deployment` | registered but never installed | grey / hide from the stock view |
-| `data_is_stale` | outside service hours; last known values | show, marked "as of <time>" |
-| `offline` | **should be reporting and is not** | **alarm** |
+| `data_is_stale` | outside service hours; last known values | show, marked "as of <date time>" |
+| `offline` | should be reporting **right now** and is not (died mid-window) | **alarm**; clears when the window closes |
+| `missed_last_service` | reported nothing during the most recently **completed** window | **alarm**, and it persists between meals |
 
-`offline` is already service-hour aware — it is only true when the device ought
-to be awake. **Do not compute your own staleness alarm from `updated_at`**: at
-16 dark hours a day that would false-alarm on every healthy device and bury the
-one that genuinely failed.
+The two alarms are complementary. `offline` is gated on the service window, so
+outside meals it is false for every device — which is correct, but it made a
+unit dead for six days indistinguishable from a healthy unit between meals.
+`missed_last_service` closes that gap: true when the device was not alive at
+the *close* of the last completed window (`updated_at` < window end −
+`offline_after()`), gated on deployment (a spare parked at `R` has no service
+to miss), and it stays true until the device reports again. A healthy device
+is at most ~40 s stale at close, so the threshold cannot flag a normal
+shutdown — but a station switched off mid-service *is* flagged, deliberately:
+field use showed a unit powered off mid-lunch reading healthy all afternoon. The dashboard treats either flag as "offline": the
+last value is kept on screen but rendered red, because blanking it would send
+someone to a station the screen just went silent about.
+
+Known, deliberate limit: a site holiday flags every deployed device until the
+next served meal — a closure looks exactly like a fleet outage, and during a
+trial arguably is one.
+
+**Do not compute your own staleness alarm from `updated_at`**: at 16 dark hours
+a day that would false-alarm on every healthy device and bury the one that
+genuinely failed. Both flags above are computed server-side, service-hour
+aware, in each device's own timezone.
 
 ### `stack_status` — trust the count only when `ok`
 
@@ -120,6 +147,19 @@ measurement does not have.
 | `critical` | ≤ 10% | alert — charge or swap |
 | `null` | — | "no battery", **never** a flat-battery icon |
 
+**The band is hysteretic**, so those percentages are the *falling* edges. A
+discharging cell leaves `medium` below 35%, but a charging one does not re-enter
+it until 40%. This is deliberate — without it a cell resting on a boundary
+alternates bands indefinitely on measurement noise, and every alternation is a
+row in `status_events`.
+
+Two consequences for the UI:
+
+- **Do not infer a percentage from the band**, in either direction. The band
+  edges are not fixed points.
+- A band that has not changed while `battery_mv` clearly has is **correct**, not
+  a stale reading. Render the band; if you need the trend, use `battery_mv`.
+
 `null` means **no cell detected**, which is not the same as flat. The device
 also rejects implausible readings — anything a lithium cell cannot produce
 means the *measurement* is broken, and it reports `null` rather than a
@@ -135,26 +175,108 @@ from index 0. Rendering it as a vertical column is the intuitive view.
 
 ---
 
+## 4b. Weight, and the Master Dashboard
+
+A dish carries a **per-bowl weight** alongside its name, and
+`public.slot_quantity` turns bowl counts into kilograms for the Master
+Dashboard. Three rules matter more than the rest.
+
+### Grams, as an integer
+
+`meal_food_mapping.bowl_weight_g` and `meal_menu_template.bowl_weight_g` store
+**whole grams**, not kilograms. The dashboard sums products across up to five
+devices and three areas per slot; doing that in binary floating point puts
+visible drift on a screen that shows one decimal. Divide by 1000 exactly once,
+at render. The column is bounded to 100 g … 50 000 g so a units mix-up
+(kilograms typed into a grams field, or the reverse) is a 400 at the edge
+rather than a dashboard reading 14 000 kg.
+
+### A missing weight is NULL, never zero
+
+The rule the whole schema is built on, and it bites hardest here. `0` would
+render a full counter as "0.0 kg remaining" the moment someone typed a dish
+name and forgot the weight — sending staff to refill something that is full.
+`NULL` renders as "weight not set" and prompts. Never coalesce it.
+
+### Grouped by slot number, across every area
+
+`slot_quantity` has **one row per `food_slot`**, not per `(location,
+food_slot)`. A slot number means the same dish position in all three halls, and
+the kitchen cooks against the site-wide figure. This is the one place its
+grouping differs from `slot_overview`, and the reason it is a separate view.
+
+Its arithmetic is **sum-then-multiply**, not multiply-then-sum:
+
+```
+slot_total = SUM over areas ( bowls(area, slot) x weight(area, slot) )
+```
+
+The obvious formula — total bowls × one weight — is wrong whenever the halls
+serve different dishes at the same position, which they do. If Darshanarthi
+runs Curry at 4.5 kg while Tiffin runs Bhaji at 3.0 kg, there is no single
+weight to multiply by. When the halls agree (the normal case) this reduces
+exactly to `total_bowls × W`, so nothing is lost.
+
+| Column | Meaning |
+|---|---|
+| `food_slot` | the grouping key |
+| `dishes` | distinct dish names at this position, sorted. Usually one; more is not an error |
+| `bowl_weight_g` | the per-bowl weight **only when every weighed area agrees**; NULL when they differ |
+| `bowls_trusted` | bowls across all areas, `stack_status = 'ok'` only. NULL, not 0, when nothing reported |
+| `est_weight_g` | the headline, in grams. NULL when no contributing area has a weight |
+| `capacity_weight_g` | the same sum against capacity, so a bar needs no hardcoded ceiling |
+| `est_is_partial` | **the total is a LOWER BOUND** — some area holds bowls that cannot be weighed |
+| `areas_without_weight` | which areas, so the UI can name them instead of saying "somewhere" |
+| `areas` | per-hall breakdown as jsonb: location, dish, `bowl_weight_g`, `bowls_trusted`, `bowls_capacity`, `devices`, plus **`weight_g`** — that hall's own mass, computed by the view so no screen re-derives it. NULL when the hall has no weight **or no reading**; never 0 |
+| `menu_meal_type` / `menu_meal_date` | which meal the dishes and weights came from |
+| `menu_is_live` | false when that meal is not the one currently running |
+
+There is deliberately **no site-wide total** — rice + dal + curry added
+together is arithmetically fine and operationally meaningless. Quantity is only
+meaningful per dish, so totals stop at the slot.
+
+**Render `est_is_partial` as `≥`.** It is the same notation `deviceStack()`
+already uses for a degraded stack's count, and reusing it beats inventing a
+second vocabulary for "real but incomplete". A total that silently drops an
+unweighed area reads as complete, and a kitchen under-orders against it.
+
+### Which slots appear
+
+A slot earns a row **once at least one of its devices has ever reported**
+(`having bool_or(coalesce(s.reported, false))`). That hides units that are
+registered and assigned but never powered on — the backups parked at slot 5 —
+so the screen carries no permanent "no data" row to learn to ignore.
+
+The gate is deliberately *has ever reported*, not *is reporting now*. A slot
+whose devices all die mid-service **keeps its row**, its last known figure and
+its offline flags. Vanishing at the moment something breaks is the one
+behaviour a stock screen must not have.
+
 ## 5. Writing configuration
 
 `authenticated` may update exactly these columns on `devices`:
 
 ```
-area, item_slot, label, location, timezone
+location, food_slot, label, timezone
 ```
 
 ```ts
 await supabase.from('devices')
-  .update({ area: 'D', item_slot: 3, label: 'Dal counter' })
+  .update({ location: 'D', food_slot: 3 })
   .eq('device_id', 'BWL-001')
 ```
 
 Constraints the UI should enforce before submitting:
 
-- `area` ∈ `D` | `T` | `M`
-- `item_slot` ∈ 1–5
-- **`(area, item_slot)` is unique** — assigning a taken position returns a
-  unique-violation. Show which device currently holds it.
+- `location` ∈ `D` | `M` | `T` | `R`
+- `food_slot` ∈ 1–8 (only 1–5 currently deployed)
+- **`(location, food_slot)` is NOT unique, deliberately.** Several stacks serve one
+  dish position — Darshanarthi slot 1 has three. Do not treat a shared position as
+  a conflict.
+
+> `label` names the physical position, never the dish. What sits in slot 3 changes
+> with the meal; that lives in `meal_food_mapping`. See
+> [meal_mapping.md](meal_mapping.md).
 
 > **`device_id` is not updatable, by design.** It is the installation's identity
 > and the key every history row hangs off.
@@ -175,6 +297,11 @@ Rows exist **only on real change**, not per report — so consecutive rows are
 genuine transitions, and the gaps between them are steady state. Good for a
 step chart; wrong for assuming regular sampling.
 
+A device sends at most **one round of writes every 5 s**. Changes occurring
+inside a window are batched into the next one, each keeping its own
+`recorded_at` — so several rows can share an arrival instant while describing
+moments up to 5 s apart. Order by `recorded_at`, never by `id` or `received_at`.
+
 | Column | Notes |
 | --- | --- |
 | `recorded_at` | when it **happened** — backdated for events buffered offline |
@@ -185,6 +312,15 @@ step chart; wrong for assuming regular sampling.
 `recorded_at` is reconstructed from a device-reported age, because the device
 has no clock. It can be meaningfully earlier than `received_at` after a network
 outage — that is correct, not a bug.
+
+A worked example of using these fields honestly — the trial dashboard's
+reading-status band derives *silence* from a change-only log like this: a long
+gap that ends in a `reason = 'boot'` row means the device was powered off for
+most of it (paint nothing); the live tail is trusted only up to
+`device_overview.updated_at`, since the heartbeat PATCHes it even when no event
+is appended; and "offline right now" comes solely from the server's `offline`
+flag, never from a client-side gap heuristic — a healthy device produces no
+events for hours while perfectly alive.
 
 ---
 
@@ -198,34 +334,61 @@ supabase.channel('bowlstack')
   .subscribe()
 ```
 
-> Enable the publication only if you need it. Each device updates every 60 s, so
-> 32 devices produce ~46k broadcast messages/day. Polling `device_overview`
-> every 15–30 s is usually enough for a kitchen dashboard.
+> Enable the publication only if you need it. Each device updates **at least
+> every 20 s** and immediately on any real change, so 24 deployed units over an
+> ~8 h service day produce **~35k broadcast messages/day**.
+
+> **Realtime cannot detect `offline`.** Going offline is the *absence* of an
+> update, so no `postgres_changes` event ever fires for it — the flag is computed
+> from `now()` at query time. You must poll `device_overview` to see it. The trial
+> dashboard polls every 15 s for exactly this reason — during service. Outside
+> every meal window it idles to one poll per **10 minutes**: powered-off devices
+> cannot change the rows, so a fast poll there is pure egress. A hidden tab does
+> not poll at all; returning to it refreshes immediately.
+
+**How fast is offline?** `offline` goes true once a device that *should* be
+reporting has been silent for `public.offline_after()` — currently **40 s**. With
+the dashboard's 15 s poll that is **40–55 s** from the device actually dying.
+Retune it with one `CREATE OR REPLACE` of `offline_after()` in the SQL editor;
+it must stay above the firmware heartbeat plus one retry, or healthy devices
+alarm between their own posts. `missed_last_service` needs no threshold at all —
+it flips when a completed window passes with no report.
 
 ---
 
 ## 8. The views to build
 
+### Master view — quantity per dish position, in kilograms
+
+Reads `slot_quantity`. One card per slot number across all areas, itemised by
+serving hall, with that slot's own total and no site-wide one. See §4b — in
+particular, render `est_is_partial` as `≥` and never coalesce a NULL weight to
+zero.
+
 ### Stock view — the primary screen
 
-Bowl counts grouped by **area**, so remaining stock per item is visible at a
-glance across all three areas. Group by `area`, order by `item_slot`.
+Remaining stock per dish, across all three areas. **Read `slot_overview`, not
+`device_overview`** — several stacks serve one dish position, so the number is the
+sum across them. Group by `location`, order by `food_slot`.
 
 Slots are physical positions. **What food sits in slot 3 changes with the meal**
 — breakfast, lunch and dinner rotate through Dal/Kadhi, Rice, Curry, Roti and so
-on. The slot→food mapping is **front-end configuration and is not modelled in
-the database yet** — it is yours to design.
+on. The slot→food mapping lives in `meal_food_mapping` (per date) with a weekly
+plan in `meal_menu_template` (per weekday) — see
+[meal_mapping.md](meal_mapping.md) for the full contract, including why the
+views never read the template directly.
 
 ### Health view
 
 Battery, charging, `sensors_online`, `firmware`, `offline`,
 `awaiting_deployment`. This is what lets the kitchen in-charge tell the service
 counter in-charge which station needs attention — so sort by severity, not by
-device ID.
+device ID. (The trial dashboard renders this as a symbolic roster — one glyph
+line per device — with the sentences on each device's own page.)
 
 ### Configuration page
 
-Assign `area`, `item_slot`, `label` per device. Also where the slot→food mapping
+Assign `location`, `food_slot`, `label` per device. Also where the slot→food mapping
 per meal will live.
 
 ---
@@ -240,7 +403,15 @@ Meal windows (fleet defaults, per-device overrides possible):
 | lunch | 11:30–14:00 |
 | dinner | 18:30–21:00 |
 
-Evaluated in each device's `timezone` with a 10-minute margin at both ends.
+Evaluated in each device's `timezone`. The edges are asymmetric: a **90-second
+boot grace after opening** (power-on + WiFi join + first report) and a **sharp
+close**. The old ±10-minute margin alarmed the whole fleet at both edges of
+every meal — before opening (window "open", devices not yet booted) and after
+close (devices legitimately off, still "expected").
+
+> **Trial state:** the live project temporarily runs debug windows (breakfast
+> 06:30–09:30, lunch 11:30–14:30, dinner **16:30**–21:30). The table above is
+> the real schedule, to be restored before clean trial data.
 
 A stack is **0–4** bowls. A device replaced in the field keeps its `device_id`;
 only `mac` changes.

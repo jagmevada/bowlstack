@@ -108,7 +108,23 @@ void SensorArray::maybeRecover(uint8_t level, uint32_t now) {
   if ((int32_t)(now - c.nextRecoverMs) < 0) return;
   c.nextRecoverMs = now + config::RECOVER_RETRY_MS;
   Serial.printf("%-3s: attempting recovery\n", config::SENSORS[level].name);
-  initSensor(level);
+
+  // recover(), NOT initSensor(): the XSHUT reset is the point.
+  //
+  // demote() deliberately leaves the part powered, so a sensor that failed for
+  // any reason other than losing power still holds its assigned 0x30..0x33.
+  // initSensor() rebuilds the driver object -- whose cached address is the 0x29
+  // default -- and probes there, which a part sitting at 0x31 does not answer.
+  // The attempt therefore FAILED and printed "init failed, parked in reset",
+  // and only the next attempt 15 s later could succeed, because that first
+  // failure was what finally put the part in reset.
+  //
+  // Two consequences, both bad in the field: every automatic recovery took
+  // 30 s instead of 15, and the log accused a healthy sensor of a hard init
+  // failure every single time. recover() drives XSHUT low first, so the part
+  // comes back at 0x29 where the fresh driver is already looking, and the first
+  // attempt works.
+  recover(level);
 }
 
 void SensorArray::begin() {

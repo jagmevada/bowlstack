@@ -1,0 +1,12 @@
+{
+  "name": "bowlstack-dashboard-test",
+  "private": true,
+  "type": "module",
+  "description": "Render smoke test for the dashboard. The app itself has no build step and no dependencies; jsdom is needed only to run this.",
+  "scripts": {
+    "test": "node smoke.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "^29.1.1"
+  }
+}

@@ -15,8 +15,11 @@ warning when a station is running short.
 | [docs/waveshare_port.md](docs/waveshare_port.md) | port to the ESP32-S3 touch board — pin budget, LVGL stack, bring-up |
 | [docs/boot_time.md](docs/boot_time.md) | **project-independent**: finding and fixing boot lag on ESP32-S3 + LVGL + LovyanGFX. Written to be copied into other projects on the same stack |
 | [docs/supabase.md](docs/supabase.md) | schema, write model, security, setup |
+| [docs/meal_mapping.md](docs/meal_mapping.md) | device assignment, meal-wise food mapping, TypeScript interfaces and queries |
 | [docs/frontend.md](docs/frontend.md) | front-end planning and open design questions |
+| [web/README.md](web/README.md) | the field-trial dashboard — bring-up, deployment, and what to collect |
 | [docs/FRONTEND_HANDOFF.md](docs/FRONTEND_HANDOFF.md) | **self-contained** contract for building the UI against Supabase |
+| [docs/PHASE1_BOWL_WEIGHT.md](docs/PHASE1_BOWL_WEIGHT.md) | per-bowl weight and the Master Dashboard — what shipped, how to run it, and what is deferred to the load cells |
 
 ---
 
@@ -38,30 +41,50 @@ Levels are numbered bottom-upward, `f1` through `f4`.
 The count reaches Supabase over WiFi, where a front-end presents live stock per
 serving area plus device health.
 
+Each dish also carries a **per-bowl weight**, entered on the Menu tab, so the
+**Master Dashboard** can state remaining stock in kilograms across the whole
+site — one row per slot number, summed over all three serving areas. Each area
+is weighed against its own dish before the sum, so a slot serving different
+dishes in different halls still totals correctly. See
+[docs/FRONTEND_HANDOFF.md](docs/FRONTEND_HANDOFF.md) §4b.
+
+The dashboard also runs with no backend at all: open `web/index.html?mock=1`
+for a demo fed by generated data that drifts on a timer.
+
 ---
 
 ## Deployment
 
-**32 units**, registered once as `BWL-001` … `BWL-032`. Each is deployed to a
+**32 units**, registered once as `BWL-001` … `BWL-032`. Each is assigned a
 **serving position** of two parts:
 
 | Field | Meaning |
 | --- | --- |
-| `area` | `D` Darshanarthi, `T` Tiffin, `M` Mahtma |
-| `item_slot` | 1–5, the physical label on the station |
+| `location` | `D` Darshanarthi, `M` Mahatma, `T` Tiffin, `R` reserved/future |
+| `food_slot` | 1–8, the dish position on the station |
 
-A unit is installed in one area, physically labelled with one slot, and neither
-changes for the life of the installation — only on failure or reassignment. Both
-stay `NULL` until deployment; the front-end assigns them.
+**24 deployed across 15 dish positions, 8 reserved.** A unit stays where it is for
+the life of the installation — changing only on failure or reassignment.
 
-> **`item_slot` is a position, not a dish.** Which food occupies slot 3 changes
-> with the meal. The slot number is the fixed physical label; the food mapping
-> is front-end configuration and is deliberately not modelled in the database
-> yet — see [docs/frontend.md](docs/frontend.md).
+> **Several stacks share one dish position.** Darshanarthi runs three counters per
+> slot, so remaining stock for a dish is the **sum** of their bowl counts, not any
+> one device's. `(location, food_slot)` is deliberately not unique, and
+> `slot_overview` computes the sum — reading a single device would under-report 3×
+> on the busiest positions.
+
+> **`food_slot` is a position, not a dish.** Which food occupies slot 3 changes
+> with the meal, so it lives in `meal_food_mapping`, keyed by date so past bowl
+> counts stay attributable to the dish that was actually there —
+> see [docs/meal_mapping.md](docs/meal_mapping.md).
 
 Devices are powered **only during meal service** — breakfast 06:00–09:00, lunch
 11:30–14:00, dinner 18:30–21:00 — and dark the other ~16 hours. Absence of data
 outside those windows is normal, and every liveness check is service-hour aware.
+
+> **Trial state:** the live project temporarily runs debug windows (dinner
+> preponed to 16:30 among others) so offline logic could be exercised in the
+> afternoon. Restore the real windows above before collecting clean trial data —
+> see [docs/supabase.md](docs/supabase.md) §4.
 
 ---
 
@@ -78,8 +101,8 @@ monitoring.
 | **3 — telemetry** | done. WiFi with captive-portal commissioning, Supabase uplink with offline buffering |
 | **4 — task fabric** | done. FreeRTOS split so measurement never stalls on the network |
 | **5 — indicators & power** | done. Five status LEDs, measured Li-ion SoC curve, charger sense |
-| **6 — fleet stress test** | next. Simulate 32 devices against Supabase |
-| **7 — front-end** | not started. See [docs/FRONTEND_HANDOFF.md](docs/FRONTEND_HANDOFF.md) |
+| **6 — fleet stress test** | in progress. `esp32dev-fleet` simulates `BWL-002`…`032` against the live project. Known sim gap: its ~60 s post cadence exceeds the 40 s offline threshold, so simulated units flap offline on the dashboard — see [docs/firmware.md](docs/firmware.md) §7 |
+| **7 — front-end** | **live** — v1.20 on GitHub Pages: five screens, weekly-menu template with morning auto-apply, symbolic status throughout (glyphs + battery bars on Stock and the Health roster), colour-washed areas with latched headings, swipe navigation, an honest reading-status timeline, service-hour-aware polling. 239-assertion smoke suite. See [web/README.md](web/README.md) |
 
 ### Verified on hardware
 
@@ -104,8 +127,23 @@ per-device JWTs to replace the shared anon key.
 ```
 supabase/schema.sql            -- drops and rebuilds; idempotent
 supabase/register_devices.sql  -- BWL-001 .. BWL-032
-supabase/smoke_test.sql        -- 14 assertions; expect ALL PASS
+supabase/assign_devices.sql    -- permanent location/food_slot assignment
+supabase/seed_meal_mapping.sql -- sample menus, for the front-end test bed
+supabase/reset_spares.sql      -- restores awaiting_deployment for the reserved 8
+supabase/smoke_test.sql        -- 25 assertions; expect ALL PASS
 ```
+
+On a database that is **already live**, never re-run `schema.sql`. Additive
+changes ship as their own idempotent file:
+
+```
+supabase/weekly_menu_and_offline.sql  -- weekly menu template, missed_last_service,
+                                      -- service-window edge fix; applied 2026-08-02
+supabase/migrate_bowl_weight.sql      -- per-bowl weight + slot_quantity (the Master
+                                      -- Dashboard); safe to run mid-trial
+```
+
+See [docs/supabase.md](docs/supabase.md) §1.
 
 > `schema.sql` **drops the `devices` registry too**, so re-running it always
 > leaves the fleet unprovisioned. `register_devices.sql` is part of the same
@@ -171,3 +209,12 @@ inside third-party libraries.
 bowl". An impossible stack reports a fault, not a count. Each of these started
 as a bug where the firmware sounded confident and was wrong — the pattern is
 deliberate throughout.
+
+**Every threshold in this firmware is doubled.** Bowl presence, battery band,
+cell presence, charger sense — each has a separate rising and falling edge. A
+single-threshold classifier oscillates whenever its input rests on the
+threshold, and real inputs rest on thresholds constantly: that is what a
+threshold *is*. Filtering alone is not a substitute, because a quiet signal
+parked on an edge still flips on the last surviving millivolt. Both battery
+faults found on the bench were this, and each one turned measurement noise into
+a stream of Supabase writes.

@@ -27,10 +27,21 @@ logo128.png
 # untracked by luck rather than by rule, and one `git add web/` would have put
 # a live key in the history. That has happened in this repo once already; see
 # the include/secret*.h note above. config.example.js is the committed template.
+#
+# It is written by tools/make_web_config.py locally, and by the Pages workflow
+# from repository secrets at deploy time -- so nothing needs it in the history.
 web/config.js
 
 # Third-party, 25 MB, and reproducible from package-lock.json.
 node_modules/
+
+# Dashboard test harness. The app itself has no dependencies; jsdom is installed
+# only to run web/test/smoke.mjs.
+#
+# The lock file is the line that earns its keep: `node_modules/` above already
+# matches at any depth, but nothing matched web/test/package-lock.json, and it
+# was sitting untracked in the working copy when these two branches met.
+web/test/package-lock.json
 
 # Reference material for the water-dispenser port: the 4.3B schematic PDF and
 # the two handoff specs. Kept out of the repo at the owner's request -- they
