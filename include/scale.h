@@ -1,13 +1,25 @@
-// The weighing assembly: two load cells, one platform, one number.
+// The weighing assembly: three load cells, one platform, one number.
 //
-// TWO CELLS UNDER ONE PLATFORM SUM, THEY DO NOT AVERAGE. Each cell carries the
+// THREE, AND THAT IS A MECHANICAL FACT RATHER THAN A PREFERENCE. Two cells
+// leave the platform free to rock about the line joining them, so the reading
+// depends on where a hand last touched it; three points define a plane and it
+// cannot rock at all. The prototype ran two, weighed correctly and wobbled, and
+// nothing in software fixes that.
+//
+// CELLS UNDER ONE PLATFORM SUM, THEY DO NOT AVERAGE. Each cell carries the
 // share of the load that its corner takes, and those shares change as the bowl
 // moves across the platform -- but their SUM is the total force regardless of
 // where it sits. That is the whole reason a multi-cell platform works, and it
 // is why the calibration below has exactly one gain constant, applied to the
 // sum, rather than one per cell:
 //
-//     total_g = (countsA + countsB - zeroA - zeroB - tareA - tareB) / countsPerGram
+//     total_g = (sum of counts - sum of zeros - sum of tares) / countsPerGram
+//
+// THE CONSTANT DID NOT CHANGE WHEN THE THIRD CELL ARRIVED, which is the useful
+// part of that identity. A load split three ways still produces the same total
+// counts, so counts-per-gram describes the ASSEMBLY and is invariant to how
+// many corners share the load. Recalibrate anyway -- but if the figure lands
+// far from the two-cell one, something other than the cell count changed.
 //
 // The per-cell figures the UI shows are that same constant applied to each cell
 // alone, so they are each cell's SHARE of the load and they add up to the
@@ -15,10 +27,10 @@
 // placed off-centre, a mount fouling, or one cell not working -- none of which
 // the total can tell you.
 //
-// The assumption is that the two cells have equal sensitivity, which is what
-// buying a matched pair means. If they do not, the split will be wrong even
-// though the total is right, and the fix is per-corner calibration -- a
-// different and much longer procedure than the one here.
+// The assumption is that the cells have equal sensitivity, which is what buying
+// a matched set means. If they do not, the split will be wrong even though the
+// total is right, and the fix is per-corner calibration -- a different and much
+// longer procedure than the one here.
 //
 // THE CELLS GET THEIR OWN TASK. CLAUDE.md's rule is that one task owns a
 // subsystem and state crosses task boundaries only as immutable snapshots under
@@ -35,7 +47,11 @@
 
 namespace scale {
 
-static const uint8_t CELLS = 2;
+// MUST EQUAL ui::CELLS in ui_state.h. The two are separate because ui_state.h
+// may not include a driver header -- see the note there -- and a mismatch is
+// caught at compile time by the static_assert in loadcell_main.cpp rather than
+// by a cell quietly missing from the dashboard.
+static const uint8_t CELLS = 3;
 
 // Trimmed moving average over raw counts, the same shape as TrimmedWindow but
 // signed and sized for this rate. A load cell's noise is not symmetric in
@@ -166,6 +182,21 @@ void setDecimals(uint8_t d);
 // Steps 1 -> 2 -> 3 -> 1, for a menu row that is tapped. Returns the new value.
 uint8_t cycleDecimals();
 
+// --- the per-cell breakdown on the dashboard -------------------------------
+// DISPLAY ONLY, and persisted for the same reason the precision is: it belongs
+// to the unit and to the job somebody is doing with it, not to the firmware
+// image, so a power cycle in the middle of levelling a platform must not turn
+// it back off.
+//
+// Off by default. The dashboard exists to answer one question, and three
+// supporting numbers on it are for setup rather than for service.
+bool showCells();
+
+// Flips it, for a menu row that is tapped. Returns the new value. Takes effect
+// on the scale task like every other setting here -- see the note beside
+// wantDecimals_ for why the deferral is about `prefs_` and not about the value.
+bool toggleShowCells();
+
 // --- the automatic power-up tare -------------------------------------------
 // WHAT IT IS FOR: a serving station is powered up with whatever tray or pot is
 // already sitting on it, and asking somebody to remember to press Tare before
@@ -242,6 +273,7 @@ struct Snapshot {
 
   uint8_t window;    // samples currently averaged
   uint8_t decimals;  // decimal places the kilogram reading is shown to
+  bool showCells;    // per-cell breakdown under the dashboard total
   float calMassG;   // reference mass last calibrated against
   uint8_t online;  // cells currently producing conversions
   bool zeroed;     // every online cell has a stored platform zero
@@ -258,14 +290,17 @@ struct Snapshot {
   uint32_t seq;
 };
 
-// Opens both buses, brings up both converters, restores tare and calibration
-// from NVS, then starts the task. Blocking, and called from setup() -- the
-// converters' own power-up and self-calibration take tens of milliseconds each
-// and there is nothing useful to show until they are done.
+// Opens the cell bus, brings up the mux and every converter behind it, restores
+// tare and calibration from NVS, then starts the task. Blocking, and called
+// from setup() -- the converters' own power-up and self-calibration take tens
+// of milliseconds each and there is nothing useful to show until they are done.
 //
-// MUST BE CALLED AFTER gfx.init(). Cell A shares the touch controller's I2C
-// port, which LovyanGFX initialises when the display starts; there is no second
-// driver on that peripheral and this code must not become one.
+// NO LONGER REQUIRES gfx.init() FIRST, though it is still called after it. Cell
+// A used to share the touch controller's I2C port, so this had to run after
+// LovyanGFX had opened it; the cells own port 1 now and this function opens
+// that itself. What has not changed is that both go through lgfx rather than
+// one of them opening Wire -- there must never be a second driver on a
+// peripheral LovyanGFX holds.
 void begin();
 
 // A copy, taken under the mutex. Callers must not hold references into it.
@@ -301,14 +336,33 @@ void tare();
 // questions: tare() zeroes the assembly so the next thing placed on it reads
 // its own weight, while this zeroes one corner against the others.
 //
-// It is the setup tool. Two cells under one platform rarely start level -- one
+// It is the setup tool. Cells under one platform rarely start level -- one
 // mount sits proud, one cell has more of the platform over it -- and the raw
 // counts say so loudly while the total, being a sum, says nothing at all. Being
-// able to zero A and B independently is how you find out whether an uneven
+// able to zero each corner independently is how you find out whether an uneven
 // split is the mounting or the cell.
+//
+// ON THREE CELLS IT ALSO FINDS THE CORNER THE PLATFORM IS NOT SITTING ON, which
+// two cells could not show: with two, any load is shared and a proud mount only
+// skews the split, but with three a platform can genuinely bridge one corner
+// and leave it reading nothing while the total stays correct.
 //
 // A tare taken this way is persisted like any other.
 void tareCell(uint8_t index);
+
+// Ask the scale task to run the full-depth converter self-test on every cell:
+// bridge, internally-shorted inputs, and channel 2, at sixteen samples each.
+//
+// RETURNS IMMEDIATELY -- it only raises a flag. The test itself blocks the
+// measuring task for several seconds, because at 10 SPS every sample is 100 ms
+// and the answer is worth more than the samples it costs. It must run THERE
+// rather than on the caller's task: it shorts the PGA inputs and re-runs the
+// offset calibration on parts scaleTask is polling, and two tasks writing one
+// converter's configuration produces a wrong reading rather than a crash.
+//
+// The filters are cleared when it finishes; every sample taken before the
+// re-calibration describes a different zero.
+void requestSelfTest();
 
 // Why a calibration was refused, rather than a bare bool.
 //

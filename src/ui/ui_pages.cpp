@@ -70,6 +70,7 @@ void (*onCycleAvg_)(void) = nullptr;
 void (*onCyclePrecision_)(void) = nullptr;
 void (*onRestore_)(void) = nullptr;
 void (*onPlatformZero_)(void) = nullptr;
+void (*onToggleCells_)(void) = nullptr;
 
 // The last mass the snapshot carried, cached so showOnly() can re-prefill the
 // keypad without a State to hand. pagesTick() keeps it current.
@@ -98,6 +99,7 @@ enum : uint8_t {
   ROW_SCALE_CALIBRATE,
   ROW_SCALE_CLEAR,
   ROW_SCALE_AVERAGE,
+  ROW_SCALE_CELLS,
   ROW_SCALE_RESTORE,
 };
 
@@ -107,6 +109,7 @@ void doCycleAvg() { if (onCycleAvg_) onCycleAvg_(); }
 void doCyclePrecision() { if (onCyclePrecision_) onCyclePrecision_(); }
 void doRestore() { if (onRestore_) onRestore_(); }
 void doPlatformZero() { if (onPlatformZero_) onPlatformZero_(); }
+void doToggleCells() { if (onToggleCells_) onToggleCells_(); }
 
 // --- the two navigation buttons -------------------------------------------
 // Forward declared because both live on pages built further down, and both do
@@ -149,8 +152,66 @@ void closeAll() {
   showOnly(nullptr);
 }
 
+// --- lazy page construction ------------------------------------------------
+// THE DETAIL PAGES ARE BUILT ON FIRST OPEN, NOT AT BOOT, and the numbers are
+// why. Measured on the panel, buildPages() took 3.27 s, of which:
+//
+//     menu + home + weight   ~1000 ms   <- the first screen, must be eager
+//     WiFi                    1343 ms   <- a full keyboard, ~40 widgets
+//     Calibrate                343 ms   <- a keypad
+//     Battery                  230 ms
+//     Diagnose                  86 ms
+//     Scope                    134 ms
+//
+// That is 2.1 s of a boot spent constructing screens nobody has asked for, on a
+// device whose splash is what somebody is watching while it happens. The WiFi
+// page is the extreme case: over a second to build a passphrase keyboard that
+// most units will never show, because the network is configured once.
+//
+// The CONTAINER is still created eagerly -- makeDetail() is a single object and
+// showOnly() needs something to hide -- so only the contents move.
+//
+// The cost does not vanish, it moves to the first open of each page: ~1.3 s the
+// first time somebody taps WiFi. That is the right place for it. A deliberate
+// tap on a settings row can afford a second; a boot cannot, and the person
+// paying at boot is usually not the person who wanted the page.
+bool built_[7] = {false, false, false, false, false, false, false};
+
+// Forward declared: every page's close handler is back(), and back() is defined
+// below because it is part of the navigation rather than of construction.
+void back();
+
+void ensureBuilt(lv_obj_t *page) {
+  if (page == detailCalib_ && !built_[4]) {
+    built_[4] = true;
+    buildCalibPage(detailCalib_);
+    calibOnClose(back);
+    // The keypad is prefilled by showOnly() on every entry, including this one,
+    // so a page built moments ago still opens with the stored mass.
+  } else if (page == detailWifi_ && !built_[1]) {
+    built_[1] = true;
+    buildWifiPage(detailWifi_);
+    wifiOnClose(back);
+  } else if (page == detailBatt_ && !built_[2]) {
+    built_[2] = true;
+    buildBatteryPage(detailBatt_);
+    batteryOnClose(back);
+  } else if (page == detailSensor_ && !built_[5]) {
+    built_[5] = true;
+    buildScope(detailSensor_);
+    scopeOnClose(back);
+  } else if (page == detailDevice_ && !built_[6]) {
+    built_[6] = true;
+    buildDevicePage(detailDevice_);
+    deviceOnClose(back);
+  }
+}
+
 void push(lv_obj_t *page) {
   if (!page) return;
+  // BEFORE showOnly(), because showOnly() reaches into the calibration page to
+  // re-prefill the keypad and there has to be a keypad to reach into.
+  ensureBuilt(page);
   if (depth_ < 4) stack_[depth_++] = page;
   showOnly(page);
 }
@@ -329,6 +390,14 @@ void buildPages() {
   // better -- which a tap-to-advance row does in one gesture and a sub-page
   // does in four. The current value is the hint on the right.
   menuAddRow(scaleMenu_, "Average", nullptr, doCycleAvg);
+  // A TOGGLE, in the same tap-to-change shape as Average and Precision above
+  // it: the hint on the right says which way it is set, so the row states the
+  // current value rather than only the action.
+  //
+  // It sits under Scale rather than under a Display heading because there is no
+  // Display heading and inventing one for a single row would be a menu built
+  // around a taxonomy instead of around what people do.
+  menuAddRow(scaleMenu_, "Cells on home", nullptr, doToggleCells);
   // THE WAY BACK. Without it, "Clear calibration" could not be allowed to stick
   // -- clearing had to leave the NVS key absent so a reflash with a corrected
   // default could take effect, which meant a unit cleared on purpose came back
@@ -337,28 +406,30 @@ void buildPages() {
   // undo.
   menuAddRow(scaleMenu_, "Restore default", nullptr, doRestore);
 
+  // CONTAINERS ONLY. Each page's contents are built the first time it is
+  // opened -- see ensureBuilt() above for the measurements that moved them.
   detailCalib_ = makeDetail(scr);
-  buildCalibPage(detailCalib_);
-  calibOnClose(back);
-
   detailWifi_ = makeDetail(scr);
-  buildWifiPage(detailWifi_);
-  wifiOnClose(back);
-
   detailBatt_ = makeDetail(scr);
-  buildBatteryPage(detailBatt_);
-  batteryOnClose(back);
-
   detailSensor_ = makeDetail(scr);
-  buildScope(detailSensor_);
-  scopeOnClose(back);
-
   detailDevice_ = makeDetail(scr);
-  buildDevicePage(detailDevice_);
-  deviceOnClose(back);
 
   // Start on the weight view -- what someone walking up to the station wants to
   // see. The menu is one swipe away.
+  //
+  // THE LAYOUT IS FORCED FIRST, AND IT HAS TO BE. lv_tileview_set_tile() is a
+  // scroll: it moves the tileview's content to the tile's coordinates. Until a
+  // layout pass has run, every tile is still at 0,0 -- so the scroll goes to the
+  // menu tile, and the first thing the device shows after a reset is the menu
+  // rather than the weight it was switched on to read.
+  //
+  // This was latent rather than new. It used to work because five full detail
+  // pages were constructed after this point and something in that traffic
+  // happened to lay the tileview out in time; building those pages lazily
+  // removed the accident and the bug surfaced immediately. The accident was
+  // never the reason it worked, so the fix is to state the dependency rather
+  // than restore the traffic.
+  lv_obj_update_layout(scr);
   lv_tileview_set_tile(tv_, tileHome_, LV_ANIM_OFF);
   lastActive_ = nullptr;
   depth_ = 0;
@@ -377,6 +448,7 @@ void pagesOnScaleCycleAvg(void (*cb)(void)) { onCycleAvg_ = cb; }
 void pagesOnScaleCyclePrecision(void (*cb)(void)) { onCyclePrecision_ = cb; }
 void pagesOnScaleRestore(void (*cb)(void)) { onRestore_ = cb; }
 void pagesOnScalePlatformZero(void (*cb)(void)) { onPlatformZero_ = cb; }
+void pagesOnScaleToggleCells(void (*cb)(void)) { onToggleCells_ = cb; }
 
 void pagesTick(uint32_t nowMs) {
   // --- data: always, for every page, visible or not ------------------------
@@ -397,10 +469,19 @@ void pagesTick(uint32_t nowMs) {
   // nouns you must open to learn anything from. menuSetHint compares before
   // writing, so a steady state costs two string compares a frame.
   if (menuRoot_) {
-    const char *cells = "";
-    if (s.scale.online == 0) cells = "no cells";
-    else if (s.scale.online < CELLS) cells = "1 of 2";
-    menuSetHint(menuRoot_, 1, cells);
+    // BUILT FROM THE COUNT rather than written out. The old version read
+    // "1 of 2" as a literal, which was true only because two cells have exactly
+    // one interesting partial state; with three it would have called two
+    // working cells one.
+    static char cells[12];
+    const char *hint = "";
+    if (s.scale.online == 0) {
+      hint = "no cells";
+    } else if (s.scale.online < CELLS) {
+      snprintf(cells, sizeof(cells), "%u of %u", s.scale.online, CELLS);
+      hint = cells;
+    }
+    menuSetHint(menuRoot_, 1, hint);
   }
   if (settingsMenu_) {
     // The Scale row carries the one fact that decides what the whole dashboard
@@ -412,6 +493,13 @@ void pagesTick(uint32_t nowMs) {
     const uint8_t d = s.scale.decimals ? s.scale.decimals : 3;
     snprintf(prec, sizeof(prec), "0.%0*d kg", (int)d, 0);
     menuSetHint(settingsMenu_, ROW_SET_PRECISION, prec);
+  }
+  if (scaleMenu_) {
+    // The Scale menu's own rows, updated whenever it exists rather than only
+    // while it is on screen -- menuSetHint compares before writing, so a hidden
+    // page costs one string compare a frame and is correct the instant it is
+    // opened rather than one frame later.
+    menuSetHint(scaleMenu_, ROW_SCALE_CELLS, s.scale.showCells ? "shown" : "hidden");
   }
   if (scaleMenu_) {
     // The Average row shows the value it will change, which is what makes a

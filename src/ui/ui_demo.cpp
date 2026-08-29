@@ -78,12 +78,13 @@ const float DEMO_COUNTS_PER_G = 106.857f;
 // third file that neither target would naturally own.
 const int32_t DEMO_OVER_RANGE = 8000000;
 
-void withScale(State &s, float aG, float bG, bool calibrated, bool tared, uint8_t online) {
+void withScale(State &s, float aG, float bG, float cG, bool calibrated, bool tared,
+               uint8_t online) {
   s.scale.calibrated = calibrated;
   s.scale.tared = tared;
   s.scale.online = online;
 
-  const float g[CELLS] = {aG, bG};
+  const float g[CELLS] = {aG, bG, cG};
   int32_t total = 0;
   for (uint8_t i = 0; i < CELLS; i++) {
     CellView &c = s.scale.cell[i];
@@ -121,7 +122,14 @@ void withScale(State &s, float aG, float bG, bool calibrated, bool tared, uint8_
     c.rawCounts = (c.state == Cell::Online) ? (c.counts + fakeTare + (int32_t)(i * 53) - 26) : 0;
   }
   s.scale.totalCounts = total;
-  s.scale.totalGrams = calibrated ? (aG + (online > 1 ? bG : 0.0f)) : 0.0f;
+  // SUMMED OVER THE CELLS THAT ARE ONLINE, not written as an expression naming
+  // them. The two-cell version was `aG + (online > 1 ? bG : 0)`, which is the
+  // kind of thing that stays compiling and starts lying the moment a third
+  // share exists -- it would have dropped cell C from every total here while
+  // the per-cell rows above went on showing it.
+  float sumG = 0.0f;
+  for (uint8_t i = 0; i < CELLS && i < online; i++) sumG += g[i];
+  s.scale.totalGrams = calibrated ? sumG : 0.0f;
   s.scale.countsPerGram = calibrated ? DEMO_COUNTS_PER_G : 0.0f;
   // The default the firmware ships with, so the preview and the panel agree
   // about what the Average row says before anyone touches it.
@@ -134,29 +142,41 @@ void withScale(State &s, float aG, float bG, bool calibrated, bool tared, uint8_
   s.scale.decimals = (uint8_t)BOWLSTACK_DECIMALS;
   s.scale.calMassG = (float)BOWLSTACK_CAL_MASS_G;
   s.scale.zeroed = (online == CELLS);
+  // OFF, matching the firmware default, so the preview shows what a unit shows
+  // out of the box. Individual scenarios below turn it on -- the preview has to
+  // render BOTH dashboard layouts or the one nobody checked is the one that
+  // overlaps.
+  s.scale.showCells = false;
 }
 
 State sEmpty() {
   State s = stacked(0);
-  // A tared, calibrated, empty platform. Not exactly zero: two 20 kg cells
-  // drift a gram or two with temperature within minutes of a tare, and a screen
-  // that shows a perfect 0 forever is showing a constant rather than a
-  // measurement.
-  withScale(s, 1.0f, -2.0f, true, true, CELLS);
+  // A tared, calibrated, empty platform. Not exactly zero: 20 kg cells drift a
+  // gram or two with temperature within minutes of a tare, and a screen that
+  // shows a perfect 0 forever is showing a constant rather than a measurement.
+  withScale(s, 1.0f, -2.0f, 0.5f, true, true, CELLS);
   return s;
 }
 
 State sTwo() {
   State s = stacked(2);
   // A bowl placed slightly off-centre: the shares differ, the total does not
-  // care. That asymmetry is the entire reason both cells are on the screen.
-  withScale(s, 612.0f, 638.0f, true, true, CELLS);
+  // care. That asymmetry is the entire reason every cell is on the screen.
+  //
+  // The three shares sum to the same 1250 g the two-cell fixture did, which is
+  // the invariant worth preserving here -- a bowl does not get heavier because
+  // the platform grew a corner, and a fixture that let the total drift would
+  // have made the Device page and the dashboard disagree for no reason.
+  withScale(s, 402.0f, 511.0f, 337.0f, true, true, CELLS);
+  // CELLS SHOWN on the scenario whose whole point is an uneven split, which is
+  // the state somebody turns the setting on to look at.
+  s.scale.showCells = true;
   return s;
 }
 
 State sFull() {
   State s = stacked(4);
-  withScale(s, 4180.0f, 4241.0f, true, true, CELLS);
+  withScale(s, 2610.0f, 3105.0f, 2706.0f, true, true, CELLS);
   return s;
 }
 
@@ -170,11 +190,19 @@ State sDegraded() {
   s.sensorOnline[2] = false;
   s.sensorsOnline = 3;
   s.stack = Stack::Degraded;
-  // ONE CELL DOWN. The total is not "half the weight", it is not a weight at
-  // all -- the missing cell's share is unknown, not zero. The dashboard shows
-  // what the surviving cell reports and flags the assembly, rather than adding
-  // a number that would read as a light bowl.
-  withScale(s, 640.0f, 0.0f, true, true, 1);
+  // ONE CELL DOWN, two surviving. The total is not "two thirds of the weight",
+  // it is not a weight at all -- the missing cell's share is unknown, not zero.
+  // The dashboard shows what the surviving cells report and flags the assembly,
+  // rather than adding a number that would read as a light bowl.
+  //
+  // TWO ONLINE RATHER THAN ONE, deliberately: with three cells the partial case
+  // worth rendering is a platform still carrying most of the load, because that
+  // is the one whose total looks most convincingly like a real weight.
+  withScale(s, 640.0f, 512.0f, 0.0f, true, true, 2);
+  // The rows shown WITH a cell down, because "offline" on one row beside two
+  // live figures is the layout most likely to be wrong and the one that says
+  // most: it is where a reader sees which corner went.
+  s.scale.showCells = true;
   return s;
 }
 
@@ -186,10 +214,10 @@ State sDiscontiguous() {
   s.levels[1] = Level::Present;
   s.stack = Stack::Discontiguous;
   s.stackCount = 0;
-  // Never calibrated: both cells converting, no known mass ever applied, so
+  // Never calibrated: every cell converting, no known mass ever applied, so
   // there is no gram figure and the page shows counts. This is the state every
   // unit is in the first time it boots.
-  withScale(s, 604.0f, 631.0f, false, false, CELLS);
+  withScale(s, 388.0f, 495.0f, 352.0f, false, false, CELLS);
   return s;
 }
 
@@ -201,7 +229,7 @@ State sNoCell() {
   // -1, not 0. "0%" is a claim that the cell is empty; this state is that
   // nothing is known about it, which is a different statement entirely.
   s.batteryPercent = -1;
-  withScale(s, 1902.0f, 1874.0f, true, true, CELLS);
+  withScale(s, 1180.0f, 1402.0f, 1194.0f, true, true, CELLS);
   return s;
 }
 
@@ -213,10 +241,12 @@ State sCritical() {
   s.batteryPinMv = 1104;
   s.wifiConnected = false;
   s.wifiRssi = 0;
-  // NEITHER CONVERTER ANSWERING -- the state of a board with no cells wired,
-  // which is what this branch's first flash will actually look like. Dashes,
-  // not zero.
-  withScale(s, 0.0f, 0.0f, false, false, 0);
+  // NO CONVERTER ANSWERING -- the state of a board with no cells wired, which
+  // is what this branch's first flash will actually look like. It is also what
+  // a missing or unpowered mux looks like from up here, which is why the boot
+  // console says so explicitly rather than leaving three dead cells to be read
+  // as three faults. Dashes, not zero.
+  withScale(s, 0.0f, 0.0f, 0.0f, false, false, 0);
   return s;
 }
 
@@ -226,7 +256,7 @@ State sWeakSignal() {
   // Calibrated but never tared: the factor is known, so grams are real, but
   // they include the platform. A number that is right about the change and
   // wrong about the absolute, which is worth being told.
-  withScale(s, 1240.0f, 1198.0f, true, false, CELLS);
+  withScale(s, 760.0f, 913.0f, 765.0f, true, false, CELLS);
   return s;
 }
 
@@ -238,7 +268,7 @@ State sCharging() {
   s.batteryPinMv = 1274;
   s.chargingKnown = true;
   s.charging = true;
-  withScale(s, 9840.0f, 10120.0f, true, true, CELLS);
+  withScale(s, 6210.0f, 7015.0f, 6735.0f, true, true, CELLS);
   return s;
 }
 

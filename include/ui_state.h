@@ -41,9 +41,14 @@ enum class Stack : uint8_t { Ok, Discontiguous, Degraded };
 enum class Battery : uint8_t { Unknown, Critical, Low, Medium, Good };
 
 // --- the weighing assembly --------------------------------------------------
-// Two cells under one platform. See scale.h for why the total is a SUM and why
-// there is one gain constant rather than two.
-static const uint8_t CELLS = 2;
+// Three cells under one platform -- three points define a plane, two leave it
+// free to rock. See scale.h for why the total is a SUM and why there is one
+// gain constant rather than three.
+//
+// MUST EQUAL scale::CELLS. Restated here rather than shared because this file
+// may not include a driver header, which is the whole point of it; the two are
+// tied together by a static_assert in loadcell_main.cpp.
+static const uint8_t CELLS = 3;
 
 // Mirrors CellState in nau7802.h, restated here because ui_state.h may not
 // include a driver header -- that restriction is the whole point of this file.
@@ -111,6 +116,16 @@ struct ScaleView {
   // The reference mass last calibrated against on this unit. Shown as the
   // Calibrate row's hint and used to pre-fill the keypad.
   float calMassG;
+
+  // Show each cell's share underneath the total on the DASHBOARD, rather than
+  // only on the Diagnose page. Display only, and off by default: the dashboard
+  // is meant to answer one question, and three supporting numbers on it are for
+  // somebody levelling a platform rather than somebody weighing a bowl.
+  //
+  // It earns its place there in spite of that, because levelling means watching
+  // the corners WHILE loading the platform, and a breakdown two menus away gets
+  // read after the load has moved.
+  bool showCells;
 
   uint8_t online;
 };

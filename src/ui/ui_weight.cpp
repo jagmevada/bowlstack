@@ -8,7 +8,7 @@
 //
 // So the breakdown moved to Settings > Diagnose, where it is read deliberately
 // by somebody who came looking for it, and what is left is the total and one
-// button that zeroes both cells.
+// button that zeroes every cell.
 //
 // LAID OUT WITH FLEX, like every other page here. Arithmetic against a fixed
 // anchor cannot express "these must not overlap", it can only happen to satisfy
@@ -21,6 +21,8 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+
+#include "ui_font.h"
 
 namespace ui {
 namespace {
@@ -36,6 +38,20 @@ const uint32_t C_KEY = 0x21262D;
 lv_obj_t *lblCaption;
 lv_obj_t *lblTotal;
 lv_obj_t *lblUnit;
+
+// --- the per-cell breakdown ------------------------------------------------
+// Off by default and shown from Settings > Scale > Cells. It is a SETUP and
+// DIAGNOSIS view living on the dashboard, which is a deliberate exception to
+// the rule that put the breakdown on the Diagnose page: watching three corners
+// while levelling a platform means watching them WHILE loading it, and walking
+// to a menu between adjustments is how a fault gets attributed to the wrong
+// corner.
+//
+// Deliberately small. The total is the number this device exists to show; three
+// supporting figures at 20 px read as what they are without competing with it.
+lv_obj_t *cellBox = nullptr;
+lv_obj_t *lblCellVal[CELLS] = {nullptr, nullptr, nullptr};
+char prevCell_[CELLS][20] = {{0}, {0}, {0}};
 lv_obj_t *lblFlag;
 lv_obj_t *btnTare;
 lv_obj_t *btnSettings;
@@ -163,9 +179,16 @@ void buildWeight(lv_obj_t *parent) {
   //
   // Right-aligned digits in a fixed box also grow leftward from a stationary
   // edge, the way every scale displays a number, instead of jittering sideways.
+  // 56 px, which is LARGER THAN LVGL PROVIDES -- its built-in Montserrat stops
+  // at 48 and this label was already there, so the size had to be generated.
+  // See ui_font.h for the subset and for why 56 and not 64.
+  //
+  // The box grew from 186 to 194 with it, taking the 8 px from the unit label
+  // beside it: at 56 px the worst three-decimal reading is ~193 px wide, and a
+  // number that clips its leading digit is worse than a smaller number.
   lblTotal = lv_label_create(row);
-  lv_obj_set_style_text_font(lblTotal, &lv_font_montserrat_48, LV_PART_MAIN);
-  lv_obj_set_width(lblTotal, 186);
+  lv_obj_set_style_text_font(lblTotal, &font_mass_56, LV_PART_MAIN);
+  lv_obj_set_width(lblTotal, 194);
   lv_obj_set_style_text_align(lblTotal, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
   // CLIP rather than WRAP: wrapping puts a second line underneath, which
   // changes the label's HEIGHT and marks the layout dirty exactly the way the
@@ -176,11 +199,54 @@ void buildWeight(lv_obj_t *parent) {
   lblUnit = lv_label_create(row);
   lv_obj_set_style_text_font(lblUnit, &lv_font_montserrat_20, LV_PART_MAIN);
   lv_obj_set_style_text_color(lblUnit, lv_color_hex(C_MUTED), LV_PART_MAIN);
-  lv_obj_set_width(lblUnit, 34);
+  lv_obj_set_width(lblUnit, 26);
   lv_obj_set_style_text_align(lblUnit, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
   lv_label_set_long_mode(lblUnit, LV_LABEL_LONG_CLIP);
   lv_obj_set_style_pad_bottom(lblUnit, 6, LV_PART_MAIN);
   lv_label_set_text(lblUnit, "");
+
+  // --- the per-cell rows --------------------------------------------------
+  // Hidden unless the Cells setting is on. Built either way, because building
+  // them on demand would mean a layout change on a page that is already redrawn
+  // ten times a second -- and nine small labels cost about nothing, unlike the
+  // keyboard that justified lazy construction elsewhere.
+  cellBox = lv_obj_create(scr);
+  styleFlat(cellBox);
+  lv_obj_set_width(cellBox, LV_PCT(100));
+  lv_obj_set_height(cellBox, LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(cellBox, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(cellBox, 2, LV_PART_MAIN);
+  lv_obj_add_flag(cellBox, LV_OBJ_FLAG_HIDDEN);
+
+  for (uint8_t i = 0; i < CELLS; i++) {
+    lv_obj_t *r = lv_obj_create(cellBox);
+    styleFlat(r);
+    lv_obj_set_width(r, LV_PCT(100));
+    lv_obj_set_height(r, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(r, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_column(r, 4, LV_PART_MAIN);
+    lv_obj_set_flex_align(r, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    // TWO FIXED-WIDTH LABELS, not one string with padding. A proportional font
+    // does not line up columns that were aligned with spaces, and the total
+    // above it already documents what a content-sized label costs on a page
+    // that redraws at 10 Hz.
+    lv_obj_t *name = lv_label_create(r);
+    lv_obj_set_style_text_font(name, &lv_font_montserrat_20, LV_PART_MAIN);
+    lv_obj_set_style_text_color(name, lv_color_hex(C_MUTED), LV_PART_MAIN);
+    lv_obj_set_width(name, 22);
+    lv_label_set_long_mode(name, LV_LABEL_LONG_CLIP);
+    const char nm[2] = {(char)('A' + i), '\0'};
+    lv_label_set_text(name, nm);
+
+    lblCellVal[i] = lv_label_create(r);
+    lv_obj_set_style_text_font(lblCellVal[i], &lv_font_montserrat_20, LV_PART_MAIN);
+    lv_obj_set_width(lblCellVal[i], 194);
+    lv_obj_set_style_text_align(lblCellVal[i], LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+    lv_label_set_long_mode(lblCellVal[i], LV_LABEL_LONG_CLIP);
+    lv_label_set_text(lblCellVal[i], "--");
+  }
 
   // Shown only when something is wrong or unproven. A chip that is lit in the
   // ordinary state teaches people to stop reading the area, which is the
@@ -216,7 +282,7 @@ void buildWeight(lv_obj_t *parent) {
   lv_obj_set_flex_align(actions, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
                         LV_FLEX_ALIGN_CENTER);
 
-  // TARES BOTH CELLS. Zeroing one corner against the other is a setup job and
+  // TARES EVERY CELL. Zeroing one corner against the others is a setup job and
   // lives on Diagnose with the figures that make it meaningful.
   btnTare = lv_button_create(actions);
   lv_obj_set_flex_grow(btnTare, 1);
@@ -273,9 +339,15 @@ void updateWeight(const State &st) {
     // Counts run to seven digits and a sign; kilograms to six characters. They
     // cannot share a size, so the size follows the mode -- set here, on the
     // transition, rather than per frame.
-    lv_obj_set_style_text_font(lblTotal,
-                               s.calibrated ? &lv_font_montserrat_48 : &lv_font_montserrat_28,
-                               LV_PART_MAIN);
+    //
+    // The uncalibrated side stays on the BUILT-IN Montserrat 28 rather than a
+    // generated size, because eight glyphs at 56 px do not fit a 240 px panel
+    // under any label width. It is also the size that keeps the subset font
+    // honest: font_mass_56 has digits and nothing else, and counts need nothing
+    // else either, but there is no reason to spend a second generated size on a
+    // display mode that exists only until somebody calibrates the unit.
+    lv_obj_set_style_text_font(
+        lblTotal, s.calibrated ? &font_mass_56 : &lv_font_montserrat_28, LV_PART_MAIN);
   }
 
   if (s.online == 0) {
@@ -322,7 +394,17 @@ void updateWeight(const State &st) {
   } else if (s.online == 0 && anyWarming) {
     flag = "warming up";
   } else if (s.online < CELLS) {
-    flag = (s.online == 0) ? "no cell talking" : "one cell down";
+    // COUNTED, not named. "one cell down" was right for two cells and would be
+    // wrong for three in the case that matters most -- two corners lost out of
+    // three, reported as one.
+    static char down[16];
+    if (s.online == 0) {
+      flag = "no cell talking";
+    } else {
+      const uint8_t missing = (uint8_t)(CELLS - s.online);
+      snprintf(down, sizeof(down), "%u cell%s down", missing, missing == 1 ? "" : "s");
+      flag = down;
+    }
     flagColor = C_FAULT;
   } else if (!s.tared) {
     // The automatic power-up tare normally clears this within a few seconds of
@@ -341,6 +423,38 @@ void updateWeight(const State &st) {
     }
   }
 
+  // --- the per-cell rows ---------------------------------------------------
+  // The visibility is driven every frame but only WRITTEN on a change, the same
+  // discipline every other widget on this page follows: a flag toggle
+  // invalidates the object, and doing it ten times a second for a value that
+  // changes when somebody opens a menu is ten redraws a second for nothing.
+  if (cellBox) {
+    const bool wantCells = s.showCells;
+    const bool shown = !lv_obj_has_flag(cellBox, LV_OBJ_FLAG_HIDDEN);
+    if (wantCells != shown) {
+      if (wantCells) lv_obj_remove_flag(cellBox, LV_OBJ_FLAG_HIDDEN);
+      else lv_obj_add_flag(cellBox, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (wantCells) {
+      for (uint8_t i = 0; i < CELLS; i++) {
+        const CellView &c = s.cell[i];
+        char cb[20];
+        if (c.state != Cell::Online) {
+          // The SAME refusal the total makes, per corner. A cell that is not
+          // converting has no share -- printing its last one, or a zero, is the
+          // one thing this dashboard exists not to do.
+          snprintf(cb, sizeof(cb), "%s", c.state == Cell::Warming ? "warming" : "offline");
+        } else if (s.calibrated) {
+          formatKg(cb, sizeof(cb), c.grams, s.decimals);
+          const size_t n = strlen(cb);
+          snprintf(cb + n, sizeof(cb) - n, " kg%s", c.overRange ? " !" : "");
+        } else {
+          snprintf(cb, sizeof(cb), "%ld cts", (long)c.counts);
+        }
+        setIfChanged(lblCellVal[i], prevCell_[i], sizeof(prevCell_[i]), cb);
+      }
+    }
+  }
 }
 
 }  // namespace ui

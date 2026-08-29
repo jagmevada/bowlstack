@@ -325,8 +325,20 @@ void updateCalibPage(const State &s) {
     // overflow loses characters from BOTH ends. An earlier version read
     // "now %+ld counts on the platform" and rendered as
     // "w +260516 counts on the platfo".
-    snprintf(buf, sizeof(buf), "0 = %ld/%ld   net %+ld", (long)sc.cell[0].platformZero,
-             (long)sc.cell[1].platformZero, (long)sc.totalCounts);
+    //
+    // THE ZEROS ARE IN KILOCOUNTS, and that is what the third cell cost. Three
+    // six-digit zeros plus the net is 38 characters, and roughly 30 is where
+    // montserrat 14 runs out of 240 px -- the exact failure quoted above. What
+    // the zeros are read FOR survives the rounding: a zero of 0 means nothing
+    // ever zeroed that corner, and three that look nothing like each other mean
+    // the corners carry very different shares before anything is put on. The
+    // net keeps every digit, because it is the deflection the factor is about
+    // to be derived from and a typo in it has to be visible.
+    int k = snprintf(buf, sizeof(buf), "z");
+    for (uint8_t i = 0; i < CELLS && k < (int)sizeof(buf); i++)
+      k += snprintf(buf + k, sizeof(buf) - k, "%s%ldk", i ? "/" : " ",
+                    (long)(sc.cell[i].platformZero / 1000));
+    snprintf(buf + k, sizeof(buf) - k, "  net %+ld", (long)sc.totalCounts);
   }
   if (strcmp(prevLive_, buf) == 0) return;
   snprintf(prevLive_, sizeof(prevLive_), "%s", buf);

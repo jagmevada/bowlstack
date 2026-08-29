@@ -10,6 +10,7 @@
 #include <LovyanGFX.hpp>
 
 #include "board_waveshare_s3.h"
+#include "i2cmux.h"
 
 namespace {
 
@@ -128,31 +129,76 @@ const uint32_t CELL_STALE_MS = (RATE_HZ >= 10) ? 2000u : (30000u / RATE_HZ);
 
 const uint8_t IO_FAILURES_TO_OFFLINE = 5;
 
+// How long to wait for `n` completed conversions, DERIVED FROM THE CONFIGURED
+// RATE rather than written down.
+//
+// THIS IS THE BUG THAT MADE BOOT TAKE HALF A MINUTE. selfTest() asked for 16
+// samples with a flat 1500 ms timeout, which was generous when this firmware ran
+// at 80 SPS: 18 conversions is 225 ms. The rate was later dropped to 10 SPS on
+// purpose -- the rate IS the filter, see the note at the top of this file -- and
+// 18 conversions became 1800 ms. Every call then ran to its timeout and returned
+// a short sample set, silently: nine timeouts of 1.5 s is 13.5 s of boot spent
+// waiting for samples that were never going to arrive in time.
+//
+// It survived because selfTest() was never called. A stale constant in dead code
+// is invisible until the day the code runs.
+//
+// +2 covers the conversion already in flight when sampling starts and the one
+// sampleStats() deliberately discards after a configuration change.
+uint32_t conversionsMs(uint8_t n) {
+  return (uint32_t)(n + 2) * 1000u / RATE_HZ + 250u;
+}
+
+// Two conversion periods, so a configuration change has certainly landed in a
+// completed conversion. Was a flat delay(60) with the comment "two conversion
+// periods at 80 SPS" -- true when written, and at 10 SPS less than ONE period,
+// so the "shorted" reading could include a conversion taken before the short
+// was applied.
+uint32_t settleMs() { return 2000u / RATE_HZ; }
+
 }  // namespace
 
-void Nau7802::configure(int i2cPort, uint32_t freqHz, const char *name) {
+void Nau7802::configure(int i2cPort, uint32_t freqHz, const char *name, int8_t muxChannel) {
   port_ = i2cPort;
   freq_ = freqHz;
   name_ = name;
+  muxChannel_ = muxChannel;
+}
+
+bool Nau7802::selectBus() {
+  if (muxChannel_ < 0) return true;
+  return i2cmux::select(muxChannel_);
 }
 
 bool Nau7802::read(uint8_t reg, uint8_t *buf, uint8_t len) {
   const bool ok =
+      selectBus() &&
       lgfx::i2c::transactionWriteRead(port_, board::NAU7802_ADDR, &reg, 1, buf, len, freq_)
           .has_value();
   if (ok) {
     ioFailures_ = 0;
-  } else if (ioFailures_ < 0xFF) {
-    ioFailures_++;
+  } else {
+    // THE MUX IS SUSPECTED FIRST, before the converter. A part that browned out
+    // or was reset holds no channel at all, and from up here that is
+    // indistinguishable from a cell that simply NAKed -- so the cheap thing is
+    // to force a re-select on the next attempt rather than to keep talking into
+    // a channel nobody enabled. Costs one write per failure; recovers the case
+    // that would otherwise leave a healthy cell Offline forever.
+    i2cmux::invalidate();
+    if (ioFailures_ < 0xFF) ioFailures_++;
   }
   return ok;
 }
 
 bool Nau7802::write(uint8_t reg, uint8_t val) {
+  if (!selectBus()) return false;
   // mask 0 means "replace", not "or into". lgfx's writeRegister8 computes
   // (current & mask) | data, so a non-zero mask is a read-modify-write and 0 is
   // a plain store -- which is what every call below wants.
-  return lgfx::i2c::writeRegister8(port_, board::NAU7802_ADDR, reg, val, 0, freq_).has_value();
+  const bool ok =
+      lgfx::i2c::writeRegister8(port_, board::NAU7802_ADDR, reg, val, 0, freq_).has_value();
+  if (!ok) i2cmux::invalidate();
+  return ok;
 }
 
 bool Nau7802::setBit(uint8_t reg, uint8_t bit, bool on) {
@@ -189,8 +235,8 @@ bool Nau7802::begin() {
   // mode a missing 4.7k produces.
   uint8_t rev = 0;
   if (!read(REG_REVISION, &rev, 1)) {
-    Serial.printf("  %s: no answer at 0x%02X on i2c port %d\n", name_, board::NAU7802_ADDR,
-                  port_);
+    Serial.printf("  %s: no answer at 0x%02X on i2c port %d, mux ch %d\n", name_,
+                  board::NAU7802_ADDR, port_, (int)muxChannel_);
     return false;
   }
   revision_ = rev;
@@ -257,8 +303,8 @@ bool Nau7802::begin() {
   sampleCount_ = 0;
   sps_ = 0;
 
-  Serial.printf("  %s: rev 0x%02X, gain 128, LDO 3.0 V, %u SPS, i2c port %d\n", name_,
-                revision_, RATE_HZ, port_);
+  Serial.printf("  %s: rev 0x%02X, gain 128, LDO 3.0 V, %u SPS, i2c port %d, mux ch %d\n",
+                name_, revision_, RATE_HZ, port_, (int)muxChannel_);
   return true;
 }
 
@@ -333,16 +379,19 @@ bool Nau7802::sampleStats(uint8_t n, int32_t *mean, int32_t *pp, uint32_t timeou
   return true;
 }
 
-void Nau7802::selfTest() {
+void Nau7802::selfTest(uint8_t samples, bool includeChannel2) {
   if (state_ == CellState::Offline) {
     Serial.printf("  %s: offline -- nothing to test\n", name_);
     return;
   }
+  if (samples < 3) samples = 3;
 
   // Read the configuration BACK rather than trusting that the writes landed.
-  // Two cells configured by the same code on two different buses should read
-  // identically here; a difference means a write did not take, which is a
-  // completely different fault from a cell that is not wired.
+  // Every cell is configured by the same code and now over the same bus, so all
+  // three should read identically here; a difference means a write did not
+  // take, which is a completely different fault from a cell that is not wired.
+  // With the cells behind one mux it also narrows to a single channel, which
+  // two separate buses could not do.
   uint8_t pu = 0, c1 = 0, c2 = 0, pga = 0, pwr = 0;
   read(REG_PU_CTRL, &pu, 1);
   read(REG_CTRL1, &c1, 1);
@@ -353,7 +402,7 @@ void Nau7802::selfTest() {
                 pu, c1, c2, pga, pwr);
 
   int32_t mBridge = 0, ppBridge = 0;
-  const bool okBridge = sampleStats(16, &mBridge, &ppBridge, 1500);
+  const bool okBridge = sampleStats(samples, &mBridge, &ppBridge, conversionsMs(samples));
   if (okBridge) {
     Serial.printf("  %s: bridge     mean %9ld   p-p %7ld\n", name_, (long)mBridge,
                   (long)ppBridge);
@@ -365,10 +414,10 @@ void Nau7802::selfTest() {
   int32_t mShort = 0, ppShort = 0;
   bool okShort = false;
   if (setBit(REG_I2C_CTRL, IC_SI, true)) {
-    delay(60);  // two conversion periods at 80 SPS, so the change has landed
-    okShort = sampleStats(16, &mShort, &ppShort, 1500);
+    delay(settleMs());
+    okShort = sampleStats(samples, &mShort, &ppShort, conversionsMs(samples));
     setBit(REG_I2C_CTRL, IC_SI, false);
-    delay(60);
+    delay(settleMs());
   }
   if (okShort) {
     Serial.printf("  %s: shorted    mean %9ld   p-p %7ld   delta %ld\n", name_, (long)mShort,
@@ -377,16 +426,22 @@ void Nau7802::selfTest() {
 
   // --- the second input pair ------------------------------------------------
   // Switching channels invalidates the offset calibration, which is per
-  // channel, so both the move and the move back re-run it. That costs a few
-  // hundred milliseconds of boot and is worth it exactly once: a bridge landed
-  // on VIN2 reads identically to no bridge at all on VIN1.
+  // channel, so both the move and the move back re-run it. A bridge landed on
+  // VIN2 reads identically to no bridge at all on VIN1, and this is the only
+  // cheap way to tell.
+  //
+  // OPTIONAL, AND IT IS THE EXPENSIVE HALF: two AFE calibrations plus a third
+  // set of conversions, measured at 2.3 s of the 5.4 s this function took per
+  // cell. It also answers an ASSEMBLY-TIME question -- which pins the bridge
+  // landed on -- rather than a recurring one, so it is not worth paying for on
+  // a boot that only wants to know whether each cell is alive.
   int32_t mCh2 = 0, ppCh2 = 0;
   bool okCh2 = false;
-  {
+  if (includeChannel2) {
     uint8_t saved = 0;
     if (read(REG_CTRL2, &saved, 1) && write(REG_CTRL2, (uint8_t)(saved | (1u << C2_CHS)))) {
       calibrateAfe();
-      okCh2 = sampleStats(16, &mCh2, &ppCh2, 1500);
+      okCh2 = sampleStats(samples, &mCh2, &ppCh2, conversionsMs(samples));
       write(REG_CTRL2, saved);
       calibrateAfe();
     }

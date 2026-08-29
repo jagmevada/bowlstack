@@ -1,27 +1,23 @@
 // NAU7802 24-bit bridge ADC -- one load cell each.
 //
 // WRITTEN HERE RATHER THAN PULLED IN, and the reason is the bus rather than the
-// part. Every Arduino NAU7802 library takes a `TwoWire&`, and neither of this
-// board's two cell buses is one:
+// part. Every Arduino NAU7802 library takes a `TwoWire&`, and this board's cell
+// bus is not one: the cells sit on GPIO21/16, reached through `lgfx::i2c`,
+// which is also what drives the touch controller on the other port. Opening
+// `Wire` anywhere near a port LovyanGFX owns puts two drivers on one
+// peripheral, and config.h already records what that costs -- the touch chip
+// silently stops answering while the display keeps working, so it presents as
+// "touch broke" with nothing pointing at the cause.
 //
-//   cell A  sits on GPIO47/48, which belongs to LovyanGFX. That port is driven
-//           by lgfx's own register-level I2C code, not by the ESP-IDF driver
-//           behind TwoWire. Opening `Wire` on those pins puts two drivers on one
-//           peripheral, and config.h already records what that costs -- the
-//           touch controller silently stops answering and the display keeps
-//           working, so it presents as "touch broke" with nothing pointing at
-//           the cause.
-//
-//   cell B  sits on GPIO11/12 with no peripheral at all, bit-banged.
-//
-// What both DO have is `lgfx::i2c`, which reaches a hardware port by a
-// non-negative number and a bit-banged one by a negative number, through one
-// identical set of calls. So the bus abstraction this driver needs is an int,
-// and the driver stays a driver instead of growing a porting layer.
+// `lgfx::i2c` reaches a hardware port by a non-negative number and a bit-banged
+// one by a negative number through one identical set of calls, so the bus
+// abstraction this driver needs is an int, and the driver stays a driver
+// instead of growing a porting layer.
 //
 // THE ADDRESS IS FIXED AT 0x2A. There are no address pins, no strap and no OTP
-// field to move it, which is why two cells means two buses -- see section 8 of
-// board_waveshare_s3.h.
+// field to move it. Three cells therefore sit behind a TCA9548A, one per
+// channel, and this driver selects its own channel before touching the bus --
+// see i2cmux.h and section 8 of board_waveshare_s3.h.
 
 #pragma once
 
@@ -40,7 +36,12 @@ class Nau7802 {
  public:
   // `i2cPort` is an lgfx port: >= 0 for a hardware peripheral, < 0 for one of
   // the bit-banged slots (-1, -2). `name` is used only for console lines.
-  void configure(int i2cPort, uint32_t freqHz, const char *name);
+  //
+  // `muxChannel` is the TCA9548A channel this converter sits behind, or -1 for
+  // one wired straight to the bus. Defaulted so the driver still describes a
+  // part on a plain bus -- the mux is this board's answer to a fixed address,
+  // not a property of the NAU7802.
+  void configure(int i2cPort, uint32_t freqHz, const char *name, int8_t muxChannel = -1);
 
   // Resets, powers up, configures gain and rate, and runs the internal offset
   // calibration. Blocking -- it waits on the part's own ready and calibration
@@ -78,6 +79,7 @@ class Nau7802 {
   uint8_t revision() const { return revision_; }
 
   int port() const { return port_; }
+  int8_t muxChannel() const { return muxChannel_; }
   const char *name() const { return name_; }
 
   // Re-runs the part's internal offset calibration. Distinct from Scale's tare:
@@ -111,13 +113,27 @@ class Nau7802 {
   // PEAK-TO-PEAK IS THE FIGURE THAT MATTERS. A mean can sit anywhere; what
   // separates a live 350 ohm bridge from an open input is how much the reading
   // moves between conversions, and whether it moves at all.
-  void selfTest();
+  //
+  // `samples` per measurement and `includeChannel2` both exist because THE COST
+  // IS SET BY THE OUTPUT RATE, and this firmware runs at 10 SPS on purpose. Every
+  // sample is 100 ms of wall clock, so the full 16-sample three-part test is
+  // ~5.4 s per cell -- 16 s of boot on three cells, which is what it measured
+  // before these two arguments existed. Boot asks for a short bridge-vs-shorted
+  // pair; the console's 's' asks for the full-depth version when somebody is
+  // actually diagnosing.
+  void selfTest(uint8_t samples = 16, bool includeChannel2 = true);
 
  private:
   // Blocking: waits for `n` completed conversions and returns their mean and
   // peak-to-peak. Boot only -- it spins on the ready flag, which is exactly
   // what poll() exists to avoid doing on the render loop.
   bool sampleStats(uint8_t n, int32_t *mean, int32_t *pp, uint32_t timeoutMs);
+
+  // Points the mux at this cell's channel. Called by read() and write() rather
+  // than by their callers, so there is no path to the converter that can forget
+  // to do it -- which would read one cell's conversion and file it under
+  // another's name, the one failure a mux introduces that two buses could not.
+  bool selectBus();
 
   bool read(uint8_t reg, uint8_t *buf, uint8_t len);
   bool write(uint8_t reg, uint8_t val);
@@ -126,6 +142,7 @@ class Nau7802 {
 
   int port_ = 0;
   uint32_t freq_ = 400000;
+  int8_t muxChannel_ = -1;
   const char *name_ = "?";
 
   CellState state_ = CellState::Offline;
@@ -138,7 +155,7 @@ class Nau7802 {
   uint32_t spsWindowMs_ = 0;
 
   // Consecutive failed register reads before the cell is declared Offline. Same
-  // reasoning as config::IO_FAILURES_TO_OFFLINE: one NAK on a bit-banged bus
-  // with weak pull-ups is noise, five in a row is a fault.
+  // reasoning as config::IO_FAILURES_TO_OFFLINE: one NAK on a stub whose
+  // pull-ups are marginal is noise, five in a row is a fault.
   uint8_t ioFailures_ = 0;
 };

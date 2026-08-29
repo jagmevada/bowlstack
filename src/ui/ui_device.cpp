@@ -93,7 +93,7 @@ void updateDevicePage(const State &s) {
                 (unsigned long)(s.uptimeSec / 3600UL),
                 (unsigned long)((s.uptimeSec / 60UL) % 60UL));
 
-  static const char *NAME[CELLS] = {"A", "B"};
+  static const char *NAME[CELLS] = {"A", "B", "C"};
   for (uint8_t i = 0; i < CELLS; i++) {
     const CellView &c = sc.cell[i];
     if (c.state != Cell::Online) {

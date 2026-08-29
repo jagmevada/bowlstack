@@ -18,8 +18,15 @@ const uint32_t C_ZERO = 0x3A424B;  // the zero line, brighter than the thirds
 const uint32_t C_CURSOR = 0x4A5058;
 
 // One colour per cell, matched to the order used everywhere else: index 0 is A.
-const uint32_t C_SERIES[CELLS] = {0x3FB950, 0x58A6FF};
-const char *SERIES_NAME[CELLS] = {"A", "B"};
+//
+// Green, blue, amber -- the same three the battery and status bar already use
+// for ok / info / warn, borrowed here purely as a palette that is known to
+// separate on this panel. Three traces on a 232-column plot is the point at
+// which "pick another colour" stops being free: they have to stay apart at
+// 200 DPI, on an IPS black that is really dark grey, through whatever the
+// kitchen lighting is.
+const uint32_t C_SERIES[CELLS] = {0x3FB950, 0x58A6FF, 0xD29922};
+const char *SERIES_NAME[CELLS] = {"A", "B", "C"};
 
 lv_obj_t *canvas_ = nullptr;
 lv_obj_t *lblFps_ = nullptr;
@@ -38,8 +45,8 @@ uint32_t lastSampleMs_ = 0;
 // runs again -- real data outranks fixtures, and a scope that mixes the two is
 // worse than either.
 bool fedReal_ = false;
-int32_t feedValue_[CELLS] = {0, 0};
-bool feedValid_[CELLS] = {false, false};
+int32_t feedValue_[CELLS] = {0, 0, 0};
+bool feedValid_[CELLS] = {false, false, false};
 const char *unit_ = "cts";
 
 // The ring holds the DATA; the canvas holds the PICTURE. They exist separately
@@ -56,7 +63,7 @@ bool ringOk_[CELLS][SCOPE_W];
 uint16_t sweep_ = 0;     // column the NEXT sample will occupy
 uint16_t filled_ = 0;    // columns written since boot, capped at SCOPE_W
 int16_t prevY_[CELLS];   // last plotted row per series, for joining segments
-bool havePrevCh_[CELLS] = {false, false};
+bool havePrevCh_[CELLS] = {false, false, false};
 bool havePrev_ = false;
 bool pendingDraw_ = false;
 
@@ -271,8 +278,8 @@ Channel ch_[CELLS];
 bool armed_ = false;
 
 void armChannels(uint32_t nowMs) {
-  // Staggered so both do not step together, which would look like a rendering
-  // artefact rather than two independent converters.
+  // Staggered so they do not step together, which would look like a rendering
+  // artefact rather than three independent converters.
   for (uint8_t i = 0; i < CELLS; i++) {
     ch_[i].value = 0;
     ch_[i].target = 0;
@@ -285,8 +292,8 @@ int32_t sampleChannel(uint8_t i, uint32_t nowMs) {
   Channel &c = ch_[i];
   if ((int32_t)(nowMs - c.nextStepMs) >= 0) {
     c.nextStepMs = nowMs + 2500 + (nextRand() % 4000);
-    // Loaded or empty. The two cells take unequal shares, which is what a bowl
-    // sitting off-centre looks like and is the reason both are drawn.
+    // Loaded or empty. The cells take unequal shares, which is what a bowl
+    // sitting off-centre looks like and is the reason all three are drawn.
     c.target = c.target > 10000 ? 0 : (int32_t)(20000 + (nextRand() % 40000) + i * 9000);
   }
   const int32_t delta = c.target - c.value;
@@ -511,17 +518,25 @@ void scopeRender() {
     // The window is printed alongside the values, because an auto-ranging plot
     // whose scale is not stated is a shape rather than a measurement -- the
     // same trace can be a gram of drift or a kilogram of bowl.
-    char buf[80];
-    char aTxt[16], bTxt[16];
-    if (ringOk_[0][x]) snprintf(aTxt, sizeof(aTxt), "%ld", (long)ring_[0][x]);
-    else snprintf(aTxt, sizeof(aTxt), "--");
-    if (ringOk_[1][x]) snprintf(bTxt, sizeof(bTxt), "%ld", (long)ring_[1][x]);
-    else snprintf(bTxt, sizeof(bTxt), "--");
+    char buf[96];
+    // BUILT IN A LOOP, not from one format string per cell. The two-cell
+    // version named A and B in its format and would have shown exactly those
+    // two with a third trace on the plot above it -- a readout quietly
+    // describing less than the picture, on the page whose whole job is to say
+    // what the picture is.
+    int k = 0;
+    for (uint8_t i = 0; i < CELLS && k < (int)sizeof(buf); i++) {
+      if (ringOk_[i][x])
+        k += snprintf(buf + k, sizeof(buf) - k, "%s%s %ld", i ? "  " : "", SERIES_NAME[i],
+                      (long)ring_[i][x]);
+      else
+        k += snprintf(buf + k, sizeof(buf) - k, "%s%s --", i ? "  " : "", SERIES_NAME[i]);
+    }
     // The window on its own line, because an auto-ranging plot whose scale is
     // not stated is a shape rather than a measurement -- the same trace can be
     // a gram of drift or a kilogram of bowl.
-    snprintf(buf, sizeof(buf), "A %s   B %s %s\nscale %ld .. %ld", aTxt, bTxt, unit_,
-             (long)rangeLo_, (long)rangeHi_);
+    snprintf(buf + k, sizeof(buf) - k, " %s\nscale %ld .. %ld", unit_, (long)rangeLo_,
+             (long)rangeHi_);
     if (strcmp(lv_label_get_text(lblVals_), buf) != 0) lv_label_set_text(lblVals_, buf);
   }
 }

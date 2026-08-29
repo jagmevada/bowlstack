@@ -1,15 +1,17 @@
 // ---------------------------------------------------------------------------
-// Bowlstack :: load-cell station -- Waveshare ESP32-S3-Touch-LCD-2 + 2x NAU7802
+// Bowlstack :: load-cell station -- Waveshare ESP32-S3-Touch-LCD-2,
+//              3x NAU7802 behind a TCA9548A
 //
 // Same board and the same UI as the touch-ui branch; a different measurement
 // underneath it. Where that branch put four VL53L0X on a pipe and counted
-// bowls, this one puts two 20 kg cells under one platform and weighs what is on
-// it.
+// bowls, this one puts three 20 kg cells under one platform and weighs what is
+// on it. Three rather than two because two leave the platform free to rock --
+// see scale.h.
 //
 // WHAT THIS IMAGE IS FOR, IN ORDER:
 //
-//   1. does anything answer at 0x2A on each of the two buses?
-//   2. do both converters power up, self-calibrate and produce conversions?
+//   1. does the mux answer at 0x70, and a converter at 0x2A on each channel?
+//   2. do all three converters power up, self-calibrate and produce conversions?
 //   3. at what rate, actually delivered rather than configured?
 //   4. does the sum behave -- does load on one corner move one trace?
 //
@@ -52,6 +54,51 @@
 #include "version.h"
 
 namespace {
+
+// THE ONE PLACE BOTH CELL COUNTS ARE VISIBLE AT ONCE. scale::CELLS and
+// ui::CELLS have to agree and cannot be shared: ui_state.h deliberately
+// includes no driver header, which is what lets the desktop preview compile the
+// same screens. This file includes both, so this is where the duplication gets
+// checked -- at compile time, rather than as a cell that renders as a missing
+// row on a panel nobody is looking at.
+static_assert(scale::CELLS == ui::CELLS, "scale::CELLS and ui::CELLS must match");
+
+// How long to wait for a USB host to open the CDC port before giving up and
+// booting anyway. Every millisecond of it is splash time -- nothing is on the
+// screen yet -- so it is a knob rather than a constant.
+//
+// 2000 was the original, and on a bench it is nearly always paid in full: the
+// monitor attaches a second or so after the reset, and until it does `Serial`
+// is false. On a unit running on battery in a kitchen there is no host at all
+// and it is ALWAYS paid in full, to keep boot lines nobody will read.
+//
+// 400 keeps the useful case -- a host already attached when the board resets,
+// which is what `pio run -t upload -t monitor` produces -- and stops paying for
+// the case where there is no host. Raise it if early boot lines go missing.
+#ifndef BOWLSTACK_CONSOLE_WAIT_MS
+#define BOWLSTACK_CONSOLE_WAIT_MS 400
+#endif
+const uint32_t CONSOLE_WAIT_MS = BOWLSTACK_CONSOLE_WAIT_MS;
+
+// --- boot phase timing -----------------------------------------------------
+// THE BOOT LOG NAMED EVERY PHASE AND TIMED NONE OF THEM. "It sits on the logo
+// for ten seconds" was therefore a question the device could not answer about
+// itself: the phases print in order, so you can see WHERE it is, and nothing
+// tells you how long any of them took. Answering it needed a host-side
+// timestamp filter and arithmetic on wall-clock stamps, which is detective work
+// to recover something the firmware knew and threw away.
+//
+// Both figures matter and neither substitutes for the other: the delta is what
+// you optimise, the total is what the person watching the splash experiences.
+uint32_t bootPhaseMs_ = 0;
+uint32_t bootStartMs_ = 0;
+
+void bootMark(const char *what) {
+  const uint32_t now = millis();
+  Serial.printf("  [+%4lu ms, %5lu total] %s\n", (unsigned long)(now - bootPhaseMs_),
+                (unsigned long)(now - bootStartMs_), what);
+  bootPhaseMs_ = millis();
+}
 
 LGFX_WaveshareS3Touch2 gfx;
 
@@ -142,12 +189,16 @@ bool touchWarned_ = false;
 // transaction, so a second reader does not observe the same event -- it steals
 // it, leaving LVGL to infer press/release from a stream with holes in it.
 //
-// THIS RUNS ON THE UI TASK WHILE THE SCALE TASK IS ON THE SAME I2C PORT, and
-// that is safe rather than lucky: lgfx's i2c layer takes a per-port FreeRTOS
-// mutex in beginTransaction and releases it in endTransaction, so the touch
-// read and cell A's register reads serialise against each other. It is also why
-// both must go through lgfx rather than one of them opening Wire -- see
-// nau7802.h.
+// THIS NO LONGER SHARES A PORT WITH ANY CELL, and that is worth stating because
+// the previous build's version of this comment argued the opposite case. The
+// touch read ran on the UI task while the scale task drove cell A on the same
+// port 0, safe because lgfx takes a per-port FreeRTOS mutex across each
+// transaction. With the cells behind the mux on port 1 that overlap is gone --
+// but the mutex argument still matters, one port over: the mux channel select
+// and the register read that follows it are TWO transactions, and only the fact
+// that a single task owns port 1 keeps another from switching the channel
+// between them. See i2cmux.h. Both must still go through lgfx rather than one
+// of them opening Wire -- see nau7802.h.
 void touchCb(lv_indev_t *, lv_indev_data_t *data) {
   data->state = LV_INDEV_STATE_RELEASED;
 
@@ -167,10 +218,10 @@ void touchCb(lv_indev_t *, lv_indev_data_t *data) {
       touchWarned_ = true;
       Serial.printf(
           "\n!! TOUCH IS NOT ANSWERING: a read took %lu us, which is an I2C timeout and\n"
-          "   not a touch controller. GPIO47/48 carry the touch chip, the IMU and cell A;\n"
-          "   if the boot scan did not list 0x15, that bus is down and cell A is the only\n"
-          "   thing on it this branch added. Backing touch off to one read every %lu ms so\n"
-          "   the rest of the UI keeps its frame rate.\n\n",
+          "   not a touch controller. GPIO47/48 now carry ONLY the touch chip and the IMU\n"
+          "   -- the cells moved behind the mux on GPIO21/16 -- so unlike the two-cell\n"
+          "   build this can no longer be a load cell dragging the bus down. Backing touch\n"
+          "   off to one read every %lu ms so the rest of the UI keeps its frame rate.\n\n",
           (unsigned long)took, (unsigned long)TOUCH_BACKOFF_MS);
     }
     return;
@@ -191,8 +242,17 @@ void touchCb(lv_indev_t *, lv_indev_data_t *data) {
 void bootSplash() {
   // Drawn with raw LovyanGFX rather than as an LVGL screen -- deliberately, so
   // it appears BEFORE LVGL initialises and the boot has no dark gap while the
-  // widget tree is built. drawPng decodes straight from flash, so no
-  // framebuffer-sized RAM is needed for a 128x128 image.
+  // widget tree is built.
+  //
+  // drawPng decodes straight from flash, so no framebuffer-sized RAM is needed
+  // for a 128x128 image.
+  //
+  // IT IS ALSO NOT SLOW, which is worth recording because it looks like it
+  // should be. Chasing a 1249 ms splash phase, decoding 16 k pixels on an
+  // Xtensa core was the obvious suspect and it was wrong: the whole of this
+  // function -- clear, decode, three lines of text -- measures 44 ms. The
+  // 1200 ms was a deliberate hold at the end, which is now gone. Do not trade
+  // 23 KB of flash for a raw RGB565 array on the strength of how this reads.
   gfx.fillScreen(TFT_BLACK);
   gfx.drawPng(LOGO128_PNG, LOGO128_PNG_LEN, (gfx.width() - LOGO128_W) / 2,
               (gfx.height() - LOGO128_H) / 2 - 12);
@@ -253,7 +313,19 @@ void bootSplash() {
   }
   gfx.setTextDatum(top_left);
   gfx.setFont(&fonts::Font0);
-  delay(1200);
+  bootMark("splash draw");
+
+  // THE 1200 ms HOLD IS GONE, and it was the single largest thing in the boot
+  // after the cells. It existed so the splash stayed up long enough to read --
+  // which was a real need when it was written and is not one now: the splash
+  // remains on screen for the whole of cell bring-up and page construction,
+  // measured at just under two seconds, because nothing else draws until
+  // buildPages() finishes.
+  //
+  // So the hold was not making the splash visible, it was ADDING to a period
+  // the splash already filled. Anything that later makes boot faster than a
+  // person can read three lines should reinstate a hold rather than restore
+  // this one blindly -- and should measure what the rest of boot costs first.
 }
 
 // --- the adapter -----------------------------------------------------------
@@ -280,6 +352,7 @@ void publishScale(uint32_t nowMs) {
   s.scale.countsPerGram = sn.countsPerGram;
   s.scale.window = sn.window;
   s.scale.decimals = sn.decimals;
+  s.scale.showCells = sn.showCells;
   s.scale.zeroed = sn.zeroed;
   s.scale.calMassG = sn.calMassG;
 
@@ -397,6 +470,10 @@ void onCyclePrecision() {
   Serial.printf("ui: reading -> %u decimals\n", scale::cycleDecimals());
 }
 
+void onToggleCells() {
+  Serial.printf("ui: cells on home -> %s\n", scale::toggleShowCells() ? "shown" : "hidden");
+}
+
 void onClearCal() {
   Serial.println("ui: calibration cleared");
   scale::clearCalibration();
@@ -423,16 +500,20 @@ void serviceConsole() {
         Serial.println("\n> tare both");
         scale::tare();
         break;
-      case 'a':
-      case 'A':
-        Serial.println("\n> tare cell A");
-        scale::tareCell(0);
+      // DIGITS RATHER THAN LETTERS, and that is the third cell's doing. Per-cell
+      // tare was 'a' and 'b'; the obvious extension is 'c', which is already
+      // calibrate -- and quietly rebinding calibrate to something else on a
+      // console people have muscle memory for is worse than moving the cells.
+      // 1/2/3 also extends past the third cell without another collision.
+      case '1':
+      case '2':
+      case '3': {
+        const uint8_t idx = (uint8_t)(c - '1');
+        if (idx >= scale::CELLS) break;
+        Serial.printf("\n> tare cell %c\n", (char)('A' + idx));
+        scale::tareCell(idx);
         break;
-      case 'b':
-      case 'B':
-        Serial.println("\n> tare cell B");
-        scale::tareCell(1);
-        break;
+      }
       case 'c':
       case 'C':
         // The STORED mass -- the same one the keypad opens with -- so the
@@ -440,6 +521,13 @@ void serviceConsole() {
         // thing. To use a different weight, type it on the page.
         Serial.printf("\n> calibrate against the stored %.0f g\n", scale::calMass());
         onCalibApply(scale::calMass());
+        break;
+      case 's':
+      case 'S':
+        // Queued, not run here -- see scale::requestSelfTest(). The reply comes
+        // back on this console a few seconds later, from the scale task.
+        Serial.println("\n> self-test queued (measurement pauses for ~15 s)");
+        scale::requestSelfTest();
         break;
       case 'x':
       case 'X':
@@ -456,19 +544,25 @@ void serviceConsole() {
         break;
       case '?':
         Serial.println(
-            "\n  t  tare BOTH cells at whatever is on the platform NOW\n"
-            "  a  tare cell A only      b  tare cell B only\n"
-            "  c  calibrate against the STORED mass -- Settings > Scale >\n"
-            "     Calibrate on the panel to type a different one\n"
-            "  x  clear the calibration and go back to counts\n"
-            "  w  step the moving average 8 -> 16 -> 32 -> 64 -> 128 -> 8\n"
-            "  d  step the reading 0.0 -> 0.00 -> 0.000 kg -> 0.0 (display only;\n"
-            "     Diagnose keeps all three places whatever this says)\n"
+            "\n  t      tare EVERY cell at whatever is on the platform NOW\n"
+            "  1 2 3  tare cell A / B / C only\n"
+            "  c      calibrate against the STORED mass -- Settings > Scale >\n"
+            "         Calibrate on the panel to type a different one\n"
+            "  s      full converter self-test: bridge vs shorted vs channel 2,\n"
+            "         per cell. This is what tells a dead bridge apart from a\n"
+            "         dead converter -- both look like a cell that reads wrong.\n"
+            "         Pauses measurement for ~15 s at 10 SPS.\n"
+            "  x      clear the calibration and go back to counts\n"
+            "  w      step the moving average 8 -> 16 -> 32 -> 64 -> 128 -> 8\n"
+            "  d      step the reading 0.0 -> 0.00 -> 0.000 kg -> 0.0 (display\n"
+            "         only; Diagnose keeps all three places whatever this says)\n"
             "\n  Order matters: tare on an EMPTY platform, then put the mass on,\n"
             "  wait for the reading to settle, then calibrate.\n"
-            "\n  a and b are the SETUP tools: zeroing one corner against the other\n"
-            "  is how you tell an uneven mounting from an uneven pair of cells,\n"
-            "  which the total -- being a sum -- cannot show you.\n");
+            "\n  1/2/3 are the SETUP tools: zeroing one corner against the others\n"
+            "  is how you tell an uneven mounting from an uneven set of cells,\n"
+            "  which the total -- being a sum -- cannot show you. On three cells\n"
+            "  that is also how you find the corner the platform is not sitting\n"
+            "  on, which is the fault three cells were fitted to remove.\n");
         break;
       default:
         break;  // newlines and stray bytes from a terminal are not errors
@@ -479,12 +573,14 @@ void serviceConsole() {
 }  // namespace
 
 void setup() {
+  bootStartMs_ = bootPhaseMs_ = millis();
   Serial.begin(115200);
   // USB-CDC enumerates only when a host opens the port, so the first lines are
   // lost without this. Bounded, not a spin: a unit on battery has no host and
   // must still boot.
-  const uint32_t deadline = millis() + 2000;
+  const uint32_t deadline = millis() + CONSOLE_WAIT_MS;
   while (!Serial && (int32_t)(millis() - deadline) < 0) delay(10);
+  bootMark("console wait");
 
   Serial.println("\n=== Bowlstack :: load-cell station ===");
   Serial.printf("  device      %s, fw %s\n", BOWLSTACK_DEVICE_ID, BOWLSTACK_FW_VERSION);
@@ -508,36 +604,54 @@ void setup() {
   // A 0 on SDA is a slave holding the bus, and it takes the touch controller
   // down with it.
   {
-    const int8_t pins[4] = {board::CELL_A_SDA, board::CELL_A_SCL, board::CELL_B_SDA,
-                            board::CELL_B_SCL};
+    const int8_t pins[4] = {board::TP_SDA, board::TP_SCL, board::CELL_SDA, board::CELL_SCL};
     for (uint8_t i = 0; i < 4; i++) pinMode(pins[i], INPUT_PULLUP);
     delayMicroseconds(200);
-    Serial.printf("  i2c idle    bus A  SDA(%d)=%d SCL(%d)=%d   bus B  SDA(%d)=%d SCL(%d)=%d\n",
-                  pins[0], digitalRead(pins[0]), pins[1], digitalRead(pins[1]), pins[2],
-                  digitalRead(pins[2]), pins[3], digitalRead(pins[3]));
+    Serial.printf(
+        "  i2c idle    touch  SDA(%d)=%d SCL(%d)=%d   cells  SDA(%d)=%d SCL(%d)=%d\n", pins[0],
+        digitalRead(pins[0]), pins[1], digitalRead(pins[1]), pins[2], digitalRead(pins[2]),
+        pins[3], digitalRead(pins[3]));
     if (!digitalRead(pins[0]) || !digitalRead(pins[1])) {
-      Serial.println("  !! BUS A IS HELD LOW. The touch controller lives on it, so the screen");
-      Serial.println("     will not respond either. Unplug cell A and reboot to confirm.");
+      Serial.println("  !! THE TOUCH BUS IS HELD LOW, so the screen will not respond either.");
+      Serial.println("     Nothing this branch adds lives on GPIO47/48 any more -- the cells");
+      Serial.println("     moved behind the mux on GPIO21/16 -- so suspect the panel cable.");
+    }
+    if (!digitalRead(pins[2]) || !digitalRead(pins[3])) {
+      // ONE STUB CAN DO THIS THROUGH A CLOSED CHANNEL ONLY IF THE MUX IS ALSO
+      // WEDGED. Normally a stuck stub is invisible from the trunk, which is the
+      // whole point of the switch -- so a trunk held low is the mux itself, or
+      // something wired past it.
+      Serial.println("  !! THE CELL TRUNK IS HELD LOW. GPIO21/16 carry the mux and nothing");
+      Serial.println("     else, so this is the mux, its power, or a converter wired");
+      Serial.println("     directly to the trunk instead of to a channel.");
     }
   }
 
   // --- the panel, before LVGL exists --------------------------------------
-  // Brought up FIRST, and specifically before the cells: cell A shares the
-  // touch controller's I2C port, and it is gfx.init() that opens that port.
-  // Reversing these two lines would have the converter talking to a bus nobody
-  // had configured.
+  // Still brought up before the cells, though no longer because it has to be.
+  // Cell A used to ride the touch controller's port, which gfx.init() opens, so
+  // reversing these two lines had the converter talking to a bus nobody had
+  // configured. The cells own port 1 now and scale::begin() opens it itself.
+  // The order stays because the splash should be on the screen while the
+  // converters spend their second each self-testing.
   Serial.println("\n--- display ---");
+  bootMark("banner + i2c idle read");
   gfx.init();
   gfx.setRotation(0);    // 0 = portrait 240x320, connector at the bottom
   gfx.setBrightness(0);  // ramp up rather than flashing white at boot
   gfx.fillScreen(TFT_BLACK);
+  bootMark("gfx.init + clear");
   for (uint8_t b = 0; b <= 200; b += 5) {
     gfx.setBrightness(b);
     delay(4);
   }
+  bootMark("backlight ramp");
   Serial.printf("  panel %dx%d, touch %s\n", gfx.width(), gfx.height(),
                 gfx.touch() ? "registered" : "NOT REGISTERED");
   bootSplash();
+  // FROM HERE UNTIL buildPages() THE SPLASH IS WHAT THE OPERATOR IS LOOKING AT.
+  // Every phase below is logo time, which is the only reason to time them.
+  bootMark("display + backlight ramp + splash");
 
   // --- the cells ----------------------------------------------------------
   // Before the UI task exists, so the first transaction on each bus -- which is
@@ -545,6 +659,7 @@ void setup() {
   // thread. After this point the scale task and the touch reads share port 0
   // under that mutex.
   scale::begin();
+  bootMark("load cells");
 
   // --- lvgl ---------------------------------------------------------------
   Serial.println("\n--- lvgl ---");
@@ -589,8 +704,11 @@ void setup() {
     Serial.printf("  mac %s\n", macStr);
   }
 
+  bootMark("lvgl init + draw buffers + display/indev");
+
   bringup_wifi::begin();
   bringup_time::begin();
+  bootMark("wifi + time tasks started");
 
   ui::perfBegin();
 
@@ -610,6 +728,7 @@ void setup() {
   ui::pagesOnScaleClearCal(onClearCal);
   ui::pagesOnScaleCycleAvg(onCycleAvg);
   ui::pagesOnScaleCyclePrecision(onCyclePrecision);
+  ui::pagesOnScaleToggleCells(onToggleCells);
   ui::pagesOnScaleRestore(onRestoreDefault);
   ui::pagesOnScalePlatformZero(onPlatformZero);
   ui::calibOnApply(onCalibApply);
@@ -618,19 +737,21 @@ void setup() {
   ui::calibSetMass(scale::calMass());
 
   ui::buildPages();
+  bootMark("scope canvas + buildPages -- SPLASH ENDS HERE");
   Serial.println(
-      "  console: t = tare both, a/b = tare one, c = calibrate, x = clear,\n"
-      "           w = average, d = decimals, ? = help");
+      "  console: t = tare all, 1/2/3 = tare one, c = calibrate, x = clear,\n"
+      "           s = self-test, w = average, d = decimals, ? = help");
   Serial.println("  home = weight; gear button (or swipe LEFT) for the menu,");
   Serial.println("  house button at the same spot to come back:");
   Serial.println("    Settings -> WiFi, Battery, Scale (tare / calibrate)");
-  Serial.println("    Sensors  -> live cell scope, both traces + frame rate");
+  Serial.println("    Sensors  -> live cell scope, three traces + frame rate");
 
   // --- battery ------------------------------------------------------------
   analogSetPinAttenuation(board::PIN_BATTERY_ADC, ADC_11db);
   Serial.println("\n--- battery ---");
   Serial.printf("  GPIO%d, on-board 200k/100k divider (ratio %.2f)\n",
                 board::PIN_BATTERY_ADC, board::BATTERY_DIVIDER_NOMINAL);
+  bootMark("battery");
   Serial.println("\nready.\n");
 }
 

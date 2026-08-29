@@ -36,7 +36,7 @@ void buildWeight(lv_obj_t *parent = nullptr);
 // string changed -- and this runs every frame against a value that moves.
 void updateWeight(const State &s);
 
-// The one button on the page. Tares BOTH cells.
+// The one button on the page. Tares EVERY cell.
 //
 // PER-CELL ZEROING IS NOT HERE ANY MORE. Zeroing one corner against the other
 // is a setup job -- it is how you tell an uneven mounting from an uneven pair

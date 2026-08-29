@@ -7,58 +7,125 @@
 #include <LovyanGFX.hpp>
 
 #include "board_waveshare_s3.h"
+#include "i2cmux.h"
 
 // ON BY DEFAULT, because this branch is bring-up and the self-test answers the
-// first question anybody asks of a new assembly: is that cell wired. It costs
-// roughly a second of boot per cell -- two channel switches, each needing its
-// own offset calibration -- so turn it off with -DBOWLSTACK_CELL_SELFTEST=0
-// once the wiring is settled and the boot time starts to matter.
+// first question anybody asks of a new assembly: is that cell wired.
+//
+// WHAT IT COSTS IS SET BY THE OUTPUT RATE, and the comment that used to sit here
+// said "roughly a second of boot per cell" -- true at the 80 SPS this firmware
+// once ran at, and eight times wrong at the 10 SPS it runs at now. Measured, the
+// full test was 5.4 s per cell, 16 s of a 20 s boot.
+//
+// So what runs at boot is the cheap half: four samples, bridge versus shorted,
+// no channel-2 pass, about 1 s per cell. The full-depth test is on the console's
+// 's' key, where it can take as long as it likes because somebody is watching.
+//
+// OFF BY DEFAULT NOW, and the measurement is what changed the default. Even the
+// cheap half is ~1.2 s per cell at 10 SPS -- 3.5 s of a boot that the operator
+// spends looking at a splash screen. That was over a third of the time to first
+// dashboard, spent proving something that is true on every boot but the one
+// where a cell has just been rewired.
+//
+// It has not been lost, which is the point of doing this rather than deleting
+// the call: 's' on the console runs the FULL test, deeper than boot ever did,
+// at the moment somebody actually suspects a cell. Boot prints one line saying
+// so, because a diagnostic nobody knows about is the same as no diagnostic.
+//
+// -DBOWLSTACK_CELL_SELFTEST=1 puts it back at boot -- worth doing on a bench
+// where cells are being wired and rewired.
 #ifndef BOWLSTACK_CELL_SELFTEST
-#define BOWLSTACK_CELL_SELFTEST 1
+#define BOWLSTACK_CELL_SELFTEST 0
 #endif
 
 namespace scale {
 namespace {
 
 // --- bus assignment --------------------------------------------------------
-// Both numbers are lgfx port identifiers, and the sign is the whole difference:
-// a non-negative one is a hardware peripheral, a negative one is a bit-banged
-// slot. See nau7802.h for why this is the abstraction rather than TwoWire.
+// ONE BUS FOR ALL THREE CELLS, behind a TCA9548A. An lgfx port identifier,
+// where the sign is the whole difference: a non-negative one is a hardware
+// peripheral, a negative one is a bit-banged slot. See nau7802.h for why this
+// is the abstraction rather than TwoWire.
 //
-// Cell A rides port 0, the touch controller's own bus, and is NOT initialised
-// here -- LovyanGFX did that when the display started, and a second init would
-// tear down a working bus under a live touch driver.
-const int PORT_A = 0;
-const int PORT_B = -1;  // bit-banged slot 0
+// PORT 1, NOT PORT 0. Port 0 is LovyanGFX's -- the touch controller and the IMU
+// on GPIO47/48 -- and it is opened by gfx.init() before this file runs. Port 1
+// has no peripheral behind it until begin() opens it, so unlike the old cell A
+// this bus IS initialised here.
+//
+// This replaced two buses, one of them bit-banged at 100 kHz off the render
+// loop with no pull-ups fitted. Section 8 of board_waveshare_s3.h keeps the
+// full account of why.
+const int CELL_PORT = 1;
 
-// 400 kHz on the hardware bus, matching what the touch controller already runs
-// at. There is no gain in going slower and the part is rated for it.
-const uint32_t HZ_A = 400000;
+// 400 kHz, the same rate the touch controller runs at on the other port. The
+// converters are rated for it, the TCA9548A is rated for it, and GPIO21/16
+// carry real 4.7k pull-ups (R4/R5) rather than the ESP32's ~45 kohm internal
+// ones -- which is precisely the thing that forced the old bus B down to 100.
+//
+// If a channel produces intermittent NAKs at this speed, the stub is missing
+// its pull-ups. Fit them rather than slowing the bus: dropping the rate hides
+// a soft edge instead of fixing it, and hides it unevenly.
+const uint32_t CELL_HZ = 400000;
 
-// 100 kHz on the bit-banged bus, and this is a decision rather than a default.
-//
-// GPIO11/12 have no pull-ups fitted, so the driver falls back on the ESP32's
-// internal ones at roughly 45 kohm. Against a few tens of picofarads of trace
-// and lead that is a rise time of several microseconds -- comfortably inside a
-// 10 us half-period at 100 kHz, and NOT inside a 1.25 us one at 400 kHz. Asking
-// for 400 kHz on this bus does not fail cleanly; it produces occasional NAKs
-// that read as a flaky converter.
-//
-// Fit 4.7k to 3V3 on both lines and this can go to 400000.
-const uint32_t HZ_B = 100000;
+// The cell count here and the wiring table in the board header describe the
+// same three cells, and there is no way to change one and be told about the
+// other -- so say it at compile time. A short CELL_MUX_CH would otherwise be
+// read past the end and the third cell would be configured for whatever channel
+// followed it in memory.
+static_assert(CELLS == board::CELL_COUNT, "scale::CELLS and board::CELL_COUNT disagree");
+
+// Console names. The letters here, the Device page's NAME[] and the scope
+// legend all have to agree about which corner is which, and index order is the
+// only thing tying them together.
+const char *const CELL_NAME[CELLS] = {"cell A", "cell B", "cell C"};
 
 // --- persistence -----------------------------------------------------------
 // NVS rather than a build flag, because tare and calibration belong to the
 // ASSEMBLY and not to the firmware image: reflashing a unit must not silently
 // throw away the gram factor someone derived with a known mass.
 const char *NVS_NS = "bowlscale";
-const char *KEY_OFF_A = "offA";
-const char *KEY_OFF_B = "offB";
 const char *KEY_CPG = "cpg";
-const char *KEY_TARED_A = "tarA";
-const char *KEY_TARED_B = "tarB";
+
+// PER-CELL KEYS ARE BUILT FROM THE INDEX, not listed. They used to be two named
+// constants each -- offA/offB, tarA/tarB -- which is a shape that does not
+// survive a third cell: adding one means adding two more constants and
+// remembering four call sites, and forgetting any of them leaves a cell reading
+// a stored zero that belongs to nobody.
+//
+// The spelling is UNCHANGED for A and B, so a unit that was zeroed before the
+// third cell existed keeps the constants it was set up with. C simply has no
+// stored zero yet, which loadPersisted() already handles correctly.
+const char *KEY_OFF_FMT = "off%c";
+const char *KEY_TARED_FMT = "tar%c";
+
+// NVS keys are capped at 15 characters; these are four.
+const char *cellKey(char *buf, size_t n, const char *fmt, uint8_t i) {
+  snprintf(buf, n, fmt, (char)('A' + i));
+  return buf;
+}
+
+// One figure per cell, joined as "a / b / c".
+//
+// WRITTEN ONCE BECAUSE FIVE CONSOLE LINES QUOTE THESE SIDE BY SIDE, and every
+// one of them used to bake the cell count into its format string as "%ld / %ld"
+// with two arguments. Adding a third cell would have dropped it silently from
+// all five -- no warning, no wrong number, just a corner missing from exactly
+// the lines someone reads to find out what a corner is doing.
+const char *joinCells(char *buf, size_t n, const int32_t *v) {
+  size_t k = 0;
+  for (uint8_t i = 0; i < CELLS && k + 1 < n; i++) {
+    const int w = snprintf(buf + k, n - k, "%s%ld", i ? " / " : "", (long)v[i]);
+    if (w < 0) break;
+    k += (size_t)w;
+  }
+  return buf;
+}
+
+// Wide enough for CELLS signed 24-bit values and their separators.
+const size_t JOIN_BUF = CELLS * 14 + 1;
 const char *KEY_WINDOW = "win";
 const char *KEY_DECIMALS = "dec";
+const char *KEY_SHOWCELLS = "cellrow";
 const char *KEY_CALMASS = "calmass";
 
 // What a calibration must clear, and the important half is the SECOND test.
@@ -251,13 +318,13 @@ Nau7802 cell_[CELLS];
 CountWindow window_[CELLS];
 // THE PLATFORM'S OWN WEIGHT. Persisted -- it is a constant of the assembly, not
 // a measurement, and every device gets a different platform bolted to it.
-int32_t platformZero_[CELLS] = {0, 0};
+int32_t platformZero_[CELLS] = {0, 0, 0};
 
 // THIS SESSION'S ZERO. Deliberately NOT persisted: a tare taken around a bowl
 // that has since been carried away is worse than no tare at all, so every power
 // cycle starts from the platform zero and re-tares.
-int32_t tare_[CELLS] = {0, 0};
-bool tareSet_[CELLS] = {false, false};
+int32_t tare_[CELLS] = {0, 0, 0};
+bool tareSet_[CELLS] = {false, false, false};
 
 // Everything the reading is measured from.
 inline int32_t offsetOf(uint8_t i) { return platformZero_[i] + tare_[i]; }
@@ -268,15 +335,19 @@ float countsPerGram_ = 0.0f;
 // disappeared, and a calibration taken then absorbed cell B's full absolute
 // reading into the factor. It also survived a reboot, so a global tare taken
 // while one cell was offline came back claiming both were zeroed.
-bool cellZeroed_[CELLS] = {false, false};
+bool cellZeroed_[CELLS] = {false, false, false};
 uint8_t window_n_ = BOWLSTACK_AVG_WINDOW;
 // Consecutive samples outside the step band, per cell.
-uint8_t stepRun_[CELLS] = {0, 0};
+uint8_t stepRun_[CELLS] = {0, 0, 0};
 // The samples that tripped the detector, kept so the restarted window can be
 // seeded with them instead of starting from one raw conversion.
-int32_t stepBuf_[CELLS][3] = {{0, 0, 0}, {0, 0, 0}};
+int32_t stepBuf_[CELLS][3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}};
 float calMass_ = (float)BOWLSTACK_CAL_MASS_G;
 uint8_t decimals_ = DECIMALS_DEFAULT;
+// OFF by default. The dashboard answers one question; the breakdown is for
+// somebody levelling a platform, and it persists so that person does not have
+// to re-enable it after every power cycle mid-job.
+bool showCells_ = false;
 volatile uint8_t wantWindow_ = 0;  // 0 = no change pending
 // DEFERRED THE SAME WAY THE WINDOW IS, and not for symmetry. Applying it
 // straight from the menu handler would write NVS from the UI task while the
@@ -285,6 +356,10 @@ volatile uint8_t wantWindow_ = 0;  // 0 = no change pending
 // would show up as a unit that forgot its calibration. The value itself is a
 // byte and would have been safe; `prefs_` is what is not.
 volatile uint8_t wantDecimals_ = 0;  // 0 = no change pending
+// TRISTATE RATHER THAN A BOOL, for the same reason wantDecimals_ is a value
+// rather than a flag: 0 has to mean "nothing pending", and a plain bool has no
+// spare state for that. 1 = turn off, 2 = turn on.
+volatile uint8_t wantShowCells_ = 0;
 
 Preferences prefs_;
 
@@ -308,6 +383,7 @@ volatile float calFactor_ = 0.0f;
 volatile bool calDone_ = true;
 volatile bool wantRestore_ = false;
 volatile bool wantPlatformZero_ = false;
+volatile bool wantSelfTest_ = false;
 
 // --- auto-tare state, owned by the task ------------------------------------
 #if BOWLSTACK_AUTOTARE
@@ -317,8 +393,8 @@ AutoTare autoTare_ = AutoTare::Off;
 #endif
 uint32_t autoStartMs_ = 0;     // when the current stable-observation began
 uint32_t autoBootMs_ = 0;      // when the task first ran, for the deadline
-int32_t autoLo_[CELLS] = {0, 0};
-int32_t autoHi_[CELLS] = {0, 0};
+int32_t autoLo_[CELLS] = {0, 0, 0};
+int32_t autoHi_[CELLS] = {0, 0, 0};
 
 // Every cell's filter is full, so a tare or a calibration is taken against the
 // averaging the operator actually selected.
@@ -376,9 +452,10 @@ bool allCellsTared() {
 }
 
 void loadPersisted() {
+  char key[8];
   prefs_.begin(NVS_NS, false);
-  platformZero_[0] = prefs_.getInt(KEY_OFF_A, 0);
-  platformZero_[1] = prefs_.getInt(KEY_OFF_B, 0);
+  for (uint8_t i = 0; i < CELLS; i++)
+    platformZero_[i] = prefs_.getInt(cellKey(key, sizeof(key), KEY_OFF_FMT, i), 0);
   // The build-time default is the fallback, so a freshly flashed board reads
   // kilograms straight away instead of counts. NVS still wins: a unit that has
   // been calibrated against its own mass keeps that figure across reflashes,
@@ -388,8 +465,8 @@ void loadPersisted() {
   // inference is almost always right and wrong exactly once -- a platform that
   // happened to tare at 0 counts would come back from a reboot claiming it had
   // never been tared.
-  cellZeroed_[0] = prefs_.getBool(KEY_TARED_A, false);
-  cellZeroed_[1] = prefs_.getBool(KEY_TARED_B, false);
+  for (uint8_t i = 0; i < CELLS; i++)
+    cellZeroed_[i] = prefs_.getBool(cellKey(key, sizeof(key), KEY_TARED_FMT, i), false);
 
   // AN UNTARED CELL HAS NO OFFSET, and the two are made to agree here rather
   // than left to drift apart. They can disagree for a real reason -- this
@@ -410,13 +487,15 @@ void loadPersisted() {
   if (window_n_ < 4 || window_n_ > WINDOW_MAX) window_n_ = BOWLSTACK_AVG_WINDOW;
   decimals_ = prefs_.getUChar(KEY_DECIMALS, DECIMALS_DEFAULT);
   if (decimals_ < 1 || decimals_ > 3) decimals_ = DECIMALS_DEFAULT;
+  showCells_ = prefs_.getBool(KEY_SHOWCELLS, false);
   calMass_ = prefs_.getFloat(KEY_CALMASS, (float)BOWLSTACK_CAL_MASS_G);
   if (calMass_ < MIN_CAL_GRAMS) calMass_ = (float)BOWLSTACK_CAL_MASS_G;
   prefs_.end();
 
   if (countsPerGram_ > 0.0f) {
-    Serial.printf("  %.3f counts/g, platform zero %ld / %ld, window %u samples\n",
-                  countsPerGram_, (long)platformZero_[0], (long)platformZero_[1], window_n_);
+    char zeros[JOIN_BUF];
+    Serial.printf("  %.3f counts/g, platform zero %s, window %u samples\n", countsPerGram_,
+                  joinCells(zeros, sizeof(zeros), platformZero_), window_n_);
     // THE RESTORED PRECISION, SAID OUT LOUD, for the same reason the window and
     // the platform zero above it are: everything in this namespace survives a
     // power cycle, and a value that survives silently cannot be told apart from
@@ -447,11 +526,12 @@ void loadPersisted() {
 // -- and unacceptable anywhere on the sampling path, which is why neither the
 // poll loop nor publish() ever touches NVS.
 void storeOffsets() {
+  char key[8];
   prefs_.begin(NVS_NS, false);
-  prefs_.putInt(KEY_OFF_A, platformZero_[0]);
-  prefs_.putInt(KEY_OFF_B, platformZero_[1]);
-  prefs_.putBool(KEY_TARED_A, cellZeroed_[0]);
-  prefs_.putBool(KEY_TARED_B, cellZeroed_[1]);
+  for (uint8_t i = 0; i < CELLS; i++) {
+    prefs_.putInt(cellKey(key, sizeof(key), KEY_OFF_FMT, i), platformZero_[i]);
+    prefs_.putBool(cellKey(key, sizeof(key), KEY_TARED_FMT, i), cellZeroed_[i]);
+  }
   prefs_.end();
 }
 
@@ -470,6 +550,7 @@ void publish() {
   Snapshot s{};
   s.window = window_n_;
   s.decimals = decimals_;
+  s.showCells = showCells_;
   s.calMassG = calMass_;
   s.countsPerGram = countsPerGram_;
   s.calibrated = countsPerGram_ > 0.0f;
@@ -568,6 +649,24 @@ void serviceCommands() {
     }
   }
 
+  // DEFERRED HERE FOR THE SAME REASON AS DECIMALS, and the reason is `prefs_`
+  // rather than the value. The value is a bool and would have been safe to set
+  // from the menu handler; the Preferences object is neither reentrant nor
+  // guarded, and writing it from the UI task while this one is using it
+  // corrupts the namespace -- which surfaces as a unit that forgot its
+  // calibration, not as a display setting that misbehaved.
+  if (wantShowCells_) {
+    const bool want = (wantShowCells_ == 2);
+    wantShowCells_ = 0;
+    if (want != showCells_) {
+      showCells_ = want;
+      prefs_.begin(NVS_NS, false);
+      prefs_.putBool(KEY_SHOWCELLS, showCells_);
+      prefs_.end();
+      Serial.printf("scale: cells on home -> %s\n", showCells_ ? "shown" : "hidden");
+    }
+  }
+
   // A tare is refused on a half-filled window for the same reason a calibration
   // is -- it would bake the filter's start-up error into the zero and persist
   // it. Left pending rather than dropped, so the tap is honoured a moment later
@@ -609,9 +708,16 @@ void serviceCommands() {
     // DELIBERATELY NOT PERSISTED -- see the note on tare() in scale.h. The
     // platform zero is the constant of the assembly; this is the constant of
     // the next thirty seconds.
-    Serial.printf("scale: tared %c%c at %ld / %ld above the platform\n",
-                  (mask & 1) ? 'A' : '-', (mask & 2) ? 'B' : '-', (long)tare_[0],
-                  (long)tare_[1]);
+    // "AB-" rather than a count, so the line says WHICH corners moved. Built
+    // from the mask rather than written out, for the same reason joinCells
+    // exists: the old two-argument version could not have grown a third letter
+    // without somebody noticing it was missing.
+    char who[CELLS + 1];
+    for (uint8_t i = 0; i < CELLS; i++) who[i] = (mask & (1u << i)) ? (char)('A' + i) : '-';
+    who[CELLS] = '\0';
+    char tares[JOIN_BUF];
+    Serial.printf("scale: tared %s at %s above the platform\n", who,
+                  joinCells(tares, sizeof(tares), tare_));
   }
 
   // --- the platform zero, the one that persists ----------------------------
@@ -634,8 +740,9 @@ void serviceCommands() {
         tareSet_[i] = true;
       }
       storeOffsets();
-      Serial.printf("scale: platform zero stored at %ld / %ld counts\n",
-                    (long)platformZero_[0], (long)platformZero_[1]);
+      char zeros[JOIN_BUF];
+      Serial.printf("scale: platform zero stored at %s counts\n",
+                    joinCells(zeros, sizeof(zeros), platformZero_));
     }
   }
 
@@ -736,6 +843,26 @@ void serviceCommands() {
     Serial.printf("scale: restored the built-in default -- %.3f counts/g from %d g\n",
                   countsPerGram_, (int)BOWLSTACK_CAL_MASS_G);
   }
+
+  // --- the self-test, on request ------------------------------------------
+  // SERVICED HERE RATHER THAN CALLED FROM THE CONSOLE HANDLER, and for the
+  // reason every other command in this block is: the console runs on the UI
+  // task, and this one shorts the PGA inputs and re-runs the AFE calibration on
+  // parts that scaleTask is concurrently polling. Two tasks driving one
+  // converter's configuration registers is not a race that shows up as a crash
+  // -- it shows up as a reading.
+  //
+  // IT BLOCKS THE MEASUREMENT FOR SEVERAL SECONDS and that is accepted, because
+  // somebody asked for it. The windows are cleared afterwards: the offset
+  // calibration has been re-run, so every sample taken before it describes a
+  // different zero.
+  if (wantSelfTest_) {
+    wantSelfTest_ = false;
+    Serial.println("\nscale: self-test -- measurement pauses while this runs\n");
+    for (uint8_t i = 0; i < CELLS; i++) cell_[i].selfTest(16, true);
+    for (uint8_t i = 0; i < CELLS; i++) window_[i].clear();
+    Serial.println("\nscale: self-test done, filters restarted\n");
+  }
 }
 
 // --- the automatic power-up tare -------------------------------------------
@@ -811,11 +938,52 @@ void serviceAutoTare(uint32_t now) {
     tareSet_[i] = true;
   }
   autoTare_ = AutoTare::Done;
-  Serial.printf("scale: auto-tared at %ld / %ld above the platform (steady %lu ms)\n",
-                (long)tare_[0], (long)tare_[1], (unsigned long)AUTOTARE_STABLE_MS);
+  char tares[JOIN_BUF];
+  Serial.printf("scale: auto-tared at %s above the platform (steady %lu ms)\n",
+                joinCells(tares, sizeof(tares), tare_), (unsigned long)AUTOTARE_STABLE_MS);
 }
 
 void scaleTask(void *) {
+  // --- converter bring-up, moved off setup() -------------------------------
+  // See the note where begin() used to do this. It runs here, first, before a
+  // single poll, so the invariant that one task owns the converters holds from
+  // the first register write.
+  uint8_t up = 0;
+  for (uint8_t i = 0; i < CELLS; i++) {
+    if (cell_[i].begin()) up++;
+  }
+  Serial.printf("  %u/%u converters answering at 0x%02X\n", up, CELLS, board::NAU7802_ADDR);
+  if (up == 0) {
+    // Expected on a board with nothing wired, and said so rather than left to
+    // read as a fault -- the same call the ToF bring-up makes. If the mux was
+    // also missing, begin() already said so and this is its consequence.
+    Serial.println("  none responded - expected with no cells attached.");
+  }
+
+#if BOWLSTACK_CELL_SELFTEST
+  // THE CHEAP HALF ONLY: bridge versus internally-shorted inputs, on four
+  // samples, and no channel-2 pass. That pair is what answers "is this cell
+  // alive" -- an open input barely moves when the PGA is shorted because it
+  // already looks like a short, while a live bridge moves by six figures. The
+  // channel-2 pass answers a different, one-off question (did the bridge land on
+  // VIN2) and costs more than everything else here put together, so it lives
+  // behind the console's 's' instead.
+  //
+  // BOOT TIME IS THE WHOLE REASON THIS IS SPLIT. At 10 SPS every sample is
+  // 100 ms of wall clock, and the full test measured 5.4 s per cell -- 16 s of a
+  // 20 s boot, on a device somebody switches on in a kitchen.
+  if (up > 0) {
+    Serial.println("\n  self-test -- bridge vs internally-shorted inputs:");
+    for (uint8_t i = 0; i < CELLS; i++) cell_[i].selfTest(4, false);
+    Serial.println(
+        "  A BRIDGE READING NEAR ZERO THAT BARELY MOVES WHEN SHORTED IS AN INPUT THAT IS\n"
+        "  NOT THERE. A live 350 ohm cell at gain 128 sits tens of thousands of counts\n"
+        "  off zero and shifts by as much again when the PGA is shorted; a delta of a\n"
+        "  few hundred is an open bridge, a dead excitation, or a cell on VIN2.\n"
+        "  Press 's' on the console for the full-depth test, including channel 2.");
+  }
+#endif
+
   uint32_t nextPublishMs = 0;
   for (;;) {
     const uint32_t now = millis();
@@ -863,7 +1031,7 @@ void scaleTask(void *) {
               // as long as the pouring lasts, and an unthrottled line would put
               // three messages a second on a console somebody is trying to read
               // the weight from. One a second says the same thing.
-              static uint32_t nextStepSayMs[CELLS] = {0, 0};
+              static uint32_t nextStepSayMs[CELLS] = {0, 0, 0};
               if ((int32_t)(now - nextStepSayMs[i]) >= 0) {
                 nextStepSayMs[i] = now + 1000;
                 Serial.printf("scale: cell %c step %+ld counts -- filter restarted\n",
@@ -918,13 +1086,15 @@ void scaleTask(void *) {
 // looks identical to an empty bus through a scan alone, so the idle levels are
 // read as plain GPIO first, before any transaction is attempted.
 //
-// This is the ToF bring-up harness's scanBus() brought back, because the
-// failure it was written for turns out to be the one this branch actually has:
-// cell A shares GPIO47/48 with the touch controller, and if that bus goes down
-// BOTH stop answering. Without this you see two unrelated-looking symptoms --
-// a dead cell and a screen that will not respond -- and no reason to connect
-// them.
-void scanBus(int port, const char *name, int sda, int scl, uint32_t hz) {
+// This is the ToF bring-up harness's scanBus() brought back. The failure it was
+// written for used to be this branch's too -- cell A shared GPIO47/48 with the
+// touch controller, so a dead cell and a dead screen were one fault wearing two
+// faces. The mux ended that particular version of it; what stays true is that a
+// stub holding SDA low still kills its channel, and a scan is the only thing
+// that tells you which.
+//
+// Returns the number of devices that acknowledged.
+uint8_t scanBus(int port, const char *name, int sda, int scl, uint32_t hz) {
   Serial.printf("  %s (SDA=%d SCL=%d, i2c port %d)\n", name, sda, scl, port);
 
   uint8_t found = 0;
@@ -934,52 +1104,131 @@ void scanBus(int port, const char *name, int sda, int scl, uint32_t hz) {
     const char *known = "";
     if (addr == 0x15) known = "  <- CST816D touch";
     else if (addr == 0x6A || addr == 0x6B) known = "  <- QMI8658 IMU";
+    else if (addr == board::MUX_ADDR) known = "  <- TCA9548A mux";
     else if (addr == board::NAU7802_ADDR) known = "  <- NAU7802 load cell";
     Serial.printf("    0x%02X ack%s\n", addr, known);
     found++;
   }
   if (found == 0) Serial.println("    (nothing acknowledged)");
+  return found;
+}
+
+// Walks the channels the cells are wired to and says what is behind each.
+//
+// THE TRUNK IS SCANNED WITH EVERY CHANNEL CLOSED FIRST, which is what makes the
+// per-channel answers mean anything: if 0x2A shows up on the trunk with the
+// switch shut, a converter is wired straight to GPIO21/16 past the mux, and
+// every channel would then appear to contain a cell whether it did or not.
+//
+// A channel that reports nothing is a channel with nothing on it OR one whose
+// stub has no pull-ups -- those two look identical from here, which is why the
+// pull-up rule is stated at every point it could bite.
+void scanMuxChannels() {
+  Serial.println("\n  mux channels:");
+  for (uint8_t i = 0; i < CELLS; i++) {
+    const int8_t ch = board::CELL_MUX_CH[i];
+    if (!i2cmux::select(ch)) {
+      Serial.printf("    ch %d (cell %c)  -- SELECT FAILED, the mux is not answering\n", ch,
+                    (char)('A' + i));
+      continue;
+    }
+    uint8_t b = 0;
+    const bool cell =
+        lgfx::i2c::transactionRead(CELL_PORT, board::NAU7802_ADDR, &b, 1, CELL_HZ).has_value();
+    Serial.printf("    ch %d (cell %c)  %s\n", ch, (char)('A' + i),
+                  cell ? "0x2A acknowledged" : "nothing -- check wiring and the stub's 4.7k");
+  }
+  // CLOSED AGAIN before anything else touches the bus. Leaving the last channel
+  // open would work by luck: the first cell to be configured would select its
+  // own channel anyway, but a scan is a diagnostic and a diagnostic that leaves
+  // state behind is a source of the next bug.
+  i2cmux::select(-1);
 }
 
 void begin() {
   mutex_ = xSemaphoreCreateMutex();
   published_ = Snapshot{};
+  // WARMING, NOT OFFLINE, for the window before the first publish. A
+  // zero-initialised Snapshot puts every cell in Offline -- enum value 0 -- and
+  // the dashboard renders that as "no cell talking" in fault red. That window
+  // used to be a few milliseconds; the converters are now brought up on the
+  // scale task rather than here, so it is over a second, and a red fault flag
+  // on every single boot is a claim this firmware has no business making.
+  //
+  // Warming is the accurate word and the vocabulary already exists for it: the
+  // channel scan a few lines below proves a converter answers on each channel,
+  // so what is unknown is not whether the cell is there but whether it has
+  // concluded anything yet.
+  for (uint8_t i = 0; i < CELLS; i++) published_.cell[i].state = CellState::Warming;
 
   Serial.println("\n--- load cells ---");
 
-  // Bus A is already open: LovyanGFX initialised i2c port 0 when the touch
-  // controller came up. Opening it again here would release and re-create the
-  // bus underneath a live driver, for no gain.
-  Serial.printf("  bus A  i2c port %d (hardware)  SDA=%d SCL=%d  -- shared with touch+IMU\n",
-                PORT_A, board::CELL_A_SDA, board::CELL_A_SCL);
+  // The cell bus has no peripheral behind it until now -- unlike the old cell A,
+  // which rode a port LovyanGFX had already opened and therefore had to be left
+  // alone. Port 1 is nobody else's, so this is the one and only init of it.
+  const bool busOk =
+      lgfx::i2c::init(CELL_PORT, board::CELL_SDA, board::CELL_SCL).has_value();
+  Serial.printf("  cell bus  i2c port %d (hardware)  SDA=%d SCL=%d  %s\n", CELL_PORT,
+                board::CELL_SDA, board::CELL_SCL, busOk ? "" : "-- INIT FAILED");
 
-  // Bus B has no peripheral behind it, so it does have to be opened.
-  const bool bOk = lgfx::i2c::init(PORT_B, board::CELL_B_SDA, board::CELL_B_SCL).has_value();
-  Serial.printf("  bus B  i2c port %d (bit-banged)  SDA=%d SCL=%d  %s\n", PORT_B,
-                board::CELL_B_SDA, board::CELL_B_SCL, bOk ? "" : "-- INIT FAILED");
-  Serial.println("         no pull-ups on this pair: fit 4.7k to 3V3 on both lines.");
+  i2cmux::configure(CELL_PORT, board::MUX_ADDR, CELL_HZ);
+  const bool muxOk = i2cmux::begin();
+  Serial.printf("  mux       TCA9548A at 0x%02X  %s\n", board::MUX_ADDR,
+                muxOk ? "answering, all channels closed" : "-- NOT ANSWERING");
+  if (!muxOk) {
+    // THE ONE FAILURE THAT EXPLAINS EVERY OTHER ONE. With no mux there is no
+    // path to any converter, so all three will report Offline and the obvious
+    // reading of that is three dead cells. Said once, plainly, at the top.
+    Serial.println("  !! NO MUX, THEREFORE NO CELLS. Every cell below will read Offline and");
+    Serial.println("     that is a consequence, not three separate faults. Check 3V3 and GND");
+    Serial.println("     at the module, A0/A1/A2 strapped to GND, and !RESET pulled to 3V3 --");
+    Serial.println("     a floating !RESET holds the switch open and looks exactly like this.");
+  }
 
   Serial.println("\n  bus scan:");
-  scanBus(PORT_A, "bus A -- touch + IMU + cell A", board::CELL_A_SDA, board::CELL_A_SCL, HZ_A);
-  Serial.println("    expect 0x15 (touch), 0x6A or 0x6B (IMU), 0x2A (cell A).");
-  Serial.println("    0x15 MISSING means the bus is down, and the SCREEN goes with it --");
+  scanBus(0, "port 0 -- touch + IMU (no cells here any more)", board::TP_SDA, board::TP_SCL,
+          400000);
+  Serial.println("    expect 0x15 (touch) and 0x6A or 0x6B (IMU), and NOTHING else.");
+  Serial.println("    0x15 MISSING means that bus is down, and the SCREEN goes with it --");
   Serial.println("    every failed touch read costs ~13 ms of I2C timeout inside the");
   Serial.println("    render loop, which shows up as a collapsed frame rate.");
-  scanBus(PORT_B, "bus B -- cell B", board::CELL_B_SDA, board::CELL_B_SCL, HZ_B);
+  scanBus(CELL_PORT, "cell trunk -- mux only, channels closed", board::CELL_SDA,
+          board::CELL_SCL, CELL_HZ);
+  Serial.printf("    expect 0x%02X and nothing else. A 0x%02X HERE means a converter is\n",
+                board::MUX_ADDR, board::NAU7802_ADDR);
+  Serial.println("    wired to the trunk rather than behind a channel.");
+  scanMuxChannels();
 
-  cell_[0].configure(PORT_A, HZ_A, "cell A");
-  cell_[1].configure(PORT_B, HZ_B, "cell B");
-
-  uint8_t up = 0;
+  Serial.println();
   for (uint8_t i = 0; i < CELLS; i++) {
-    if (cell_[i].begin()) up++;
+    // Names live in a table rather than being built per call site, because the
+    // console lines, the Device page and the scope legend all have to agree
+    // about which corner is which and there is no second place to be wrong.
+    cell_[i].configure(CELL_PORT, CELL_HZ, CELL_NAME[i], board::CELL_MUX_CH[i]);
   }
-  Serial.printf("  %u/%u converters answering at 0x%02X\n", up, CELLS, board::NAU7802_ADDR);
-  if (up == 0) {
-    // Expected on a board with nothing wired, and said so rather than left to
-    // read as a fault -- the same call the ToF bring-up makes.
-    Serial.println("  none responded - expected with no cells attached.");
-  }
+
+  // THE CONVERTERS ARE BROUGHT UP ON THE TASK, NOT HERE, and that is a boot-time
+  // decision with a measurement behind it. Each Nau7802::begin() resets the
+  // part, waits for its power-up-ready flag and runs its internal offset
+  // calibration; at 10 SPS that measured ~414 ms, and three of them is 1.24 s of
+  // setup() blocking with a splash on the screen.
+  //
+  // Nothing in setup() needs them up. The channel scan above has already proved
+  // a converter answers on each channel -- which is the diagnostic worth having
+  // at boot -- and everything downstream reads through the snapshot, which
+  // reports Warming until they conclude. So the wait buys nothing except a
+  // later dashboard.
+  //
+  // It stays a BLOCKING sequence, just on the other side of the task boundary:
+  // one task owns the converters, and moving their bring-up anywhere else would
+  // put two tasks on the same registers. See scaleTask().
+
+#if !BOWLSTACK_CELL_SELFTEST
+  // SAID OUT LOUD, because a diagnostic that exists and is switched off is worse
+  // than one that does not exist: the first time somebody needs it they have to
+  // find out it is there. One line at boot is the whole cost of that.
+  Serial.println("  self-test skipped at boot -- press 's' on the console to run it");
+#endif
 
   loadPersisted();
 
@@ -1011,6 +1260,8 @@ bool ready() {
 void tare() { wantTare_ = true; }
 
 void setPlatformZero() { wantPlatformZero_ = true; }
+
+void requestSelfTest() { wantSelfTest_ = true; }
 
 AutoTare autoTareState() { return autoTare_; }
 
@@ -1059,6 +1310,18 @@ void setWindow(uint8_t n) {
 
 uint8_t decimals() { return decimals_; }
 
+bool showCells() { return showCells_; }
+
+bool toggleShowCells() {
+  // Reads the PENDING value if one is queued, so two quick taps land back where
+  // they started rather than both toggling off the same value and appearing to
+  // do nothing. Same reasoning as cycleDecimals(), and the same bug without it.
+  const bool from = wantShowCells_ ? (wantShowCells_ == 2) : showCells_;
+  const bool next = !from;
+  wantShowCells_ = next ? 2 : 1;
+  return next;
+}
+
 void setDecimals(uint8_t d) {
   if (d < DECIMAL_CHOICES[0]) d = DECIMAL_CHOICES[0];
   if (d > DECIMAL_CHOICES[DECIMAL_CHOICE_COUNT - 1])
@@ -1096,7 +1359,7 @@ const char *calResultText(CalResult r) {
   switch (r) {
     case CalResult::Ok: return "ok";
     case CalResult::Timeout: return "no answer from the scale";
-    case CalResult::NotTared: return "tare both cells first";
+    case CalResult::NotTared: return "tare every cell first";
     case CalResult::CellsOffline: return "a cell is not converting";
     case CalResult::MassTooSmall: return "mass too small to calibrate";
     case CalResult::NoDeflection: return "the platform did not move";

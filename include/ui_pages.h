@@ -81,6 +81,12 @@ void pagesOnScaleRestore(void (*cb)(void));
 // volatile and belongs to the next measurement rather than to the assembly.
 void pagesOnScalePlatformZero(void (*cb)(void));
 
+// Settings > Scale > "Cells on home": shows or hides the per-cell breakdown
+// under the dashboard total. Like every other row here it is INERT in the
+// desktop preview, where nothing installs a handler -- the preview exercises
+// both layouts through the fixtures instead.
+void pagesOnScaleToggleCells(void (*cb)(void));
+
 // How long without a touch before the UI returns to the stock page.
 //
 // A device left on the WiFi page is a device whose primary readout -- the bowl

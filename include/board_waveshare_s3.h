@@ -208,45 +208,50 @@ static const int8_t CAM_SCCB_SDA = 21;
 static const int8_t CAM_SCCB_SCL = 16;
 
 // ---------------------------------------------------------------------------
-// 8. Load cells -- two NAU7802, and why they cannot share a bus
+// 8. Load cells -- three NAU7802 behind a TCA9548A, on ONE bus
 // ---------------------------------------------------------------------------
 // THE NAU7802 HAS NO ADDRESS PINS. Every part answers at 0x2A and there is no
-// strap, no OTP field and no software way to move it. Two of them is therefore
-// two BUSES, and that is a property of the part rather than a layout choice --
-// a mux or a bus switch would be the only other answer, and this board has
-// neither fitted.
+// strap, no OTP field and no software way to move it. That fact has not
+// changed; what changed is the answer to it.
 //
-//   A   GPIO47/48, the on-board bus, hardware I2C port 0
-//   B   GPIO11/12, bit-banged, no peripheral involved
+// WHAT THIS REPLACED, because the reasoning is worth keeping. Two cells were
+// two BUSES: cell A on GPIO47/48 sharing the touch controller's hardware port,
+// cell B bit-banged on GPIO11/12 with no pull-ups fitted. Both halves of that
+// were bad in a way the third cell made unarguable:
 //
-// BUS A IS THE TOUCH AND IMU BUS, which section 3 above argues should stay
-// clear of off-board parts. That argument was about FOUR VL53L0X CLONES, whose
-// documented failure mode is latching SDA low and taking the touchscreen down
-// with them. It does not transfer wholesale to one NAU7802: it is a single
-// first-party part, it is read-mostly, and it sits on a short lead rather than
-// a metre of cable up a pipe. The risk is real but it is one device, and the
-// alternative -- two bit-banged buses -- costs CPU on the exact loop whose
-// frame rate is the point of this build.
+//   * Cell A sat on the TOUCH AND IMU bus, which section 3 above argues should
+//     stay clear of off-board parts. A cell that latched SDA low took the
+//     screen down with it -- see the timed-touch backoff in loadcell_main.cpp,
+//     written for exactly that.
+//   * Cell B was software on the render loop, at 100 kHz because GPIO11/12 have
+//     no pull-ups and 400 kHz produced NAKs that read as a flaky converter.
+//   * A third cell would have been a third bus, and there was no third pair
+//     worth having.
 //
-// Worth stating plainly so nobody has to rediscover it: if the screen ever goes
-// unresponsive on a unit with cells attached, THIS is the first thing to
-// suspect, and moving cell A to a third bit-banged pair is the fallback.
+// SO: one hardware bus, one switch, one channel per cell. GPIO21/16 is the
+// camera's SCCB pair -- a complete I2C bus with 4.7k pull-ups already fitted
+// (R4, R5), broken out on header P1, and idle because this project will never
+// fit a camera. It reaches hardware I2C port 1; port 0 stays LovyanGFX's, and
+// GPIO47/48 now carry nothing but the touch chip and the IMU again.
 //
-// GPIO47/48 already carry R29/R30 (4.7k). Do not add more.
-static const int8_t CELL_A_SDA = 48;  // == TP_SDA, deliberately
-static const int8_t CELL_A_SCL = 47;  // == TP_SCL
+// THE MUX IS A SWITCH, NOT A BUFFER. Each downstream stub needs its own 4.7k
+// pair to 3V3 -- fitted on the converter breakout, or fitted by hand. See
+// i2cmux.h for the rest of what follows from that, including why exactly one
+// channel is ever enabled.
+//
+// A0/A1/A2 to GND gives 0x70. They have no internal pull-downs in the silicon;
+// most breakouts fit their own, but a floating address pin is an address that
+// moves, so strap them.
+static const int8_t CELL_SDA = 21;  // == CAM_SCCB_SDA, R4 4.7k fitted
+static const int8_t CELL_SCL = 16;  // == CAM_SCCB_SCL, R5 4.7k fitted
 
-// BUS B HAS NO PULL-UPS ANYWHERE. Section 7 says so of the whole second bus and
-// it is worth repeating at the point of use: GPIO11 and GPIO12 are plain
-// broken-out pins on header P2 with nothing fitted to them. The bit-bang driver
-// enables the ESP32's internal pull-ups (~45 kohm), which is enough to make a
-// bus work on a bench with short leads and NOT enough to hold a real edge --
-// the rise time goes soft, and the symptom is intermittent NAKs that look like
-// a flaky device rather than a missing resistor.
-//
-// FIT 4.7k FROM EACH LINE TO 3V3. 3V3 and GND are both on P2.
-static const int8_t CELL_B_SDA = 12;
-static const int8_t CELL_B_SCL = 11;
+static const uint8_t MUX_ADDR = 0x70;  // A0/A1/A2 grounded
+
+// Cell index -> mux channel. Identity today, and stated as a table anyway: the
+// mapping is a WIRING fact, and the day one stub moves to channel 5 to dodge a
+// damaged pin, this is the only line that should have to change.
+static const uint8_t CELL_COUNT = 3;
+static const int8_t CELL_MUX_CH[CELL_COUNT] = {0, 1, 2};
 
 // Fixed and unchangeable -- see above.
 static const uint8_t NAU7802_ADDR = 0x2A;
