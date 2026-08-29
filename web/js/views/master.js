@@ -59,7 +59,24 @@ export function renderMaster(state) {
   frag.append(mealStrip(rows));
 
   const grid = h('div', { class: 'master-rows' });
-  for (const row of rows) grid.append(slotCard(row, state.devices, inService, tz, meal));
+  // Keyed by slot so a card can find its own rate without a second loop, and
+  // absent entirely on a database without migrate_burn_rate.sql -- in which
+  // case every card simply says nothing about consumption.
+  const burn = new Map((state.burn || []).map(b => [Number(b.food_slot), b]));
+  // Grouped once here rather than filtered per card: the series is one row per
+  // slot per five minutes, so filtering inside the loop is quadratic over a
+  // list that grows with both the fleet and the window.
+  const series = new Map();
+  for (const p of (state.series || [])) {
+    if (p.total_g == null) continue;
+    const k = Number(p.food_slot);
+    if (!series.has(k)) series.set(k, []);
+    series.get(k).push({ t: new Date(p.at_ts).getTime(), v: Number(p.total_g) });
+  }
+  for (const row of rows)
+    grid.append(slotCard(row, state.devices, inService, tz, meal,
+                         burn.get(Number(row.food_slot)),
+                         series.get(Number(row.food_slot))));
   frag.append(grid);
 
   frag.append(h('div', { class: 'legend-line' },
@@ -120,7 +137,7 @@ function areaHealth(devices, loc, slot) {
 
 // --- one dish position ------------------------------------------------
 
-function slotCard(row, devices, inService, tz, meal) {
+function slotCard(row, devices, inService, tz, meal, rate, series) {
   const q = slotQuantity(row);
   const alert = compromised(row);
   const dishes = row.dishes || [];
@@ -167,9 +184,30 @@ function slotCard(row, devices, inService, tz, meal) {
         class: 'mrow-fix', href: weightLink(row, meal), title: q.note,
       }, 'Set weight ›'));
     }
+
+    // NEITHER A SOURCE CHIP NOR A MISMATCH WARNING, and both were removed for
+    // the same reason: they treated the buffer and the counter as rival
+    // answers. They are different food in different places, which the view now
+    // ADDS -- so there is no source to name and no disagreement to flag. What
+    // the card shows instead is
+
   }
+
   head.append(fig);
   card.append(head);
+
+  // --- consumption ---------------------------------------------------
+  // THE LINE THAT STARTS A SECOND PRODUCTION RUN. Everything above says how
+  // much is left; this says how fast it is going and when it runs out, which
+  // is the only pair of facts you can act on while there is still time to
+  // cook.
+  //
+  // Absent when there is no rate rather than rendered as zero -- a station
+  // that has been reporting for four minutes has not told anybody it is
+  // consuming nothing.
+  if (rate && rate.g_per_hour != null) {
+    card.append(burnLine(rate, tz, series));
+  }
 
   // One line per serving area, in a fixed order so the eye can run down the
   // page and compare the same hall across every slot.
@@ -232,13 +270,45 @@ function areaLine(a, health, showDish) {
       : `${bowls} of ${a.bowls_capacity} bowls`,
   }, bowls == null ? '—' : `${bowls}/${a.bowls_capacity}`));
 
-  // NULL is not zero, here as everywhere: a hall with no per-bowl weight says
-  // what it is missing rather than printing "0.0 kg", which would read as an
-  // empty counter and send someone to refill a full one.
+  // NULL is not zero, here as everywhere: a hall with nothing to weigh with
+  // says what it is missing rather than printing "0.0 kg", which would read as
+  // an empty counter and send someone to refill a full one.
+  //
+  // A weighed hall is NOT marked. `a.weight_source` says which halls were
+  // measured and this line deliberately does not render it: four cards abreast
+  // leaves ~250 px here, and every glyph added is a wrap risk on a row that was
+  // already tuned to fit in one. The tooltip carries the arithmetic instead,
+  // which is where somebody who wants to know goes anyway.
+  // THREE REASONS A HALL HAS NO KILOGRAMS, and they are not the same fact.
+  //
+  //   no dish        this hall is not serving this meal -- breakfast runs at
+  //                  Darshanarthi only, and Mahatma is not missing anything
+  //   no weight set  it IS serving, and nobody has typed a kg/bowl. This is
+  //                  the one worth prompting about
+  //   no reading     the dish and the weight are both set; the stacks are
+  //                  silent
+  //
+  // The first used to render as "no weight set", which asked somebody to go
+  // and configure a dish that does not exist at that hall.
   line.append(grams == null
-    ? h('span', { class: 'marea-kg unset' },
-        a.bowl_weight_g == null ? 'no weight set' : '—')
-    : h('span', { class: `marea-kg${glyph ? ' is-alert' : ''}` }, fmtWeight(grams)));
+    ? h('span', {
+        class: 'marea-kg unset',
+        title: a.food_name == null
+          ? 'This hall is not serving at this position for the current meal.'
+          : a.bowl_weight_g == null
+            ? 'Serving, but no kg per bowl has been entered on the Menu tab.'
+            : 'No stack here has reported.',
+      }, a.food_name == null ? 'no dish'
+         : a.bowl_weight_g == null ? 'no weight set' : '—')
+    : h('span', {
+        class: `marea-kg${glyph ? ' is-alert' : ''}`,
+        title: a.weight_source === 'measured'
+            ? `Weighed at the counter${a.scales > 1 ? ` by ${a.scales} scales` : ''}.`
+          : a.bowl_weight_g != null
+            ? `${bowls == null ? '—' : bowls} bowls x `
+              + `${(Number(a.bowl_weight_g) / 1000).toFixed(1)} kg, from the Menu tab.`
+            : undefined,
+      }, fmtWeight(grams)));
 
   return line;
 }
@@ -254,4 +324,127 @@ function weightLink(row, meal) {
     meal: row.menu_meal_type || row.current_meal || meal || mealAtLocalClock(),
   });
   return `#/menu?${q}`;
+}
+
+/**
+ * The history, and where it is heading — the battery-screen shape.
+ *
+ * NO RATE, NO WARNING COLOUR, NO CHIP. An earlier cut put "38.60 kg/min ·
+ * runs out 00:17 · at the earliest" on every card, in amber. Three
+ * problems with that, and only the first was a bug:
+ *
+ *   * The number was wrong by a thousand — grams per minute wearing a kg
+ *     label. Fixed, but it should never have been the headline.
+ *   * A rate is working, not an answer. Nobody schedules a production run
+ *     from kg/min; they schedule it from "this is empty at 00:17".
+ *   * Colour-coding urgency on a card that already carries fault and
+ *     offline colour gives the eye three competing alarms. A phone does
+ *     not turn its battery graph red at 20%; it draws the curve and says
+ *     when it runs out, and the reader decides.
+ *
+ * So: the curve, and one quiet line under it. Everything else moved to the
+ * tooltip, where somebody reconciling against a delivery note can find it.
+ */
+function burnLine(rate, tz, series) {
+  const outAt = rate.runs_out_at ? new Date(rate.runs_out_at) : null;
+  const minsLeft = outAt ? Math.round((outAt - Date.now()) / 60000) : null;
+
+  // Grams per hour to kilograms per hour: one division, at the point of
+  // display, exactly as every other weight on this screen.
+  const kgPerHour = Number(rate.g_per_hour) / 1000;
+
+  const bits = [];
+  if (outAt && minsLeft != null && minsLeft >= 0) {
+    bits.push(h('span', { class: 'mburn-out' },
+      `Empty about ${fmtClock(rate.runs_out_at, tz)}`));
+    bits.push(h('span', { class: 'dim' }, humanLeft(minsLeft)));
+  } else {
+    // A rate with no projection means the stock is not falling. Say that
+    // rather than leaving the line blank, which reads as missing data.
+    bits.push(h('span', { class: 'dim' }, 'Not falling'));
+  }
+
+  const line = h('div', {
+    class: 'mburn',
+    title: `${kgPerHour.toFixed(1)} kg/h over the last ${rate.covered || 'hour'}`
+         + `, from ${((rate.total_g ?? 0) / 1000).toFixed(1)} kg on hand `
+         + `(${((rate.buffer_g ?? 0) / 1000).toFixed(1)} buffered `
+         + `+ ${((rate.counter_g ?? 0) / 1000).toFixed(1)} on the counter)`
+         + (rate.is_partial
+             ? '. Some hall’s buffer has no per-bowl weight, so this is the '
+               + 'earliest it could run out, not the likeliest.'
+             : ''),
+  }, ...bits);
+
+  if (series && series.length > 1) {
+    const wrap = h('div', { class: 'mburn-wrap' });
+    wrap.append(sparkline(series));
+    wrap.append(line);
+    return wrap;
+  }
+  return line;
+}
+
+/** "· 1 h 38 m left". Hours and minutes rather than a raw minute count,
+ *  because past about ninety minutes "94 min" stops being a duration anyone
+ *  reads at a glance. */
+function humanLeft(mins) {
+  if (mins < 60) return ` · ${mins} min left`;
+  const hh = Math.floor(mins / 60), mm = mins % 60;
+  return mm ? ` · ${hh} h ${mm} m left` : ` · ${hh} h left`;
+}
+
+/**
+ * Total stock over the window, drawn small.
+ *
+ * NO AXES, NO TICKS, NO LABELS. It sits under a figure that already states
+ * the current value and beside a sentence that states the rate, so anything
+ * it repeated would be clutter -- its whole job is the SHAPE. The card's
+ * tooltip carries the numbers.
+ *
+ * Scaled from zero rather than from the minimum. A curve auto-scaled to its
+ * own range makes a counter that drifted 200 g look exactly like one that
+ * emptied, which on a stock screen is the one misreading that matters.
+ */
+function sparkline(pts) {
+  const W = 168, H = 34, PAD = 2;
+  const vals = pts.map(p => p.v);
+  const top = Math.max(...vals, 1);
+  const t0 = pts[0].t, t1 = pts[pts.length - 1].t;
+  const span = Math.max(1, t1 - t0);
+  const x = t => PAD + ((t - t0) / span) * (W - PAD * 2);
+  const y = v => PAD + (1 - v / top) * (H - PAD * 2);
+
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.setAttribute('width', String(W));
+  svg.setAttribute('height', String(H));
+  svg.setAttribute('class', 'mspark');
+  svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label',
+    `Stock over the last hour, ${(vals[0] / 1000).toFixed(1)} to `
+    + `${(vals[vals.length - 1] / 1000).toFixed(1)} kg`);
+
+  const area = document.createElementNS(NS, 'path');
+  area.setAttribute('class', 'mspark-fill');
+  area.setAttribute('d',
+    `M${x(t0)},${H - PAD}`
+    + pts.map(p => `L${x(p.t)},${y(p.v)}`).join('')
+    + `L${x(t1)},${H - PAD}Z`);
+  svg.append(area);
+
+  const line = document.createElementNS(NS, 'path');
+  line.setAttribute('class', 'mspark-line');
+  line.setAttribute('d', pts.map((p, i) => `${i ? 'L' : 'M'}${x(p.t)},${y(p.v)}`).join(''));
+  svg.append(line);
+
+  const dot = document.createElementNS(NS, 'circle');
+  dot.setAttribute('class', 'mspark-dot');
+  dot.setAttribute('cx', String(x(t1)));
+  dot.setAttribute('cy', String(y(vals[vals.length - 1])));
+  dot.setAttribute('r', '2.4');
+  svg.append(dot);
+
+  return svg;
 }

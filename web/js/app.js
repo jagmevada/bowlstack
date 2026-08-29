@@ -46,6 +46,13 @@ const state = {
   // differently (per area vs site-wide) and merging them would mean one of
   // the two screens re-deriving the other's grouping.
   quantity: [],
+  // slot_burn_rate -- consumption per dish position over buffered stock PLUS
+  // the active counter. Tolerated as absent for the same reason quantity is:
+  // a database without migrate_burn_rate.sql should show the rest of Master,
+  // not an error page.
+  burn: [],
+  // slot_stock_series -- the curve the rate is computed from.
+  series: [],
   // Why slot_quantity came back empty, when it did. Null means it answered.
   quantityError: null,
   template: [],
@@ -323,7 +330,7 @@ async function refresh(manual = false) {
   let quantityError = null;
 
   try {
-    const [devices, slots, quantity, template] = await Promise.all([
+    const [devices, slots, quantity, burn, series, template] = await Promise.all([
       client.from('device_overview').select('*')
         .order('location', { nullsFirst: false }).order('food_slot', { nullsFirst: false })
         .then(unwrap),
@@ -343,6 +350,19 @@ async function refresh(manual = false) {
         .then(r => { quantityError = r.error ? describeError(r.error) : null;
                      return r.error ? [] : r.data || []; })
         .catch(err => { quantityError = describeError(err); return []; }),
+      // Consumption rate. Absent on a database that has not run
+      // migrate_burn_rate.sql, and absent is FINE -- Master renders the
+      // stock figures without it and simply says nothing about rate, which
+      // is the honest thing when there is no history to compute one from.
+      client.from('slot_burn_rate').select('*').order('food_slot')
+        .then(r => (r.error ? [] : r.data || []))
+        .catch(() => []),
+      // The curve behind the rate. Same tolerance: absent without
+      // migrate_burn_rate.sql, and Master simply draws no sparkline.
+      client.from('slot_stock_series').select('food_slot, at_ts, total_g')
+        .order('at_ts')
+        .then(r => (r.error ? [] : r.data || []))
+        .catch(() => []),
       // The weekly template, so Stock's empty state can say "the plan exists,
       // apply it" instead of a bare "No menu entered". Display still comes
       // ONLY from dated rows; this powers a hint, never a dish. Tolerates the
@@ -355,6 +375,8 @@ async function refresh(manual = false) {
     state.devices = devices || [];
     state.slots = slots || [];
     state.quantity = quantity || [];
+    state.burn = burn || [];
+    state.series = series || [];
     state.quantityError = quantityError;
     state.template = template || [];
     state.loadedAt = Date.now();
@@ -412,7 +434,9 @@ document.addEventListener('visibilitychange', () => {
 // container, and never while the Menu page holds an unsaved draft — an
 // accidental swipe must not throw away half-typed dishes.
 
-const SWIPE_TABS = ['stock', 'master', 'health', 'menu', 'assign'];
+// Swipe order follows the tab bar, so a left swipe goes where the eye
+// expects. Master leads: it is the screen the kitchen opens on.
+const SWIPE_TABS = ['master', 'stock', 'health', 'menu', 'assign'];
 
 /** Pure decision, exported for the smoke suite: the route a swipe lands on,
  *  or null when the gesture must be ignored. dx<0 is a leftward swipe. */

@@ -166,17 +166,52 @@ export function fmtWeight(grams, partial = false) {
 export function slotQuantity(row) {
   const trusted  = row.bowls_trusted == null ? null : Number(row.bowls_trusted);
   const capacity = Number(row.bowls_capacity) || 0;
-  const grams    = row.est_weight_g == null ? null : Number(row.est_weight_g);
+
+  // THE AUTHORITATIVE FIGURE. slot_quantity.weight_g is the SUM of the two
+  // pools per area -- buffered bowls plus what the counter is weighing --
+  // because they are different food in different places, not rival estimates
+  // of the same food. est_weight_g and
+  // measured_weight_g are its two inputs, carried so the row can say which it
+  // is showing rather than leaving a reader to guess.
+  //
+  // Falls back to est_weight_g when weight_g is absent, which is a real state
+  // rather than defensiveness: a database that has had migrate_bowl_weight.sql
+  // but not migrate_loadcell.sql has the estimate and no precedence column, and
+  // Master should go on working there exactly as it did.
+  const estGrams = row.est_weight_g == null ? null : Number(row.est_weight_g);
+  const measGrams =
+    row.measured_weight_g == null ? null : Number(row.measured_weight_g);
+  const grams = row.weight_g == null ? estGrams : Number(row.weight_g);
+
   const capacityGrams =
     row.capacity_weight_g == null ? null : Number(row.capacity_weight_g);
   const partial  = !!row.est_is_partial;
-  const base = { trusted, capacity, grams, capacityGrams, partial };
 
-  if (trusted == null) {
+  // NO weight_source AND NO MISMATCH, and both were removed for the same
+  // reason: they framed the buffer and the counter as rival answers to one
+  // question. They are not. The stack counts bowls held in reserve and the
+  // platform weighs the serving counter -- different food, in different
+  // places, which slot_quantity now ADDS. A "source" is meaningless when both
+  // contribute, and a "disagreement" between them was two correct instruments
+  // being accused of a fault.
+  const base = { trusted, capacity, grams, estGrams, measGrams, capacityGrams,
+                 partial };
+
+  if (trusted == null && grams == null) {
     // NULL is not zero — the distinction the whole schema is built around.
     // One sends someone to refill, the other to investigate.
     return { ...base, kind: 'nodata', severity: 'idle', headline: 'No data',
-      note: 'No stack at this position has reported.' };
+      note: 'Nothing at this position has reported.' };
+  }
+  if (trusted == null) {
+    // NO BOWL COUNT, BUT A WEIGHT — the load-cell-only position, and the case
+    // that made this branch necessary. It is also what a position looks like
+    // when every stack has gone dark mid-service and the scale is the only
+    // thing still measuring: the old code returned 'No data' here and threw the
+    // measurement away, which is the one moment it matters most.
+    return { ...base, kind: 'count', severity: null,
+      headline: fmtWeight(grams, partial),
+      note: 'Weighed at the counter. No bowl stack here has reported a count.' };
   }
   if (grams == null) {
     // Bowls are known; kilograms are not. "0.0 kg" here would be a
@@ -268,7 +303,70 @@ export function slotOffline(slot) {
  *  outranks a dead sensor outranks no reading. Each state owns a distinct
  *  SHAPE as well as a colour (classes st-*), so the pairing survives
  *  colour-blindness; the words appear once per page, in the legend. */
+/** Is this installation a load cell? One place, because `kind` is absent on a
+ *  database that predates migrate_loadcell.sql and every caller would
+ *  otherwise have to remember that a missing kind means 'stack'. */
+export function isScale(dev) {
+  return dev && dev.kind === 'scale';
+}
+
+/**
+ * What to render for a LOAD CELL, and the counterpart to deviceStack().
+ *
+ * The two are deliberately the same shape -- {kind, text, note} -- because the
+ * screens that show them are the same screens, and a caller that has to know
+ * which product it is looking at before it can lay out a row is a caller that
+ * will get it wrong for one of them.
+ *
+ * THE STATE IS ALWAYS KNOWN AND THE NUMBER IS NOT, which is the inversion the
+ * whole load-cell schema is built around: weight_state always arrives, and
+ * weight_g exists only when that state is 'ok'. So this function reads the
+ * state first and the number second, never the other way round.
+ */
+export function deviceWeight(dev) {
+  if (!dev.reported) {
+    return { kind: 'none', text: '—', note: 'Never reported' };
+  }
+  const st = dev.weight_state;
+  if (st == null) {
+    // Registered as a scale, reporting, but sending no weight_state at all --
+    // firmware older than the load-cell uplink. Not a fault in the hardware.
+    return { kind: 'none', text: '—', note: 'No weight reported — check the firmware' };
+  }
+  if (st === 'ok') {
+    // 0 is a real weight and must render as 0.0 kg, not as a dash. An empty,
+    // tared, calibrated platform means "refill me"; a dash means nobody knows.
+    return { kind: 'weight', value: dev.weight_g,
+             text: fmtWeight(dev.weight_g), note: '' };
+  }
+  const say = {
+    no_cells:      ['fault', 'No load cell is answering'],
+    cells_partial: ['fault', 'A load cell has dropped out — cells sum, so the total would read LOW'],
+    over_range:    ['fault', 'A converter is saturated — the total is not a weight'],
+    settling:      ['idle',  'Taking its power-up zero'],
+    uncalibrated:  ['idle',  'Never calibrated — it has counts, not kilograms'],
+    untared:       ['idle',  'Not tared — the figure would include the platform'],
+  }[st] || ['idle', st];
+  return { kind: say[0] === 'fault' ? 'fault' : 'nostate',
+           text: st === 'no_cells' ? '!' : '—', note: say[1], state: st };
+}
+
 export function deviceGlyph(d) {
+  // A scale has no levels and no stack status, so the bowl-counter ladder
+  // below would read every one of them as "no reading" -- a grey ring on a
+  // station that is weighing perfectly well.
+  if (isScale(d)) {
+    const w = deviceWeight(d);
+    if (deviceOffline(d))
+      return { cls: 'off', glyph: '✕', word: 'offline — showing its last value' };
+    if (w.kind === 'fault')
+      return { cls: 'fault', glyph: '▲', word: w.note.toLowerCase() };
+    if (w.kind === 'nostate')
+      return { cls: 'deg', glyph: '◐', word: w.note.toLowerCase() };
+    if (w.kind === 'none')
+      return { cls: 'none', glyph: '◌', word: 'no reading' };
+    return { cls: 'ok', glyph: '●', word: 'weighing' };
+  }
   const st = deviceStack(d);
   if (st.kind === 'fault' || d.stack_status === 'discontiguous')
     return { cls: 'fault', glyph: '\u25b2', word: 'impossible reading \u2014 check the sensors' };
@@ -290,6 +388,47 @@ export function deviceSeverity(dev) {
   }
   if (dev.offline) { rank = Math.max(rank, 100); reasons.push('Offline during service'); }
   if (dev.missed_last_service) { rank = Math.max(rank, 85); reasons.push('Not reporting since before the last service ended'); }
+
+  // Liveness and battery above are true of any device. What follows is
+  // product-specific, and running the bowl-counter tests over a scale is how
+  // a perfectly healthy load cell acquires "0 of 4 sensors online".
+  if (isScale(dev)) {
+    if (dev.battery_level === 'critical') { rank = Math.max(rank, 80); reasons.push('Battery critical'); }
+    if (dev.battery_level === 'low') { rank = Math.max(rank, 60); reasons.push('Battery low'); }
+    if (dev.weight_state === 'no_cells') {
+      rank = Math.max(rank, 90); reasons.push('No load cell is answering');
+    } else if (dev.weight_state === 'cells_partial') {
+      // Ranked with a fault, not a warning. Cells under one platform SUM, so a
+      // missing cell does not add noise -- it makes the total read LOW, which
+      // looks exactly like a lighter bowl and is the harder failure to notice.
+      rank = Math.max(rank, 88);
+      reasons.push(`${dev.cells_online ?? '?'} of 3 cells — the total would read low`);
+    } else if (dev.weight_state === 'over_range') {
+      rank = Math.max(rank, 86); reasons.push('Converter saturated — not a weight');
+    } else if (dev.weight_state === 'uncalibrated') {
+      rank = Math.max(rank, 45); reasons.push('Never calibrated — counts, not kilograms');
+    } else if (dev.weight_state === 'untared') {
+      rank = Math.max(rank, 40); reasons.push('Not tared — the figure includes the platform');
+    } else if (dev.weight_state === 'settling') {
+      rank = Math.max(rank, 15); reasons.push('Taking its power-up zero');
+    }
+    if (dev.battery_mv == null && dev.battery_level == null) {
+      rank = Math.max(rank, 20); reasons.push('No battery detected');
+    }
+    if (dev.location == null || dev.food_slot == null) {
+      rank = Math.max(rank, 10); reasons.push('Not assigned to a position');
+    }
+    // THE SAME THRESHOLDS AND THE SAME THREE WORDS as the stack path below.
+    // An earlier cut invented its own -- 'warn'/'idle'/'ok' against
+    // 'warning'/'good' -- and the CSS keys off these, so a scale and a stack
+    // with identical severity drew different colours on the same list. The
+    // vocabulary is shared because the ROSTER is shared.
+    const level = rank >= 80 ? 'critical'
+                : rank >= 20 ? 'warning'
+                : 'good';
+    return { rank, level, reasons };
+  }
+
   if (dev.stack_status === 'discontiguous') { rank = Math.max(rank, 90); reasons.push('Impossible level pattern'); }
   if (dev.battery_level === 'critical') { rank = Math.max(rank, 80); reasons.push('Battery critical'); }
   if (dev.battery_level === 'low') { rank = Math.max(rank, 60); reasons.push('Battery low'); }

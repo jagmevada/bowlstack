@@ -35,8 +35,14 @@ const STATUS_STYLE = {
  * @param yMax    ceiling, from the physical stack height — never inferred
  * @param now     right edge; the last value holds until it
  */
-export function stepChart({ points, yMax = 4, now = Date.now(), width = 640, tz, title, subtitle }) {
-  const H = 152, PAD = { t: 12, r: 44, b: 24, l: 28 };
+export function stepChart({ points, yMax = 4, now = Date.now(), width = 640, tz,
+                            title, subtitle, height = 240 }) {
+  // 240, up from 152. The device page is a page somebody has DELIBERATELY
+  // opened to read a history -- unlike the cards on Stock and Master, which
+  // are scanned. At 152 a four-bowl range squeezed into ~116 px of plot and
+  // every change read as the same size step; the extra height is what makes a
+  // slow drain distinguishable from a sudden one.
+  const H = height, PAD = { t: 12, r: 44, b: 24, l: 28 };
   const W = Math.max(280, width);
   const iw = W - PAD.l - PAD.r;
   const ih = H - PAD.t - PAD.b;
@@ -265,3 +271,132 @@ export function statusTimeline({ points, now = Date.now(), width = 640, tz, dev 
 }
 
 export { STATUS_STYLE };
+
+/**
+ * Weight over time — the load cell's counterpart to stepChart().
+ *
+ * DELIBERATELY NOT stepChart WITH A DIFFERENT UNIT, for two reasons that both
+ * matter:
+ *
+ *   * stepChart draws one gridline PER INTEGER (`for v = 0; v <= top; v++`).
+ *     That is right for a bowl count, which tops out at 4. For grams it would
+ *     draw twenty thousand gridlines.
+ *
+ *   * A bowl count is a STEP: it holds a value until a sensor says otherwise,
+ *     so the tread between changes is real and drawing it flat is honest. A
+ *     weight is CONTINUOUS and was sampled — the line between two samples is
+ *     interpolation, and a step would claim the counter sat still and then
+ *     jumped, which is not what happened.
+ *
+ * Same visual language otherwise: hairline grid, ticks at the ends, and the
+ * line BROKEN wherever the reading cannot be trusted. `weight_state != 'ok'`
+ * is not a low weight, it is not a weight at all, so the line must not bridge
+ * it — exactly as stepChart refuses to bridge `discontiguous`.
+ */
+export function weightChart({ points, now = Date.now(), width = 640, tz,
+                              title, subtitle, height = 260 }) {
+  // t: 20 rather than 12, to clear the unit label. At 12 the "kg" sat exactly
+  // on y(top) -- the topmost gridline's own number -- and the two overprinted.
+  //
+  // Taller than the bowl chart by 20 px: a weight is continuous and its
+  // interesting feature is the SLOPE, which a squat plot flattens toward
+  // horizontal whatever the data does.
+  const H = height, PAD = { t: 20, r: 44, b: 24, l: 46 };
+  const W = Math.max(280, width);
+  const iw = W - PAD.l - PAD.r;
+  const ih = H - PAD.t - PAD.b;
+
+  const wrap = h('div', { class: 'chart-card' });
+  if (title) wrap.append(h('div', { class: 'chart-title' }, title));
+  if (subtitle) wrap.append(h('div', { class: 'chart-sub' }, subtitle));
+
+  const usable = points.filter(p => p.v != null);
+  if (!usable.length) {
+    wrap.append(h('div', { class: 'empty' },
+      'No weight recorded in this window.'));
+    return wrap;
+  }
+
+  const t0 = points[0].t;
+  const t1 = Math.max(now, points[points.length - 1].t);
+  const span = Math.max(1, t1 - t0);
+
+  // A NICE ceiling, not the maximum. An axis topping out at 1,213 g puts every
+  // tick on a number nobody can hold in their head; rounding up to the next
+  // 0.5 kg makes the gridlines readable and costs a little headroom.
+  const peak = Math.max(...usable.map(p => p.v), 0);
+  const stepG = peak <= 2000 ? 500 : peak <= 10000 ? 2000 : peak <= 40000 ? 5000 : 10000;
+  const top = Math.max(stepG, Math.ceil(peak / stepG) * stepG);
+
+  const x = t => PAD.l + ((t - t0) / span) * iw;
+  const y = v => PAD.t + ih - (v / (top || 1)) * ih;
+
+  const svg = s('svg', {
+    width: W, height: H, viewBox: `0 0 ${W} ${H}`,
+    role: 'img', 'aria-label': `${title || 'Weight'} over time`,
+  });
+
+  for (let v = 0; v <= top; v += stepG) {
+    svg.append(s('line', {
+      x1: PAD.l, x2: W - PAD.r, y1: y(v), y2: y(v),
+      class: v === 0 ? 'axisline' : 'gridline',
+    }));
+    svg.append(s('text', {
+      x: PAD.l - 6, y: y(v) + 3.5, 'text-anchor': 'end', class: 'tick',
+    }, `${(v / 1000).toFixed(v % 1000 === 0 ? 0 : 1)}`));
+  }
+  svg.append(s('text', {
+    x: PAD.l - 6, y: PAD.t - 9, 'text-anchor': 'end', class: 'tick',
+  }, 'kg'));
+
+  const TICKS = W > 520 ? 5 : 3;
+  for (let i = 0; i < TICKS; i++) {
+    const t = t0 + (span * i) / (TICKS - 1);
+    svg.append(s('text', {
+      x: x(t), y: H - 8,
+      'text-anchor': i === 0 ? 'start' : i === TICKS - 1 ? 'end' : 'middle',
+      class: 'tick',
+    }, fmtClock(new Date(t).toISOString(), tz)));
+  }
+
+  // Break the line wherever the scale had no trustworthy figure.
+  const runs = [];
+  let run = [];
+  for (const p of points) {
+    if (p.v == null) { if (run.length) runs.push(run); run = []; }
+    else run.push(p);
+  }
+  if (run.length) runs.push(run);
+
+  for (const r of runs) {
+    if (r.length === 1) {
+      // A lone sample is a dot, not a line. Drawing a zero-length path would
+      // render nothing and read as missing data.
+      svg.append(s('circle', {
+        cx: x(r[0].t), cy: y(r[0].v), r: 2.5, fill: 'var(--series-1)',
+      }));
+      continue;
+    }
+    // ATTRIBUTES, NOT A CLASS, and this is not a style preference -- it was a
+    // bug. There is no `.series` rule anywhere in app.css; stepChart above sets
+    // fill/stroke directly on the element, and only the grid lines are styled
+    // by class. A path with a class nobody defines gets SVG's DEFAULT fill of
+    // BLACK, so the chart rendered as a solid black region under the curve
+    // rather than as a line -- which reads as a broken chart, not as a
+    // stylesheet miss.
+    svg.append(s('path', {
+      d: r.map((p, i) => `${i ? 'L' : 'M'}${x(p.t)},${y(p.v)}`).join(''),
+      fill: 'none', stroke: 'var(--series-1)', 'stroke-width': 2,
+      'stroke-linejoin': 'round', 'stroke-linecap': 'round',
+    }));
+  }
+
+  // The last known value, called out at the right edge the way stepChart does.
+  const last = usable[usable.length - 1];
+  svg.append(s('text', {
+    x: W - PAD.r + 6, y: y(last.v) + 3.5, class: 'tick', 'text-anchor': 'start',
+  }, `${(last.v / 1000).toFixed(2)}`));
+
+  wrap.append(svg);
+  return wrap;
+}

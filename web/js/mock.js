@@ -81,7 +81,7 @@ const LOW_B = 'BWL-011';
 const AREA_LABEL = { D: 'Darshanarthi', M: 'Mahatma', T: 'Tiffin', R: 'Reserved' };
 
 const devices = ASSIGN.map(([device_id, location, food_slot], i) => ({
-  device_id, location, food_slot, i,
+  device_id, location, food_slot, i, kind: 'stack',
   label: `${AREA_LABEL[location]} slot ${food_slot}`,
   timezone: TZ,
   firmware: '0.2.0',
@@ -89,8 +89,64 @@ const devices = ASSIGN.map(([device_id, location, food_slot], i) => ({
 }));
 for (let n = 25; n <= 32; n++) {
   devices.push({
-    device_id: `BWL-0${n}`, location: 'R', food_slot: null, i: n,
+    device_id: `BWL-0${n}`, location: 'R', food_slot: null, i: n, kind: 'stack',
     label: 'Reserved', timezone: TZ, firmware: null, mac: null,
+  });
+}
+
+// --- the load cells, mirroring the stacks -----------------------------
+//
+// LDC-nnn sits at the same physical position as BWL-nnn -- the rule
+// supabase/assign_loadcells.sql states and derives rather than repeats. The
+// platform is UNDER the stack, so the two are one installation seen two ways:
+// one counts what is buffered, the other weighs what is actually there.
+//
+// EVERY scale is registered and assigned, and only SOME have reported. That is
+// not a shortcut, it is the rollout: slot 3's cells are installed on paper and
+// not yet powered, exactly as BWL-021..024 are. It is also what keeps the
+// interesting cases on screen -- with every hall weighed, `estimated` and
+// `mixed` would never render, and slot 3's "Set weight ›" case, which the
+// naive sum-then-multiply formula gets wrong, would disappear from the demo.
+const SCALE_SLOTS_LIVE = new Set([1, 2, 4]);
+
+// Deliberately awkward, one per rule the UI has:
+//   D/2 alone is weighed  -> that slot reads `mixed`
+//   T/4 reads badly heavy -> the mismatch chip, with a direction and a hall
+//   T/1 never calibrated  -> contributes NOTHING, and says why
+//
+// TIFFIN, NOT DARSHANARTHI, and the reason is a real limit rather than a
+// preference. slot_quantity compares measured against estimated PER AREA, which
+// is the finest grouping that view has -- so at Darshanarthi, which runs three
+// stacks and three scales at every position, one bad cell of three is a third
+// of a third and needs to be ~75% out before it clears the 25% band. Tiffin has
+// one of each, so per-area IS per-device there and the fault shows at its true
+// size. Putting the demo's bad cell at D would have shown a detection this
+// design cannot actually make.
+//
+// 2.2x rather than something subtler because the bowl count drains to zero on a
+// sawtooth: at 1.35x the absolute 2000 g band stops clearing once the stack is
+// down to a bowl or two, and the chip would blink on and off as the demo runs.
+const SCALE_MISCALIBRATED = 'LDC-020';   // T slot 4, one stack, one scale
+const SCALE_MISCAL_FACTOR = 2.2;
+const SCALE_UNCALIBRATED = 'LDC-017';    // T slot 1
+// Slot 2's cells at Mahatma and Tiffin are not fitted, so that position mixes
+// one measured hall with two estimated ones.
+const SCALE_NOT_FITTED = new Set(['LDC-014', 'LDC-018']);
+
+for (const [stackId, location, food_slot] of ASSIGN) {
+  const n = stackId.slice(4);
+  devices.push({
+    device_id: `LDC-${n}`, location, food_slot, i: Number(n), kind: 'scale',
+    label: `${AREA_LABEL[location]} slot ${food_slot} scale`,
+    timezone: TZ,
+    firmware: 'V1.0 250826',
+    mac: `28:84:85:47:AB:${(0xB0 + Number(n)).toString(16).toUpperCase()}`,
+  });
+}
+for (let n = 25; n <= 32; n++) {
+  devices.push({
+    device_id: `LDC-0${n}`, location: 'R', food_slot: null, i: n, kind: 'scale',
+    label: 'Reserved (scale)', timezone: TZ, firmware: null, mac: null,
   });
 }
 
@@ -189,6 +245,38 @@ function batteryOf(dev) {
   return [4020, 'good'];
 }
 
+/** What one load cell is reporting: [weight_state, weight_g].
+ *
+ *  THE STATE IS ALWAYS KNOWN AND THE NUMBER IS NOT -- the same inversion the
+ *  schema enforces with device_status_weight_agrees_ck, mirrored here so the
+ *  demo cannot render a combination the database would reject. Grams exist
+ *  exactly when the state is 'ok'.
+ *
+ *  The weight tracks the bowl count on the same stack, so the two figures move
+ *  together the way they would on a real counter -- a demo where the kilograms
+ *  and the bowls drift apart would make the mismatch chip meaningless. */
+function weightOf(dev, bowlWeightG, bowls) {
+  if (dev.device_id === SCALE_UNCALIBRATED) return ['uncalibrated', null];
+  if (bowlWeightG == null || bowls == null) {
+    // Nothing to derive a plausible mass from. Report a real state rather than
+    // a fabricated weight -- an empty platform is 0 g, and that is a claim.
+    return ['no_cells', null];
+  }
+  const truth = bowls * Number(bowlWeightG);
+  if (dev.device_id === SCALE_MISCALIBRATED) {
+    // Past both bands of weight_mismatch_tolerance(), so the chip fires. A
+    // miscalibrated cell is one of exactly two things a disagreement can mean,
+    // and the demo should show one of them -- the other, a wrong per-bowl
+    // weight on the Menu tab, is reachable by editing one and watching this
+    // same chip appear.
+    return ['ok', Math.round(truth * SCALE_MISCAL_FACTOR)];
+  }
+  // A few hundred grams of realistic slop, deterministic per device so the
+  // screen is stable between polls. Well inside the tolerance, so an honest
+  // scale never trips the chip.
+  return ['ok', Math.round(truth + ((dev.i * 137) % 400) - 200)];
+}
+
 // --- device_overview --------------------------------------------------
 
 function deviceOverview() {
@@ -197,11 +285,15 @@ function deviceOverview() {
   const now = Date.now();
   return devices.map(dev => {
     const deployed = dev.location !== 'R' && dev.food_slot != null;
-    const reported = deployed && !BACKUPS.has(dev.device_id);
+    const isScale = dev.kind === 'scale';
+    const reported = isScale
+      ? deployed && SCALE_SLOTS_LIVE.has(dev.food_slot)
+                 && !SCALE_NOT_FITTED.has(dev.device_id)
+      : deployed && !BACKUPS.has(dev.device_id);
     if (!reported) {
       return {
         device_id: dev.device_id, location: dev.location, food_slot: dev.food_slot,
-        label: dev.label, timezone: TZ,
+        label: dev.label, timezone: TZ, kind: dev.kind,
         current_food: null, current_meal: meal,
         reported: false, updated_at: null, stale_for: null,
         in_service: true, offline: false, awaiting_deployment: true,
@@ -209,6 +301,44 @@ function deviceOverview() {
         stack_count: null, stack_status: null, levels: null,
         sensors_online: null, battery_mv: null, battery_level: null,
         charging: null, uptime_s: null, firmware: null, mac: null,
+        weight_g: null, weight_state: null, cells_online: null,
+        counts_per_gram: null, net_counts: null,
+      };
+    }
+
+    // A SCALE FILLS THE OTHER HALF OF THE SAME ROW. Every stack_* column stays
+    // NULL -- which is what keeps it out of slot_overview's bowl arithmetic --
+    // and devices.kind is what tells the dashboard which half to read.
+    if (isScale) {
+      const dish = menu.get(`${dev.location}|${date}|${meal}|${dev.food_slot}`);
+      // The bowls physically on this platform: the paired stack's count.
+      const pairedStack = devices.find(d => d.device_id === `BWL-${dev.device_id.slice(4)}`);
+      const bowls = pairedStack ? liveCount(pairedStack) : null;
+      const [weight_state, weight_g] =
+        weightOf(dev, dish ? dish.bowl_weight_g : null, bowls);
+      const [battery_mv, battery_level] = batteryOf(dev);
+      return {
+        device_id: dev.device_id, location: dev.location, food_slot: dev.food_slot,
+        label: dev.label, timezone: TZ, kind: 'scale',
+        current_food: dish ? dish.food_name : null,
+        current_meal: meal,
+        reported: true,
+        updated_at: new Date(now - 20_000).toISOString(),
+        stale_for: '00:00:20',
+        in_service: true, offline: false, awaiting_deployment: false,
+        data_is_stale: false, missed_last_service: false,
+        stack_count: null, stack_status: null, levels: null, sensors_online: null,
+        battery_mv, battery_level,
+        // Unreadable on this board -- the ETA6098's STAT pin reaches no GPIO --
+        // so null, never false. See include/board_waveshare_s3.h section 5.
+        charging: null,
+        uptime_s: 3120 + Math.floor(elapsed()),
+        firmware: dev.firmware, mac: dev.mac,
+        weight_g, weight_state,
+        cells_online: weight_state === 'no_cells' ? 0 : 3,
+        counts_per_gram: weight_state === 'uncalibrated' ? null : 106.857,
+        net_counts: weight_state === 'no_cells' ? null
+          : Math.round((weight_g == null ? 18700 : weight_g) * 0.106857 * 1000),
       };
     }
     const offline = dev.device_id === OFFLINE;
@@ -236,6 +366,11 @@ function deviceOverview() {
       charging: dev.device_id === 'BWL-001',
       uptime_s: 7412 + Math.floor(elapsed()),
       firmware: dev.firmware, mac: dev.mac,
+      kind: 'stack',
+      // A stack leaves the load-cell half NULL, exactly as a scale leaves the
+      // stack half NULL. One row shape, two products.
+      weight_g: null, weight_state: null, cells_online: null,
+      counts_per_gram: null, net_counts: null,
     };
   });
 }
@@ -261,14 +396,33 @@ function perArea(rows) {
         bowl_weight_g: dish && dish.bowl_weight_g != null ? Number(dish.bowl_weight_g) : null,
         devices: 0, devices_reported: 0, any_reported: false,
         bowls_capacity: 0, bowls_trusted: null, bowls_reported: null,
+        scales: 0, scales_ok: 0, measured_weight_g: null, scale_issues: [],
         any_fault: false, any_degraded: false, any_battery_warn: false,
         any_offline: false, any_missed_service: false, oldest_update: null,
       });
     }
     const a = out.get(k);
-    a.devices += 1;
-    a.bowls_capacity += MAX_BOWLS;
-    if (r.reported) { a.devices_reported += 1; a.any_reported = true; }
+    // STACKS ONLY for the device count and the capacity, matching the `filter
+    // (where d.kind = 'stack')` the views carry. A load cell bolted at this
+    // position is not a fourth bowl counter, and counting it would claim four
+    // more bowls of capacity that nothing is watching -- with the numerator
+    // still correct, so the bar would simply read low forever.
+    if (r.kind !== 'scale') {
+      a.devices += 1;
+      a.bowls_capacity += MAX_BOWLS;
+      if (r.reported) a.devices_reported += 1;
+    } else {
+      a.scales += 1;
+      if (r.weight_state === 'ok' && r.weight_g != null) {
+        a.scales_ok += 1;
+        a.measured_weight_g = (a.measured_weight_g || 0) + Number(r.weight_g);
+      } else if (r.weight_state != null && !a.scale_issues.includes(r.weight_state)) {
+        a.scale_issues.push(r.weight_state);
+      }
+    }
+    // NOT filtered by kind: a scale that has reported means this position is
+    // live, which is what the view's `having bool_or(any_reported)` gate asks.
+    if (r.reported) a.any_reported = true;
     // Trusted only — a degraded count is a lower bound and a discontiguous
     // one is not a count at all. Same filter as the view.
     if (r.stack_status === 'ok' && r.stack_count != null) {
@@ -331,6 +485,50 @@ function slotQuantityRows(rows) {
     const trustedVals = areas.filter(a => a.bowls_trusted != null);
     const dishes = [...new Set(areas.map(a => a.food_name).filter(Boolean))].sort();
 
+    // THE PRECEDENCE RULE, PER AREA -- mirroring per_area_w in the view. Two
+    // estimates, not one, and the difference is not redundancy: the SLOT total
+    // treats a silent hall as contributing nothing while the hall's own LINE
+    // shows a dash, because "no reading" is not "an empty counter".
+    const estTotal = a => a.bowl_weight_g == null
+      ? null : (a.bowls_trusted || 0) * a.bowl_weight_g;
+    const estLine = a => a.bowl_weight_g == null || a.bowls_trusted == null
+      ? null : a.bowls_trusted * a.bowl_weight_g;
+    const wTotal = a => a.measured_weight_g != null ? a.measured_weight_g : estTotal(a);
+    const wLine = a => a.measured_weight_g != null ? a.measured_weight_g : estLine(a);
+    const srcOf = a => a.measured_weight_g != null ? 'measured'
+      : a.bowl_weight_g != null ? 'estimated' : null;
+
+    const sources = areas.map(srcOf).filter(Boolean);
+    const weight_source = sources.length === 0 ? null
+      : sources.every(s => s === 'measured') ? 'measured'
+      : sources.every(s => s === 'estimated') ? 'estimated' : 'mixed';
+
+    const withWeight = areas.filter(a => wTotal(a) != null);
+    const weight_g = withWeight.length
+      ? withWeight.reduce((n, a) => n + wTotal(a), 0) : null;
+    const measured = areas.filter(a => a.measured_weight_g != null);
+    const measured_weight_g = measured.length
+      ? measured.reduce((n, a) => n + a.measured_weight_g, 0) : null;
+
+    // PER AREA, over the halls that have BOTH -- mirroring per_area_m. A
+    // miscalibrated cell is one hall's broken instrument, and comparing slot
+    // totals averages it into the halls that are fine: a Tiffin scale 35% heavy
+    // at a three-hall position moves the total by 7%, inside the 25% band, so
+    // the slot reads healthy and the fault is invisible.
+    //
+    // Outside BOTH bands, never one -- public.weight_mismatch_tolerance().
+    const TOL_G = 2000, TOL_FRAC = 0.25;
+    const mismatched = areas.filter(a => {
+      const e = estTotal(a);
+      if (a.measured_weight_g == null || e == null) return false;
+      const d = Math.abs(a.measured_weight_g - e);
+      return d > TOL_G && d > TOL_FRAC * Math.max(e, 1);
+    });
+    const weight_mismatch = mismatched.length > 0;
+    const weight_mismatch_g = mismatched.length
+      ? mismatched.reduce((n, a) => n + (a.measured_weight_g - estTotal(a)), 0) : null;
+    const weight_mismatch_areas = mismatched.map(a => a.location);
+
     out.push({
       food_slot,
       current_meal: meal,
@@ -345,21 +543,34 @@ function slotQuantityRows(rows) {
         ? trustedVals.reduce((n, a) => n + a.bowls_trusted, 0) : null,
       est_weight_g: est,
       capacity_weight_g: capW,
-      est_is_partial: areas.some(a => a.bowl_weight_g == null && (a.bowls_trusted || 0) > 0),
+      // WIDENED with the view: "holds bowls it cannot weigh AT ALL", not
+      // "holds bowls with no per-bowl weight". A hall with a load cell has a
+      // weight even with no menu figure typed. With no scales anywhere this
+      // collapses to the old test exactly.
+      est_is_partial: areas.some(a => wTotal(a) == null && (a.bowls_trusted || 0) > 0),
       areas_without_weight: areas
-        .filter(a => a.bowl_weight_g == null && (a.bowls_trusted || 0) > 0)
+        .filter(a => wTotal(a) == null && (a.bowls_trusted || 0) > 0)
         .map(a => a.location),
       areas: areas.map(a => ({
         location: a.location, food_name: a.food_name,
         bowl_weight_g: a.bowl_weight_g, bowls_trusted: a.bowls_trusted,
         bowls_capacity: a.bowls_capacity, devices: a.devices,
-        // NULL, not 0, when the hall has no weight or no reading — see the
-        // matching note in the view.
-        weight_g: a.bowl_weight_g == null || a.bowls_trusted == null
-          ? null : a.bowls_trusted * a.bowl_weight_g,
+        // The hall's own mass, and it is the precedence answer rather than the
+        // estimate it used to be. Still NULL, never 0, when the hall has
+        // neither a measurement nor a reading to multiply.
+        weight_g: wLine(a),
+        est_weight_g: estLine(a),
+        measured_weight_g: a.measured_weight_g,
+        weight_source: srcOf(a),
+        scales: a.scales,
         capacity_weight_g: a.bowl_weight_g == null
           ? null : a.bowls_capacity * a.bowl_weight_g,
       })).sort((x, y) => x.location.localeCompare(y.location)),
+      scales: areas.reduce((n, a) => n + a.scales, 0),
+      scales_ok: areas.reduce((n, a) => n + a.scales_ok, 0),
+      measured_weight_g, weight_g, weight_source,
+      weight_mismatch, weight_mismatch_g, weight_mismatch_areas,
+      scale_issues: [...new Set(areas.flatMap(a => a.scale_issues))].sort(),
       any_fault: areas.some(a => a.any_fault),
       any_degraded: areas.some(a => a.any_degraded),
       any_battery_warn: areas.some(a => a.any_battery_warn),

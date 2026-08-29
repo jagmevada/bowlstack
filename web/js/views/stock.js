@@ -14,8 +14,9 @@
 import { h, empty, banner, batteryBar } from '../ui.js';
 import {
   LOCATION_NAMES, SERVING_LOCATIONS, MAX_BOWLS, slotStock, deviceStack,
+  deviceWeight, isScale,
   deviceGlyph, deviceOffline, slotOffline, weekdayOf, serviceDate,
-  fmtClock, fmtRelative, serviceState,
+  fmtClock, fmtRelative, serviceState, fmtWeight,
 } from '../domain.js';
 
 export function renderStock(state) {
@@ -160,14 +161,48 @@ function slotCard(sl, stacks, inService, tz, template) {
     // to a station the screen just went silent about. Ink by default; red
     // only when compromised. The fault and no-data branches above are
     // untouched: they render no numeral.
+    // KILOGRAMS LEAD WHEN THEY EXIST, and the bowl count moves underneath.
+    //
+    // A bowl count is an instrument reading; a kitchen thinks in mass. "2 of 4
+    // bowls" needs the per-bowl weight held in somebody's head before it means
+    // anything, and the database already knows that figure -- so the screen
+    // does the multiplication rather than the reader.
+    //
+    // The count is not dropped, only demoted. It is what the sensors actually
+    // measured, and the kilograms are derived from it; when they disagree with
+    // the counter beside them the count is the half that can be checked
+    // against the station by eye.
+    //
+    // Falls back to the count as the headline when there is no weight to show
+    // -- no per-bowl figure entered and no scale reporting. Better a smaller
+    // true fact than a large invented one.
+    const bowlText = sl.any_degraded ? `≥${stock.trusted}` : String(stock.trusted);
+    const grams = sl.weight_g == null ? null : Number(sl.weight_g);
+    const counterG = sl.measured_weight_g == null ? null : Number(sl.measured_weight_g);
+
     card.append(h('div', { class: 'slot-figure' },
-      h('span', {
-        class: `slot-count${compromised ? ' is-alert' : ''}`,
-        title: anyOffline
-          ? 'A stack here stopped reporting during service — this is its last known count.'
-          : undefined,
-      }, sl.any_degraded ? `≥${stock.trusted}` : String(stock.trusted)),
-      h('span', { class: 'slot-of' }, `of ${stock.capacity} bowls`)));
+      grams != null
+        ? h('span', {
+            class: `slot-kg${compromised ? ' is-alert' : ''}`,
+            title: (anyOffline
+                ? 'A stack here stopped reporting during service — this is its '
+                  + 'last known figure. '
+                : '')
+              + (sl.bowl_weight_g
+                  ? `${bowlText} bowls x ${(sl.bowl_weight_g / 1000).toFixed(1)} kg`
+                    + (counterG ? ` + ${(counterG / 1000).toFixed(1)} kg on the counter` : '')
+                  : `${(counterG / 1000).toFixed(1)} kg on the counter`),
+          }, fmtWeight(grams, sl.any_degraded))
+        : h('span', {
+            class: `slot-count${compromised ? ' is-alert' : ''}`,
+            title: anyOffline
+              ? 'A stack here stopped reporting during service — this is its last known count.'
+              : undefined,
+          }, bowlText),
+      h('span', { class: 'slot-of' },
+        grams != null
+          ? `${bowlText} of ${stock.capacity} bowls`
+          : `of ${stock.capacity} bowls`)));
   }
 
   // The capsule bar carries DATA CONFIDENCE, not a quantity colour band:
@@ -220,7 +255,7 @@ function slotCard(sl, stacks, inService, tz, template) {
   if (stacks.length) {
     const strip = h('div', { class: 'dev-strip' });
     for (const d of stacks.sort((a, b) => a.device_id.localeCompare(b.device_id))) {
-      const st = deviceStack(d);
+      const st = isScale(d) ? deviceWeight(d) : deviceStack(d);
       const g = deviceGlyph(d);
       const battWord = d.battery_level == null
         ? 'no battery detected'
@@ -233,7 +268,15 @@ function slotCard(sl, stacks, inService, tz, template) {
         title: `${d.device_id} — ${g.word} · updated ${fmtRelative(d.updated_at)} · ${battWord}`,
       },
         h('span', { class: `st st-${g.cls}`, 'aria-hidden': 'true' }, g.glyph),
-        h('span', { class: 'id' }, d.device_id.replace(/^BWL-/, '')),
+        // THE FULL ID, BOTH KINDS. It used to strip the BWL- prefix and show
+        // "001", which was unambiguous while a position held only bowl
+        // counters and stopped being so the moment a scale joined it: LDC-001
+        // sits at the same slot as BWL-001, so two rows would both have read
+        // "001". Stripping only one of the two prefixes -- which is what the
+        // old rule did once scales appeared -- was the worst of both, since
+        // the shortened row and the full one no longer looked like the same
+        // kind of thing.
+        h('span', { class: 'id' }, d.device_id),
         h('span', { class: 'ct' }, st.text),
         batteryBar(d.battery_level, d.charging, `${d.device_id}: ${battWord}`)));
     }

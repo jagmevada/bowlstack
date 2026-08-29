@@ -15,9 +15,9 @@
 //  from updated_at.
 // ====================================================================
 
-import { h, empty, levelColumn, banner, batteryBar } from '../ui.js';
+import { h, empty, levelColumn, cellColumn, banner, batteryBar } from '../ui.js';
 import {
-  compareDevices, deviceSeverity, deviceStack, deviceGlyph,
+  compareDevices, deviceSeverity, deviceStack, deviceGlyph, deviceWeight, isScale,
   deviceOffline, fmtRelative,
 } from '../domain.js';
 
@@ -32,8 +32,17 @@ const FILTERS = {
   problems: { label: 'Needs attention', test: d => !d.awaiting_deployment && deviceSeverity(d).rank >= 50 },
   offline:  { label: 'Offline', test: deviceOffline },
   battery:  { label: 'Battery', test: d => d.battery_level === 'low' || d.battery_level === 'critical' },
-  fault:    { label: 'Faults', test: d => d.stack_status === 'discontiguous' },
-  degraded: { label: 'Degraded', test: d => d.stack_status === 'degraded' },
+  // BOTH PRODUCTS, because these are filters on a FAULT, not on a sensor type.
+  // Keyed on stack_status alone they silently excluded every load cell: a
+  // station with no cell answering is the most serious thing on this page and
+  // would not have appeared under "Faults" at all.
+  fault:    { label: 'Faults', test: d => d.stack_status === 'discontiguous'
+                                       || d.weight_state === 'no_cells'
+                                       || d.weight_state === 'over_range' },
+  degraded: { label: 'Degraded', test: d => d.stack_status === 'degraded'
+                                         || d.weight_state === 'cells_partial'
+                                         || d.weight_state === 'uncalibrated'
+                                         || d.weight_state === 'untared' },
   // Registered but never heard from. These live in their own section rather
   // than the deployed list, so the filter's job is to show THAT section
   // alone — see the render conditions below.
@@ -186,7 +195,11 @@ function miniLevels(levels) {
 // someone searches), the position compresses to D3-style.
 function deviceRow(d) {
   const sev = deviceSeverity(d);
-  const stack = deviceStack(d);
+  const scale = isScale(d);
+  // Same six columns whichever product this is, so the roster stays a single
+  // scannable grid -- only what column 4 and 5 CONTAIN differs. A scale that
+  // laid itself out differently would break the alignment the whole page is.
+  const reading = scale ? deviceWeight(d) : deviceStack(d);
   const g = deviceGlyph(d);
   const battWord = d.battery_level == null
     ? 'no battery detected'
@@ -211,16 +224,19 @@ function deviceRow(d) {
     h('span', { class: 'devc-pos' },
       d.location != null && d.food_slot != null ? `${d.location}${d.food_slot}`
         : d.location != null ? d.location : '—'),
-    miniLevels(d.levels),
+    scale ? cellColumn(d.cells_online) : miniLevels(d.levels),
     // Red only where there IS a last value to redden — the fault (`!`) and
     // never-reported (`—`) renderings are not counts, so the `na` grey owns
     // them and the offline red must not touch them.
     h('span', {
       class: 'dev-count'
-        + (stack.kind === 'count' || stack.kind === 'bound'
+        + (reading.kind === 'count' || reading.kind === 'bound'
+           || reading.kind === 'weight'
             ? (deviceOffline(d) ? ' is-offline' : '')
-            : ' na'),
-    }, stack.text),
+            : ' na')
+        + (scale ? ' is-weight' : ''),
+      title: reading.note || undefined,
+    }, reading.text),
     d.awaiting_deployment
       ? h('span', { class: 'batt-slot', 'aria-hidden': 'true' })
       : batteryBar(d.battery_level, d.charging, battWord));

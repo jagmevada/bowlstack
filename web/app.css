@@ -608,6 +608,18 @@ button:disabled { opacity: .45; cursor: default; }
   line-height: 1;
   letter-spacing: -.02em;
 }
+/* The kilogram headline. Smaller than the bare bowl count above it and
+   deliberately so: "2" is one glyph and "36.0 kg" is seven, so matching
+   2.6rem would overflow a four-across card at the first two-digit figure.
+   It still dominates the card, which is what "headline" means here. */
+.slot-kg {
+  font-size: 2rem;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -.02em;
+  font-variant-numeric: tabular-nums;
+}
+.slot-kg.is-alert { color: var(--critical); }
 .slot-of { font-size: .85rem; color: var(--ink-3); }
 .slot-nodata { font-size: 1.15rem; font-weight: 600; color: var(--ink-3); }
 .slot-fault  { font-size: 1.15rem; font-weight: 600; color: var(--critical); }
@@ -651,7 +663,11 @@ button:disabled { opacity: .45; cursor: default; }
 .dev-strip { display: grid; gap: 2px; margin-top: .1rem; }
 .dev-line {
   display: grid;
-  grid-template-columns: 1rem 2.6rem 1fr auto;
+  /* 4.4rem, not 2.6. The id column was sized for a stripped "001" and a full
+     "LDC-004" wrapped onto a second line, doubling the height of every row on
+     a card that shows six of them. Sized to the longest id the scheme can
+     produce -- three letters, a dash and three digits. */
+  grid-template-columns: 1rem 4.4rem 1fr auto;
   align-items: center;
   gap: .35rem;
   min-height: 20px;
@@ -661,6 +677,10 @@ button:disabled { opacity: .45; cursor: default; }
   font-variant-numeric: tabular-nums;
 }
 .dev-line .st { text-align: center; }
+/* Belt and braces with the column width above: a narrow phone can still
+   squeeze the grid, and a wrapped id is worse than a clipped one because it
+   silently changes the row height of everything around it. */
+.dev-line .id { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dev-line .ct { text-align: right; padding-right: .1rem; }
 .dev-line:hover .id { text-decoration: underline; }
 
@@ -779,6 +799,48 @@ button:disabled { opacity: .45; cursor: default; }
   direction: rtl;
 }
 .levels.mini i { height: 13px; }
+
+/* The load cell's counterpart, occupying the same roster column so the grid
+   stays aligned across both products.
+
+   DELIBERATELY NOT A COPY OF .levels. A level strip is a LADDER -- f1 at the
+   bottom, and its vertical order carries meaning -- which is why .mini has to
+   reverse itself with direction:rtl. Cells have no order at all: they SUM, and
+   cells_online is a count rather than a vector, so these are laid out
+   left-to-right and mean "two of three", never "cell A and cell B".
+
+   Round, so the two are not mistaken for each other at a glance on a page
+   showing both. */
+.cells {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 9px;
+  gap: 3px;
+  width: auto;
+  flex: none;
+  align-items: center;
+}
+.cells i {
+  display: block;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--sunken);
+}
+.cells i.present { background: var(--series-1); }
+.cells i.absent  { background: var(--sunken); box-shadow: inset 0 0 0 1px var(--axis); }
+.cells i.unknown {
+  background: repeating-linear-gradient(45deg,
+    var(--axis) 0 2px, transparent 2px 4px);
+}
+.cells.lg { grid-auto-columns: 22px; gap: 6px; }
+.cells.lg i { height: 22px; }
+
+/* A weight is longer than a bowl count, so it gets the smaller size that a
+   two-decimal kilogram figure needs to sit on one line in the roster. */
+.dev.devc .dev-count.is-weight {
+  font-size: .95rem;
+  font-variant-numeric: tabular-nums;
+}
 
 .level-rows { display: grid; gap: 3px; }
 /* Capsule per level, no words: blue capsule = bowl present, striped = the
@@ -1103,6 +1165,45 @@ table.coverage .ghost { width: 100%; min-width: 2.2rem; }
 .mrow-kg.is-unset { font-size: 1.1rem; color: var(--ink-3); font-weight: 500; }
 .mslot-of { font-size: .78rem; color: var(--ink-3); font-variant-numeric: tabular-nums; }
 .mrow-fix { font-size: .75rem; white-space: nowrap; }
+
+/* Consumption — the curve and where it is heading, nothing else.
+
+   NO URGENCY COLOUR HERE, and that is a decision rather than an omission. The
+   card already spends red on a compromised figure and amber on a scale
+   disagreeing; a third alarm competing with those two makes all three quieter.
+   A phone does not turn its battery graph red at 20% — it draws the curve,
+   says when it runs out, and lets the reader decide. */
+.mburn-wrap { margin-top: .5rem; padding-top: .45rem; border-top: 1px solid var(--border); }
+.mburn {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: .3rem;
+  margin-top: .2rem;
+  font-size: .78rem;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+}
+.mburn-out { color: var(--ink); font-weight: 600; }
+
+/* The curve. Small and unlabelled: the figure above states the value and the
+   line below states when it runs out, so this carries SHAPE alone — steady
+   fall, one rush, or a refill twenty minutes ago.
+
+   Scaled from ZERO, never from the minimum. A curve auto-scaled to its own
+   range makes a counter that drifted 200 g look exactly like one that emptied,
+   which on a stock screen is the single misreading that matters. */
+.mspark { display: block; width: 100%; height: 34px; overflow: visible; }
+.mspark-line {
+  fill: none;
+  stroke: var(--series-1);
+  stroke-width: 1.6;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+.mspark-fill { fill: var(--series-1); opacity: .10; stroke: none; }
+.mspark-dot  { fill: var(--series-1); }
+
 .mrow-areas { font-size: .75rem; font-variant-numeric: tabular-nums; }
 
 .marea-list {

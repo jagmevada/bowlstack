@@ -497,8 +497,13 @@ console.log('\n[offline: last value kept, in red]');
     ok('a nearly-empty healthy slot keeps a plain ink number', !!healthyLow);
   }
   // M2 is BWL-014: offline at 0 bowls -- red for the OFFLINE, not the zero.
-  const m2 = cards.find(c => c.textContent.includes('BWL') === false
-    && c.querySelector('.slot-count.is-alert')?.textContent === '0');
+  //
+  // Found by the thing being asserted, not by the absence of "BWL" in the
+  // card text. That old finder worked only because the device rows stripped
+  // their prefix and printed "014"; the moment full ids came back -- which
+  // they had to, once a scale could share the position -- every card contained
+  // "BWL" and this silently matched nothing.
+  const m2 = cards.find(c => c.querySelector('.slot-count.is-alert')?.textContent === '0');
   ok('an offline zero is red for the silence, not the quantity', m2 != null);
 
   // The fault and no-data treatments are not regressed: neither renders a
@@ -857,12 +862,16 @@ console.log('\n[swipe navigation]');
   // Master sits between Stock and Health in the tab bar, so it is what a
   // left swipe off Stock now reaches. The order under test is the tab-bar
   // order, not an arbitrary list.
-  ok('left swipe on Stock lands on Master', swipeTarget('stock', -120, 10, 200, false) === 'master');
-  ok('right swipe on Master returns to Stock', swipeTarget('master', 120, -8, 200, false) === 'stock');
-  ok('left swipe on Master lands on Health', swipeTarget('master', -120, 10, 200, false) === 'health');
-  ok('right swipe on Health returns to Master', swipeTarget('health', 120, -8, 200, false) === 'master');
+  // Order is master, stock, health, menu, assign -- the tab bar's order, which
+  // Master now leads. These assert the ARGUMENTS as well as the names: an
+  // earlier pass renamed them to match and left the arguments describing the
+  // old order, so they still passed while testing the opposite thing.
+  ok('left swipe on Master lands on Stock', swipeTarget('master', -120, 10, 200, false) === 'stock');
+  ok('right swipe on Stock returns to Master', swipeTarget('stock', 120, -8, 200, false) === 'master');
+  ok('left swipe on Stock lands on Health', swipeTarget('stock', -120, 10, 200, false) === 'health');
+  ok('right swipe on Health returns to Stock', swipeTarget('health', 120, -8, 200, false) === 'stock');
   ok('left swipe on Devices has nowhere to go', swipeTarget('assign', -120, 0, 200, false) === null);
-  ok('right swipe on Stock has nowhere to go', swipeTarget('stock', 120, 0, 200, false) === null);
+  ok('right swipe on Master has nowhere to go', swipeTarget('master', 120, 0, 200, false) === null);
   ok('a mostly-vertical drag is a scroll, not a swipe', swipeTarget('stock', -70, 60, 200, false) === null);
   ok('a slow drag never navigates', swipeTarget('stock', -120, 0, 900, false) === null);
   ok('a short nudge never navigates', swipeTarget('stock', -30, 0, 150, false) === null);
@@ -1508,6 +1517,87 @@ await go('#/assign');
   ok('a null slot is written through', !!patch && patch.food_slot === null, JSON.stringify(patch));
 }
 
+
+// =======================================================================
+//  Load cells -- slotQuantity() against the columns migrate_loadcell.sql
+//  adds. Unit tests on the function rather than DOM tests through Master,
+//  because what changed is the DECISION (which of two numbers to believe)
+//  and the rendering of that decision is one line either way.
+//
+//  Everything above this point ran with a slot_quantity fixture that has
+//  NONE of these columns, which is not an oversight -- it is the
+//  un-migrated database, and those 300-odd assertions passing is what
+//  proves Master still works on one.
+// =======================================================================
+{
+  console.log('\n[load cells: the measured-vs-estimated decision]');
+  const { slotQuantity } = await import(new URL('js/domain.js', webDir).href);
+
+  // A slot with no load cells at all: unchanged from before the migration.
+  const est = slotQuantity({
+    bowls_trusted: 10, bowls_capacity: 20, est_weight_g: 50000,
+    weight_g: 50000, measured_weight_g: null,
+  });
+  ok('a slot with no scale reads from the buffer alone',
+    est.headline === '50.0 kg', est.headline);
+
+  // The same slot, now measured. The measurement wins and the row says so.
+  // THE SUM, not a choice. 50 kg buffered plus 4.2 kg on the counter is
+  // 54.2 kg of food at that position -- picking one would discard the other.
+  const meas = slotQuantity({
+    bowls_trusted: 10, bowls_capacity: 20, est_weight_g: 50000,
+    weight_g: 54200, measured_weight_g: 4200,
+  });
+  ok('buffer and counter are added, not chosen between',
+    meas.headline === '54.2 kg', meas.headline);
+  ok('...and keeps both terms so a screen can show the split',
+    meas.estGrams === 50000 && meas.measGrams === 4200);
+
+  // THE CASE THAT MADE THIS NECESSARY. Every stack silent, the scale still
+  // weighing. The old code returned 'No data' here and dropped the
+  // measurement -- at exactly the moment it is the only thing left.
+  const scaleOnly = slotQuantity({
+    bowls_trusted: null, bowls_capacity: 0, est_weight_g: null,
+    weight_g: 7500, measured_weight_g: 7500,
+  });
+  ok('a scale-only slot shows its weight, not "No data"',
+    scaleOnly.kind === 'count' && scaleOnly.headline === '7.5 kg', scaleOnly.headline);
+  ok('...and says where the figure came from',
+    /Weighed at the counter/.test(scaleOnly.note), scaleOnly.note);
+
+  // Neither a count nor a weight is still nothing, and must stay nothing.
+  const nothing = slotQuantity({
+    bowls_trusted: null, bowls_capacity: 0, est_weight_g: null, weight_g: null,
+  });
+  ok('nothing reporting is still "No data"', nothing.kind === 'nodata');
+
+  // ZERO IS A REAL WEIGHT -- the distinction the whole schema turns on. A
+  // measured, empty, tared platform is 0.0 kg and means "refill me"; null
+  // means nobody knows. They must not collapse.
+  const empty = slotQuantity({
+    bowls_trusted: 0, bowls_capacity: 20, est_weight_g: 0,
+    weight_g: 0, measured_weight_g: 0,
+  });
+  ok('a measured empty counter reads 0.0 kg, not "No data"',
+    empty.kind === 'count' && empty.headline === '0.0 kg', empty.headline);
+
+  // A hall with a load cell is not a hall missing a weight, so the >= bound
+  // and the "Set weight" prompt must not fire on it.
+  const mixed = slotQuantity({
+    bowls_trusted: 10, bowls_capacity: 20, est_weight_g: 20000,
+    weight_g: 45000, measured_weight_g: 25000, est_is_partial: false,
+  });
+  ok('a weighed hall does not read as a lower bound',
+    mixed.partial === false && !mixed.headline.startsWith('≥'), mixed.headline);
+
+  // Bowls known, no weight from either source: the pre-existing branch, which
+  // must survive untouched.
+  const noWeight = slotQuantity({
+    bowls_trusted: 7, bowls_capacity: 20, est_weight_g: null, weight_g: null,
+  });
+  ok('bowls with no weight still fall back to the count',
+    noWeight.kind === 'noweight' && noWeight.headline === '7 bowls', noWeight.headline);
+}
 
 console.log(`\n${fails.length ? `FAILED (${fails.length}): ${fails.join(' | ')}` : 'ALL PASS'}`);
 process.exit(fails.length ? 1 : 0);

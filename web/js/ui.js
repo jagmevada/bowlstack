@@ -167,6 +167,33 @@ export function banner(kind, glyph, ...content) {
 
 /** Level column. levels[0] is the BOTTOM bowl, so the array is reversed for
  *  display — a stack grows upward on screen as it does on the station. */
+/** The load cell's counterpart to levelColumn: one mark per cell, filled when
+ *  that cell is converting.
+ *
+ *  IT OCCUPIES THE SAME COLUMN, and that is the point. Without it a scale fell
+ *  through to levelColumn(null), whose fallback is four 'unknown' segments --
+ *  so every load cell on the Health page drew a four-level bowl stack it does
+ *  not have and cannot measure. A fabricated stack of unknowns is worse than
+ *  an empty cell: it looks like a reading.
+ *
+ *  THREE MARKS, NOT FOUR, because there are three cells. The count comes from
+ *  the data rather than a constant so a four-cell platform would draw four.
+ *  Which cell is which is not known -- cells_online is a count, not a vector,
+ *  because a scale's cells SUM and the total is what matters -- so the marks
+ *  fill from the left and the label says "2 of 3", never "cell B is down". */
+export function cellColumn(cellsOnline, total = 3, big = false) {
+  const n = cellsOnline == null ? null : Number(cellsOnline);
+  const col = h('div', {
+    class: `cells${big ? ' lg' : ''}`,
+    role: 'img',
+    'aria-label': n == null ? 'cell count unknown' : `${n} of ${total} cells converting`,
+  });
+  for (let i = 0; i < total; i++) {
+    col.append(h('i', { class: n == null ? 'unknown' : (i < n ? 'present' : 'absent') }));
+  }
+  return col;
+}
+
 export function levelColumn(levels, big = false) {
   const arr = Array.isArray(levels) && levels.length ? levels : ['unknown', 'unknown', 'unknown', 'unknown'];
   const col = h('div', {

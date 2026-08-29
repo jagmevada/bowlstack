@@ -11,11 +11,11 @@
 //  describing moments up to 5 s apart.
 // ====================================================================
 
-import { h, badge, empty, banner, copyText, fillSlot } from '../ui.js';
+import { h, badge, empty, banner, copyText, fillSlot, cellColumn } from '../ui.js';
 import { unwrap, describeError } from '../supa.js';
-import { stepChart, statusTimeline, STATUS_STYLE } from '../chart.js';
+import { stepChart, weightChart, statusTimeline, STATUS_STYLE } from '../chart.js';
 import {
-  batteryInfo, deviceStack, deviceSeverity, deviceOffline, positionLabel,
+  batteryInfo, deviceStack, deviceWeight, isScale, deviceSeverity, deviceOffline, positionLabel,
   serviceState, fmtRelative, fmtDateTime, fmtUptime,
 } from '../domain.js';
 import { APP_VERSION } from '../version.js';
@@ -107,7 +107,11 @@ export function renderDevice(state, params, ctx) {
   // --- current state -------------------------------------------------
   const grid = h('div', { class: 'detail-grid section' });
 
-  grid.append(h('div', { class: 'card' },
+  // A LOAD CELL GETS ITS OWN CARD, not the bowl one with different words in
+  // it. The stack card is built around four levels that a scale does not have,
+  // and `dev.levels || ['unknown' x4]` was drawing all four of them striped --
+  // a fabricated ladder on a station whose actual reading is a single number.
+  grid.append(isScale(dev) ? weightCard(dev) : h('div', { class: 'card' },
     h('div', { class: 'chart-title' }, 'Stack now'),
     h('div', { style: 'display:flex;gap:1.2rem;align-items:center;margin-top:.5rem' },
       // ONE labelled column — f-label, cell, state word. It used to be an
@@ -143,10 +147,20 @@ export function renderDevice(state, params, ctx) {
     h('div', { style: 'margin:.6rem 0' },
       badge(batt.status === 'idle' ? 'idle' : batt.status, batt.glyph, batt.label),
       ' ',
-      dev.charging ? badge('good', '⚡', 'Charging') : ''),
+      dev.charging ? badge('good', '⚡', 'Charging')
+        : dev.charging === null && isScale(dev)
+          ? badge('idle', '?', 'Charge state unknown') : ''),
     h('dl', { class: 'kv' },
       kv('Cell', dev.battery_mv != null ? `${dev.battery_mv} mV` : 'not detected'),
-      kv('Band', dev.battery_level ?? 'none')),
+      kv('Band', dev.battery_level ?? 'none'),
+      // THREE STATES, NOT TWO, and only on the board that needs it. The
+      // panel's charger drives its LED and reaches no GPIO, so "not charging"
+      // is a claim the hardware cannot support -- null means unreadable, and
+      // rendering that as a missing badge would read as "no".
+      isScale(dev)
+        ? kv('Charging', dev.charging == null ? 'unknown — no sense pin'
+                                              : (dev.charging ? 'yes' : 'no'))
+        : null),
     h('div', { class: 'dim', style: 'font-size:.75rem;margin-top:.5rem;line-height:1.4' },
       'The band is hysteretic — it leaves a level lower than it re-enters it, so a band ',
       'that has not moved while the millivolts have is correct, not stale. There is no ',
@@ -155,7 +169,10 @@ export function renderDevice(state, params, ctx) {
   grid.append(h('div', { class: 'card' },
     h('div', { class: 'chart-title' }, 'Device'),
     h('dl', { class: 'kv', style: 'margin-top:.6rem' },
-      kv('Sensors', dev.sensors_online != null ? `${dev.sensors_online} of 4 online` : '—'),
+      isScale(dev)
+        ? kv('Load cells', dev.cells_online != null
+              ? `${dev.cells_online} of 3 converting` : '—')
+        : kv('Sensors', dev.sensors_online != null ? `${dev.sensors_online} of 4 online` : '—'),
       kv('Firmware', dev.firmware ?? '—'),
       kv('Uptime', fmtUptime(dev.uptime_s)),
       kv('Last report', dev.updated_at ? `${fmtRelative(dev.updated_at)} (${fmtDateTime(dev.updated_at, tz)})` : 'never'),
@@ -206,7 +223,7 @@ export function renderDevice(state, params, ctx) {
     bar, historyBox));
 
   if (!fresh) {
-    loadHistory(ctx.client, id, hours)
+    loadHistory(ctx.client, id, hours, isScale(dev))
       .then(rows => {
         historyCache.set(cacheKey, { at: Date.now(), rows });
         historyState.rows = rows;
@@ -227,8 +244,25 @@ function kv(k, v) {
   return f;
 }
 
-async function loadHistory(client, deviceId, hours) {
+async function loadHistory(client, deviceId, hours, scale = false) {
   const since = new Date(Date.now() - hours * 3600_000).toISOString();
+
+  // TWO TABLES, because there are two products. A scale cannot appear in
+  // status_events at all -- five of its NOT NULL columns are bowl-shaped -- so
+  // its history lives in weight_samples. Same shape of query, same ordering,
+  // same cap.
+  if (scale) {
+    return unwrap(await client
+      .from('weight_samples')
+      .select('recorded_at, received_at, reason, seq, boot_id, weight_g, '
+            + 'weight_state, cells_online, net_counts, counts_per_gram, '
+            + 'battery_level, firmware')
+      .eq('device_id', deviceId)
+      .gte('recorded_at', since)
+      .order('recorded_at', { ascending: false })
+      .limit(1000)) || [];
+  }
+
   return unwrap(await client
     .from('status_events')
     .select('recorded_at, received_at, reason, seq, boot_id, stack_count, stack_status, levels, sensors_online, battery_level, charging, firmware')
@@ -241,10 +275,15 @@ async function loadHistory(client, deviceId, hours) {
 function renderHistory(rowsDesc, dev, tz, hours) {
   const frag = document.createDocumentFragment();
   if (!rowsDesc.length) {
-    frag.append(empty(`No recorded changes in the last ${hours} hours. ` +
-      `That means nothing changed, or the device was not powered.`));
+    frag.append(empty(isScale(dev)
+      ? `No weight recorded in the last ${hours} hours. That means the station `
+        + `was not powered, or supabase/migrate_weight_samples.sql has not been run.`
+      : `No recorded changes in the last ${hours} hours. `
+        + `That means nothing changed, or the device was not powered.`));
     return frag;
   }
+
+  if (isScale(dev)) return renderWeightHistory(rowsDesc, dev, tz, hours);
 
   const rows = [...rowsDesc].reverse();     // oldest first for plotting
   const points = rows.map(r => ({
@@ -371,4 +410,138 @@ function diagnostics(dev, rows, hours) {
     history_summary: rows.length ? analyseHistory([...rows].reverse()) : null,
     recent_events: rows.slice(0, 40),
   }, null, 2);
+}
+
+// ====================================================================
+//  The load cell's reading card -- the counterpart to "Stack now".
+//
+//  A SINGLE NUMBER AND THE REASON IT IS OR IS NOT ONE, which is the whole
+//  shape of a scale's report: weight_state always arrives, weight_g only
+//  when that state is 'ok'. So the state is rendered first and the number
+//  second, and when there is no number the card says WHY rather than
+//  showing a dash and leaving somebody to guess.
+// ====================================================================
+function weightCard(dev) {
+  const w = deviceWeight(dev);
+  const stale = deviceOffline(dev);
+
+  // Everything below the headline: the figures that explain it. net_counts is
+  // what the cells are actually producing, and it is the ONLY measurement an
+  // uncalibrated station has -- so it is shown even when there are no grams,
+  // which is exactly when it matters most.
+  const detail = [];
+  if (dev.counts_per_gram != null) {
+    detail.push(kv('Calibration', `${Number(dev.counts_per_gram).toFixed(3)} counts/g`));
+  } else if (dev.reported) {
+    detail.push(kv('Calibration', 'never calibrated'));
+  }
+  if (dev.net_counts != null) {
+    detail.push(kv('Raw', `${Number(dev.net_counts).toLocaleString()} counts`));
+  }
+
+  return h('div', { class: 'card' },
+    h('div', { class: 'chart-title' }, 'Counter now'),
+    h('div', { style: 'display:flex;gap:1.2rem;align-items:center;margin-top:.5rem' },
+      // Three marks, one per cell. The direct analogue of the level ladder,
+      // and round rather than rectangular so the two are not confused on a
+      // page that may show either.
+      cellColumn(dev.cells_online, 3, true),
+      h('div', {},
+        h('div', {
+          class: 'hero' + (stale && w.kind === 'weight' ? ' is-offline' : ''),
+        }, w.text),
+        h('div', { class: 'muted', style: 'font-size:.82rem' },
+          stale
+            ? `Last known — ${fmtRelative(dev.updated_at)}${w.note ? ` · ${w.note}` : ''}`
+            : w.note || 'weighed at the counter'))),
+    detail.length
+      ? h('dl', { class: 'kv', style: 'margin-top:.7rem' }, ...detail)
+      : null,
+    h('div', { class: 'dim', style: 'font-size:.75rem;margin-top:.5rem;line-height:1.4' },
+      'Three cells under one platform, and they SUM — so a cell dropping out ',
+      'does not add noise, it makes the total read LOW. That is why fewer than ',
+      'three reports no weight at all rather than a partial one. Zero is a real ',
+      'weight: a tared, empty platform reads 0.0 kg and means refill me.'));
+}
+
+// ====================================================================
+//  The load cell's history — a weight curve, where a bowl counter gets a
+//  step chart.
+//
+//  The chart is the point of the whole table. A number on the Master card
+//  says how much is left; only the curve says whether it is falling fast,
+//  whether somebody refilled it twenty minutes ago, and whether the last
+//  half hour looks like the one before it.
+// ====================================================================
+function renderWeightHistory(rowsDesc, dev, tz, hours) {
+  const frag = document.createDocumentFragment();
+  const rows = [...rowsDesc].reverse();     // oldest first for plotting
+
+  // v = null wherever the state was not 'ok'. That is not a zero and it is not
+  // a low reading -- it is the absence of a weight, and weightChart breaks the
+  // line across it rather than drawing a plunge to the axis that never
+  // happened.
+  const points = rows.map(r => ({
+    t: new Date(r.recorded_at).getTime(),
+    v: r.weight_state === 'ok' ? r.weight_g : null,
+    state: r.weight_state,
+    reason: r.reason,
+  }));
+
+  const width = Math.max(300, (document.getElementById('view')?.clientWidth || 640) - 34);
+
+  frag.append(h('div', { class: 'card', style: 'margin-bottom:.7rem' },
+    weightChart({
+      points, tz, width,
+      title: 'Weight on this counter',
+      subtitle: 'Sampled every two minutes and on every change. A gap is a '
+              + 'stretch with no trustworthy weight, not an empty counter.',
+    })));
+
+  // What the curve cannot show: how much of the window had a usable reading
+  // at all. A beautiful line over four samples is still four samples.
+  const ok = rows.filter(r => r.weight_state === 'ok').length;
+  const states = [...new Set(rows.map(r => r.weight_state))].filter(x => x !== 'ok');
+  frag.append(h('div', { class: 'card', style: 'margin-bottom:.7rem' },
+    h('dl', { class: 'kv' },
+      kv('Samples', `${rows.length} in ${hours} h`),
+      kv('With a weight', `${ok} of ${rows.length}`),
+      states.length ? kv('Other states', states.join(', ')) : null)));
+
+  const table = h('table', {},
+    h('thead', {}, h('tr', {},
+      h('th', {}, 'Recorded'), h('th', {}, 'Reason'), h('th', { class: 'num' }, 'Weight'),
+      h('th', {}, 'State'), h('th', { class: 'num' }, 'Cells'),
+      h('th', { class: 'num' }, 'Raw counts'), h('th', {}, 'Battery'),
+      h('th', { class: 'num' }, 'Boot/seq'), h('th', {}, 'Delay'))),
+    h('tbody', {}, ...rowsDesc.map(r => {
+      const delayMs = new Date(r.received_at) - new Date(r.recorded_at);
+      return h('tr', {},
+        h('td', {}, fmtDateTime(r.recorded_at, tz)),
+        h('td', {}, r.reason),
+        // 0 g renders as 0.00, never as a dash: a measured empty platform is a
+        // reading. Only a non-ok state has no number.
+        h('td', { class: 'num' },
+          r.weight_state === 'ok' ? `${(r.weight_g / 1000).toFixed(2)} kg` : '—'),
+        h('td', {}, r.weight_state),
+        h('td', { class: 'num' }, r.cells_online ?? '—'),
+        h('td', { class: 'num' },
+          r.net_counts == null ? '—' : Number(r.net_counts).toLocaleString()),
+        h('td', {}, r.battery_level ?? '—'),
+        h('td', { class: 'num' }, `${r.boot_id ?? '—'}/${r.seq}`),
+        h('td', {}, Number.isFinite(delayMs) ? `${Math.round(delayMs / 1000)}s` : '—'));
+    })));
+  // COLLAPSED, matching the bowl-counter page above rather than inventing a
+  // second treatment. The chart is what the page is for; the table is the
+  // evidence behind it, wanted occasionally and by one person. Left open it
+  // pushed the chart off the top of the screen on any window worth reading.
+  //
+  // ui.js's patcher preserves the `open` attribute across a re-render, so a
+  // table somebody expanded stays expanded through the 15 s poll.
+  frag.append(h('details', { class: 'table-view section' },
+    h('summary', {}, `Show all ${rowsDesc.length} samples`),
+    h('div', { class: 'table-wrap card',
+               style: 'margin-top:.5rem;max-height:60vh;overflow:auto' }, table)));
+
+  return frag;
 }
