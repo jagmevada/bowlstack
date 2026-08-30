@@ -335,8 +335,8 @@ static const uint8_t NAU7802_ADDR = 0x2A;
 //
 //     P1-3   IO6    status LED               power / charge indicator
 //     P1-6   IO18   encoder SW
-//     P1-8   IO8    encoder DT
-//     P1-9   IO7    encoder CLK
+//     P1-8   IO8    encoder CLK
+//     P1-9   IO7    encoder DT
 //     P1-10  IO10   VBUS sense               5k/10k divider from P1-14
 //     P1-13  GND    encoder common, switch return, LED cathode
 //
@@ -374,8 +374,8 @@ static const uint8_t NAU7802_ADDR = 0x2A;
 // on the one output would have kept IO6's ADC channel. Not done, because the
 // LED is a panel part and P1-3 is where it lands; the swap is a one-line change
 // here if the analog channel is ever wanted back.
-static const int8_t PIN_ENC_CLK    = 7;   // P1-9
-static const int8_t PIN_ENC_DT     = 8;   // P1-8
+static const int8_t PIN_ENC_CLK    = 8;   // P1-8
+static const int8_t PIN_ENC_DT     = 7;   // P1-9
 static const int8_t PIN_ENC_SW     = 18;  // P1-6  -- NOT 21, that is CELL_SDA
 
 // DEFINED BUT NOT WIRED. The VBUS tap on IO10 is what drives the indicator, and

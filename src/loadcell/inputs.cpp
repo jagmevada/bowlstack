@@ -195,7 +195,7 @@ void begin() {
   attachInterrupt(digitalPinToInterrupt(board::PIN_ENC_DT), encIsr, CHANGE);
 
   Serial.println("\n--- panel controls ---");
-  Serial.printf("  encoder  CLK GPIO%d (P1-9)  DT GPIO%d (P1-8)  SW GPIO%d (P1-6)\n",
+  Serial.printf("  encoder  CLK GPIO%d (P1-8)  DT GPIO%d (P1-9)  SW GPIO%d (P1-6)\n",
                 board::PIN_ENC_CLK, board::PIN_ENC_DT, board::PIN_ENC_SW);
   Serial.println("           !! P1-7 between SW and DT is CELL_SDA -- no wire there");
   Serial.printf("  LED      GPIO%d (P1-3), active %s -- steady on battery, "
