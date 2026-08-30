@@ -184,7 +184,8 @@ void updateBatteryPage(const State &s) {
   static bool have = false;
   if (have && prev.batteryMv == s.batteryMv && prev.batteryPinMv == s.batteryPinMv &&
       prev.batteryPercent == s.batteryPercent && prev.battery == s.battery &&
-      prev.charging == s.charging && prev.chargingKnown == s.chargingKnown) {
+      prev.charging == s.charging && prev.chargingKnown == s.chargingKnown &&
+      prev.externalPower == s.externalPower) {
     return;
   }
   prev = s;
@@ -214,18 +215,38 @@ void updateBatteryPage(const State &s) {
   lv_label_set_text(chipBand_, bandName(s.battery));
   lv_obj_set_style_bg_color(chipBand_, lv_color_hex(bandColor(s.battery)), LV_PART_MAIN);
 
-  // THREE STATES, NOT TWO. This board cannot read charge state at all -- the
-  // ETA6098's STAT output drives the charge LED and reaches no GPIO -- so
-  // "unknown" is the truthful answer and "no" would be a claim the hardware
-  // cannot support. See todo.md for the one-resistor mod that would change it.
-  if (!s.chargingKnown) {
-    lv_label_set_text(lblCharge_, "unknown");
-    lv_obj_set_style_text_color(lblCharge_, lv_color_hex(C_MUTED), LV_PART_MAIN);
-  } else if (s.charging) {
-    lv_label_set_text(lblCharge_, "yes");
+  // FOUR STATES, AND THE POINT IS THAT TWO DIFFERENT THINGS ARE KNOWN TO
+  // DIFFERENT DEGREES.
+  //
+  // Whether current is going into the cell comes from the ETA6098's STAT pin,
+  // which reaches no GPIO on an unmodified board -- so it is genuinely unknown
+  // and "no" would be a claim the hardware cannot support.
+  //
+  // Whether the unit is on MAINS is a different question and the board can
+  // answer it on every build, through the VBUS divider on IO10. This row used
+  // to print a flat "unknown" and stop there, which threw away a fact the
+  // device had -- and left somebody looking at a plugged-in station being told
+  // nothing at all about its power.
+  //
+  // So: say what is known, and name which question it answers.
+  if (s.chargingKnown) {
+    if (s.charging) {
+      lv_label_set_text(lblCharge_, "yes");
+      lv_obj_set_style_text_color(lblCharge_, lv_color_hex(C_OK), LV_PART_MAIN);
+    } else {
+      // Not charging AND on mains is the terminated case -- the cell is full
+      // and the charger has stopped. Worth distinguishing from running down.
+      lv_label_set_text(lblCharge_, s.externalPower ? "no - charged" : "no");
+      lv_obj_set_style_text_color(lblCharge_, lv_color_hex(C_TEXT), LV_PART_MAIN);
+    }
+  } else if (s.externalPower) {
+    // Deliberately not "yes". The unit is plugged in, which is all this board
+    // can see without the STAT mod; whether the charger is still pushing
+    // current is exactly the thing it cannot tell.
+    lv_label_set_text(lblCharge_, "on mains");
     lv_obj_set_style_text_color(lblCharge_, lv_color_hex(C_OK), LV_PART_MAIN);
   } else {
-    lv_label_set_text(lblCharge_, "no");
+    lv_label_set_text(lblCharge_, "on battery");
     lv_obj_set_style_text_color(lblCharge_, lv_color_hex(C_TEXT), LV_PART_MAIN);
   }
 

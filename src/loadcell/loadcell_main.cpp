@@ -756,6 +756,17 @@ void serviceInputs(uint32_t nowMs) {
   // It costs two stores.
   ui::demoOverrideEncoder(inputs::position(), pressCount_);
 
+  // EVERY PASS, and it was not. This lived only in setup(), so `external_` was
+  // frozen at whatever VBUS read during boot and no plug event ever reached the
+  // screen -- the status bar's bolt and the battery page both sat on a value
+  // that could not change. The pin was moving the whole time; nothing was
+  // carrying it across.
+  //
+  // It is cheap: two bools and a flag, compared against nothing. The seeding
+  // call in setup() stays, because the boot console line reports what it found.
+  ui::demoOverrideCharging(board::CHARGER_STATUS_READABLE, inputs::charging(),
+                           inputs::externalPower());
+
   // The heartbeat, and only while something is still unproven.
   const bool allSeen = encoderSeen_ && switchSeen_ && chargeSeen_ && vbusSeen_;
   if (!allSeen && (int32_t)(nowMs - nextTraceMs_) >= 0) {
@@ -1246,6 +1257,16 @@ void loop() {
                     lastPinMv_, lastCellMv_, batteryMonitor_.percent(),
                     battery::levelName(batteryMonitor_.level()),
                     board::CHARGER_STATUS_READABLE ? "?" : "unknown (no STAT pin)");
+      // END TO END, because "the bolt does not light" has three possible
+      // causes and only one of them is the pin. vbus is what the GPIO reads,
+      // ext is what inputs:: decided after debouncing, and ui.ext is what the
+      // status bar was actually handed -- if those three disagree, the answer
+      // is in the gap between whichever two.
+      Serial.printf("  power:   vbus pin %d, ext %d, ui.ext %d, chargingKnown %d\n",
+                    digitalRead(board::PIN_VBUS_SENSE),
+                    inputs::externalPower() ? 1 : 0,
+                    ui::demoLatest(millis()).externalPower ? 1 : 0,
+                    board::CHARGER_STATUS_READABLE ? 1 : 0);
     }
     for (uint8_t i = 0; i < scale::CELLS; i++) {
       const scale::CellSnapshot &c = sn.cell[i];
