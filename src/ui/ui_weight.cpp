@@ -7,8 +7,16 @@
 // competes with the one number they walked over to see.
 //
 // So the breakdown moved to Settings > Diagnose, where it is read deliberately
-// by somebody who came looking for it, and what is left is the total and one
-// button that zeroes every cell.
+// by somebody who came looking for it, and what is left is the total.
+//
+// THE TARE BUTTON WENT THE SAME WAY, and for the opposite reason. Not that it
+// was hard to read -- that it was too easy to hit. It was the widest target on
+// the page, at thumb height, on the one screen used with a bowl in the other
+// hand, and it was getting pressed by accident in service. A stray tap on it
+// does not clutter the display or lose a keystroke: it silently redefines zero,
+// and every reading afterwards inherits that. It is on Settings > Scale > Tare
+// now, three taps deep, and that row navigates BACK here when it fires so the
+// total on this page is the confirmation. See doTare() in ui_pages.cpp.
 //
 // LAID OUT WITH FLEX, like every other page here. Arithmetic against a fixed
 // anchor cannot express "these must not overlap", it can only happen to satisfy
@@ -43,7 +51,6 @@ const uint32_t C_PRESENT = 0x1F6FEB;
 
 lv_obj_t *lblCaption;
 lv_obj_t *lblTotal;
-lv_obj_t *lblUnit;
 
 // --- the per-cell breakdown ------------------------------------------------
 // Off by default and shown from Settings > Scale > Cells. It is a SETUP and
@@ -58,8 +65,15 @@ lv_obj_t *lblUnit;
 lv_obj_t *cellBox = nullptr;
 lv_obj_t *lblCellVal[CELLS] = {nullptr, nullptr, nullptr};
 char prevCell_[CELLS][20] = {{0}, {0}, {0}};
+// Each corner's share of the load, beside the load itself. Guarded separately
+// from the value: the two change on different frames -- a bowl slid sideways
+// moves the shares and not the total -- and one string comparison is cheaper
+// than the invalidate it prevents.
+lv_obj_t *lblCellPct[CELLS] = {nullptr, nullptr, nullptr};
+char prevPct_[CELLS][8] = {{0}, {0}, {0}};
+uint32_t prevPctColor_[CELLS] = {0, 0, 0};
+bool havePctColor_[CELLS] = {false, false, false};
 lv_obj_t *lblFlag;
-lv_obj_t *btnTare;
 lv_obj_t *btnSettings;
 
 // --- the knob row ----------------------------------------------------------
@@ -111,15 +125,10 @@ uint32_t prevPressCount_ = 0;
 bool havePress_ = false;
 bool encDotLit_ = false;
 
-void (*onTare_)(void) = nullptr;
 void (*onSettings_)(void) = nullptr;
 void (*onSwap_)(void) = nullptr;
 void swapClicked(lv_event_t *) {
   if (onSwap_) onSwap_();
-}
-
-void tareClicked(lv_event_t *) {
-  if (onTare_) onTare_();
 }
 
 void settingsClicked(lv_event_t *) {
@@ -134,6 +143,59 @@ void styleFlat(lv_obj_t *o) {
   lv_obj_remove_flag(o, LV_OBJ_FLAG_SCROLLABLE);
 }
 
+// --- how the load is spread across the corners ------------------------------
+//
+// Three cells hold a plane, so an evenly loaded platform puts a third on each.
+// The operator cannot see that from three kilogram figures -- comparing 4.031,
+// 3.887 and 4.102 in your head, live, while serving, is not a thing anybody
+// does -- but they can see 33 / 32 / 34 at a glance, and they can see one of
+// them turn red.
+//
+// WHAT IT IS FOR: a bowl set down off-centre loads one corner and unloads
+// another. The total is still right -- that is the whole point of three cells
+// -- but a badly off-centre load is closer to the end of a cell's range, and
+// it is the thing an operator can actually fix by nudging the bowl.
+const float SHARE_EVEN_PCT = 100.0f / CELLS;  // 33.3 for three
+
+// PERCENTAGE POINTS FROM EVEN, not a percentage OF even. A corner is flagged at
+// 23.3% or 43.4%, not at 30% or 36.7% -- the tighter reading would sit red
+// almost permanently on a real platform and teach the operator to ignore it,
+// which is the one failure mode a warning colour cannot survive. Raise or lower
+// this single number if the field disagrees.
+const float SHARE_TOL_PCT = 10.0f;
+
+// BELOW THIS THERE IS NOTHING TO BE OFF-CENTRE. An empty platform's corners sit
+// at a few counts of noise either side of zero, and a ratio of noise to noise
+// is a random number that would flash red at an empty scale all day.
+//
+// IN COUNTS, NOT GRAMS, because noise is fixed in counts -- it is the
+// converter's, not the load's -- so a counts floor holds on a unit whose
+// calibration factor is nothing like this one's. 20000 counts is about 200 g
+// here, which is well under an empty serving bowl: the shares appear as soon as
+// the bowl lands, which is when the operator wants to centre it, and not before.
+const int32_t SHARE_FLOOR_COUNTS = 20000;
+
+// Whether the shares can be believed at all this frame.
+//
+// EVERY CELL ONLINE, NOT MOST. A share is a fraction of the total, and with a
+// corner missing the "total" is a sum of the corners that answered -- so two
+// live cells carrying 2 kg each would read 50 / 50 and look perfectly balanced
+// on a platform that is missing a third of its measurement.
+//
+// AND NONE SATURATED. An over-range cell has stopped measuring and reports its
+// own ceiling, which is a large steady plausible number -- so the corner
+// carrying the MOST load would show the SMALLEST share. That is not a degraded
+// reading, it is a confident inversion of the one fact this row exists to give.
+bool sharesKnowable(const ScaleView &s) {
+  if (s.online < CELLS) return false;
+  for (uint8_t i = 0; i < CELLS; i++) {
+    if (s.cell[i].state != Cell::Online) return false;
+    if (s.cell[i].overRange) return false;
+  }
+  const int32_t t = s.totalCounts;
+  return (t >= SHARE_FLOOR_COUNTS) || (t <= -SHARE_FLOOR_COUNTS);
+}
+
 // --- change detection -------------------------------------------------------
 // Held as the FORMATTED strings rather than the numbers behind them, which is
 // the stricter test and the one that matches what the panel actually has to
@@ -141,18 +203,43 @@ void styleFlat(lv_obj_t *o) {
 // comparing floats would invalidate the biggest label on the screen for a
 // change nobody can see, ten times a second.
 char prevTotal_[16] = {0};
-char prevUnit_[8] = {0};
-char prevCaption_[24] = {0};
+char prevCaption_[32] = {0};  // wider since it carries the unit too
 char prevFlag_[16] = {0};
 uint32_t prevTotalColor_ = 0;
 bool haveTotalColor_ = false;
 bool prevCalibrated_ = false;
+uint8_t prevDecimals_ = 0;  // 0 is not a legal setting, so the first frame differs
 bool haveCal_ = false;
 
 void setIfChanged(lv_obj_t *label, char *prev, uint32_t prevLen, const char *text) {
   if (strncmp(prev, text, prevLen - 1) == 0) return;
   snprintf(prev, prevLen, "%s", text);
   lv_label_set_text(label, text);
+}
+
+// WHICH FACE THE TOTAL IS DRAWN IN, decided by how wide the widest reading in
+// the current mode can get. The box is 224 px; every one of these was measured
+// against that rather than guessed:
+//
+//   mode                 worst reading   at 84    at 56    face
+//   uncalibrated         "-1234567"      --       --       montserrat_28
+//   calibrated, 1 dp     "-19.9"         186 ok   124      font_mass_84
+//   calibrated, 2 dp     "-19.99"        237 NO   159      font_mass_56
+//   calibrated, 3 dp     "-19.999"       290 NO   193      font_mass_56
+//
+// Only one place fits the big face, and one place is the setting a unit ships
+// on and very nearly the only one anybody uses -- 0.1 kg is already finer than
+// a serving. The other two are not degraded; they are the size that has always
+// been there, still the largest that fits what they have to print.
+//
+// The uncalibrated side stays on the BUILT-IN Montserrat 28: counts run to
+// seven digits and a sign, which no generated size fits, and spending a third
+// generated face on a mode that lasts until somebody calibrates the unit is
+// not worth the flash. font_mass_* has digits and nothing else, which is all
+// counts need too.
+const lv_font_t *pickTotalFont(bool calibrated, uint8_t decimals) {
+  if (!calibrated) return &lv_font_montserrat_28;
+  return (decimals <= 1) ? &font_mass_84 : &font_mass_56;
 }
 
 void setTotalColor(uint32_t rgb) {
@@ -202,7 +289,6 @@ void weightPageHidden() {
   havePress_ = false;
 }
 
-void weightOnTare(void (*cb)(void)) { onTare_ = cb; }
 void weightOnSettings(void (*cb)(void)) { onSettings_ = cb; }
 void weightOnSwap(void (*cb)(void)) { onSwap_ = cb; }
 
@@ -226,9 +312,11 @@ void buildWeight(lv_obj_t *parent) {
   lv_label_set_long_mode(lblCaption, LV_LABEL_LONG_CLIP);
   lv_label_set_text(lblCaption, "total");
 
-  // The number and its unit are ONE ROW with their bottoms aligned. A unit
-  // floating beside the vertical middle of a 48 px glyph reads as a separate
-  // fact; on the baseline it reads as part of the same figure, which it is.
+  // The number ALONE, and it used to share this row with a "kg" on the same
+  // baseline -- which read better, and cost 30 of the 224 px the page has.
+  // At 84 px that 30 px is the difference between showing "100.0" and clipping
+  // it, so the unit moved up into the caption, where a chart puts it. The knob
+  // page makes the same trade with its per-cent sign for the same reason.
   lv_obj_t *row = lv_obj_create(scr);
   styleFlat(row);
   lv_obj_set_width(row, LV_PCT(100));
@@ -251,27 +339,26 @@ void buildWeight(lv_obj_t *parent) {
   // at 48 and this label was already there, so the size had to be generated.
   // See ui_font.h for the subset and for why 56 and not 64.
   //
-  // The box grew from 186 to 194 with it, taking the 8 px from the unit label
-  // beside it: at 56 px the worst three-decimal reading is ~193 px wide, and a
-  // number that clips its leading digit is worse than a smaller number.
+  // 224 IS THE WHOLE CONTENT WIDTH -- 240 less the page's 8 px of padding
+  // either side. It is the widest this box can be, which is the point: the
+  // face that fits inside it is chosen from that number, not the other way
+  // round. See pickTotalFont().
+  //
+  // CENTRED, WHERE IT USED TO BE RIGHT-ALIGNED. Right alignment was there to
+  // seat the digits against the unit standing beside them; with the unit in
+  // the caption there is nothing to seat them against, and a number hugging
+  // the right margin under a centred caption just looks misplaced. The reason
+  // for the FIXED width is untouched by that -- it is the relayout above, not
+  // the alignment.
   lblTotal = lv_label_create(row);
-  lv_obj_set_style_text_font(lblTotal, &font_mass_56, LV_PART_MAIN);
-  lv_obj_set_width(lblTotal, 194);
-  lv_obj_set_style_text_align(lblTotal, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+  lv_obj_set_style_text_font(lblTotal, &font_mass_84, LV_PART_MAIN);
+  lv_obj_set_width(lblTotal, 224);
+  lv_obj_set_style_text_align(lblTotal, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
   // CLIP rather than WRAP: wrapping puts a second line underneath, which
   // changes the label's HEIGHT and marks the layout dirty exactly the way the
   // width change this avoids.
   lv_label_set_long_mode(lblTotal, LV_LABEL_LONG_CLIP);
   lv_label_set_text(lblTotal, "--");
-
-  lblUnit = lv_label_create(row);
-  lv_obj_set_style_text_font(lblUnit, &lv_font_montserrat_20, LV_PART_MAIN);
-  lv_obj_set_style_text_color(lblUnit, lv_color_hex(C_MUTED), LV_PART_MAIN);
-  lv_obj_set_width(lblUnit, 26);
-  lv_obj_set_style_text_align(lblUnit, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
-  lv_label_set_long_mode(lblUnit, LV_LABEL_LONG_CLIP);
-  lv_obj_set_style_pad_bottom(lblUnit, 6, LV_PART_MAIN);
-  lv_label_set_text(lblUnit, "");
 
   // --- the per-cell rows --------------------------------------------------
   // Hidden unless the Cells setting is on. Built either way, because building
@@ -308,12 +395,33 @@ void buildWeight(lv_obj_t *parent) {
     const char nm[2] = {(char)('A' + i), '\0'};
     lv_label_set_text(name, nm);
 
+    // 138, DOWN FROM 194, and the 52 went to the share column beside it.
+    // Measured in the simulator rather than apportioned by eye: at Montserrat
+    // 20 the widest thing this column can ever hold is "-1234567 cts" at 121 px
+    // -- the uncalibrated worst case, wider than "-19.999 kg !" at 108 -- so
+    // 138 keeps 17 px in hand. The label is LONG_CLIP, so getting this wrong
+    // does not wrap, it silently eats a digit off a weight.
     lblCellVal[i] = lv_label_create(r);
     lv_obj_set_style_text_font(lblCellVal[i], &lv_font_montserrat_20, LV_PART_MAIN);
-    lv_obj_set_width(lblCellVal[i], 194);
+    lv_obj_set_width(lblCellVal[i], 138);
     lv_obj_set_style_text_align(lblCellVal[i], LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
     lv_label_set_long_mode(lblCellVal[i], LV_LABEL_LONG_CLIP);
     lv_label_set_text(lblCellVal[i], "--");
+
+    // THE SHARE. 56 px: "100%" measures 50 at this size, and the extra 6 covers
+    // "-99%" and "199%", which are the ends of the range the formatter allows.
+    // 22 + 4 + 138 + 4 + 56 = 224, the page's whole content width, exactly.
+    //
+    // Muted until it is wrong. This is a check somebody makes occasionally, not
+    // the number they walked over to read, and three coloured figures competing
+    // with the total would undo the point of making the total big.
+    lblCellPct[i] = lv_label_create(r);
+    lv_obj_set_style_text_font(lblCellPct[i], &lv_font_montserrat_20, LV_PART_MAIN);
+    lv_obj_set_style_text_color(lblCellPct[i], lv_color_hex(C_MUTED), LV_PART_MAIN);
+    lv_obj_set_width(lblCellPct[i], 56);
+    lv_obj_set_style_text_align(lblCellPct[i], LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+    lv_label_set_long_mode(lblCellPct[i], LV_LABEL_LONG_CLIP);
+    lv_label_set_text(lblCellPct[i], "");
   }
 
   // Shown only when something is wrong or unproven. A chip that is lit in the
@@ -343,7 +451,7 @@ void buildWeight(lv_obj_t *parent) {
   lv_obj_t *encRow = lv_obj_create(scr);
   styleFlat(encRow);
   lv_obj_set_width(encRow, LV_PCT(100));
-  lv_obj_set_height(encRow, 24);  // TRIAL: 24 to seat the 20 px fill figure
+  lv_obj_set_height(encRow, 22);  // TRIAL: exactly the 20 px figure's line box
   lv_obj_set_style_pad_bottom(encRow, 4, LV_PART_MAIN);
   lv_obj_set_flex_flow(encRow, LV_FLEX_FLOW_ROW);
   lv_obj_set_style_pad_column(encRow, 8, LV_PART_MAIN);
@@ -391,32 +499,31 @@ void buildWeight(lv_obj_t *parent) {
   // which is where instrumentation belongs.
 
   // --- the action row -----------------------------------------------------
-  // TARE and a way off this page, side by side at the bottom where a thumb
-  // reaches. Both are 64 px tall, which is well over the 44 px the menu rows
-  // settled on -- this is the one screen used with a bowl in the other hand,
-  // and there is nothing else on it to spend the room on.
+  // TWO WAYS OFF THIS PAGE, and nothing that changes a measurement. Everything
+  // in this row is navigation now; the destructive control that used to sit
+  // here is on Settings > Scale > Tare. That is the whole point of the row as
+  // it stands -- a mis-tap costs you a page turn, not a zero.
   lv_obj_t *actions = lv_obj_create(scr);
   styleFlat(actions);
   lv_obj_set_width(actions, LV_PCT(100));
-  lv_obj_set_height(actions, 64);
+  // 56, DOWN FROM 64, and the 8 px went to the total above. Measured, not
+  // trimmed on taste: with the cell rows shown AND a flag chip up, the page's
+  // children came to 283 px inside a 278 px content box once the number went
+  // to 84 px -- and this tile does not scroll, so the overflow is not a
+  // scrollbar, it is the bottom of these buttons gone. 56 is still well past
+  // any touch-target minimum; 64 was generous rather than necessary.
+  lv_obj_set_height(actions, 56);
   lv_obj_set_flex_flow(actions, LV_FLEX_FLOW_ROW);
   lv_obj_set_style_pad_column(actions, 8, LV_PART_MAIN);
-  lv_obj_set_flex_align(actions, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+  // END, NOT CENTER, AND THAT CHANGED WITH THE TARE BUTTON. Main-axis CENTER
+  // was a no-op while TARE was here: it had flex_grow 1, ate every pixel of
+  // slack, and pinned the gear against the right margin. Delete it and 96 px
+  // of slack appears -- measured, in the simulator -- so CENTER would have
+  // floated the surviving pair into the middle of the row and moved the gear
+  // 52 px left of where a thumb has learnt to find it. END puts both buttons
+  // back on the exact pixels they occupied before: swap at 104, gear at 168.
+  lv_obj_set_flex_align(actions, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER,
                         LV_FLEX_ALIGN_CENTER);
-
-  // TARES EVERY CELL. Zeroing one corner against the others is a setup job and
-  // lives on Diagnose with the figures that make it meaningful.
-  btnTare = lv_button_create(actions);
-  lv_obj_set_flex_grow(btnTare, 1);
-  lv_obj_set_height(btnTare, 64);
-  lv_obj_set_style_radius(btnTare, 8, LV_PART_MAIN);
-  lv_obj_set_style_bg_color(btnTare, lv_color_hex(C_KEY), LV_PART_MAIN);
-  lv_obj_add_event_cb(btnTare, tareClicked, LV_EVENT_CLICKED, nullptr);
-  lv_obj_t *tl = lv_label_create(btnTare);
-  lv_obj_set_style_text_font(tl, &lv_font_montserrat_24, LV_PART_MAIN);
-  lv_obj_set_style_text_color(tl, lv_color_hex(C_TEXT), LV_PART_MAIN);
-  lv_label_set_text(tl, "TARE");
-  lv_obj_center(tl);
 
   // A BUTTON RATHER THAN A SWIPE, and the swipe still works alongside it.
   //
@@ -426,15 +533,18 @@ void buildWeight(lv_obj_t *parent) {
   // a drag at all. That is fine for a gesture somebody discovers once and
   // tolerable for one they use occasionally; it is the wrong primary way to
   // reach settings from a screen used one-handed.
-  // TRIAL HARNESS: the page swap, between TARE and the gear.
+  // TRIAL HARNESS: the page swap, to the left of the gear.
   //
-  // TARE LOSES THE WIDTH RATHER THAN THE HEIGHT. It is flex-grow, so adding a
-  // third button takes it from 152 px to 96 -- still far wider than the word
-  // and still the full 64 px tall, which is the dimension a thumb actually
-  // misses on. Shortening it instead would have made the one control used with
-  // a bowl in the other hand harder to hit.
+  // 56 SQUARE, NOT 56 x 64, AND THAT IS A FIX. Both buttons were declared 64
+  // tall inside a row that had just been shortened to 56 to make room for the
+  // bigger total -- so LVGL centred a 64 px track in a 56 px box and placed
+  // them at y = -4. Measured in the simulator, not inferred: the row reported
+  // h=56 and every child y=-4 h=64. Four pixels of each rounded corner were
+  // clipped top and bottom, and worse, hit-testing does NOT clip, so the touch
+  // target ran 4 px past the row at both ends. On the page whose complaint was
+  // accidental presses that is the wrong direction to be wrong in.
   lv_obj_t *btnSwap = lv_button_create(actions);
-  lv_obj_set_size(btnSwap, 56, 64);
+  lv_obj_set_size(btnSwap, 56, 56);
   lv_obj_set_style_radius(btnSwap, 8, LV_PART_MAIN);
   lv_obj_set_style_bg_color(btnSwap, lv_color_hex(C_KEY), LV_PART_MAIN);
   lv_obj_add_event_cb(btnSwap, swapClicked, LV_EVENT_CLICKED, nullptr);
@@ -445,7 +555,7 @@ void buildWeight(lv_obj_t *parent) {
   lv_obj_center(wl);
 
   btnSettings = lv_button_create(actions);
-  lv_obj_set_size(btnSettings, 56, 64);
+  lv_obj_set_size(btnSettings, 56, 56);
   lv_obj_set_style_radius(btnSettings, 8, LV_PART_MAIN);
   lv_obj_set_style_bg_color(btnSettings, lv_color_hex(C_KEY), LV_PART_MAIN);
   lv_obj_add_event_cb(btnSettings, settingsClicked, LV_EVENT_CLICKED, nullptr);
@@ -529,36 +639,35 @@ void updateWeight(const State &st) {
   // there is no weight to show -- only the converter's own output. Printing
   // counts and labelling them "cts" says exactly that; printing them as
   // kilograms with an assumed factor would be a confident wrong number.
-  const bool calChanged = !haveCal_ || prevCalibrated_ != s.calibrated;
+  // KEYED ON THE PRECISION SETTING AS WELL AS THE MODE, because the size now
+  // follows both. Still a transition test and not a per-frame assignment: a
+  // font change alters the label's height, which dirties the flex layout and
+  // moves every sibling -- doing that ten times a second is the cost this page
+  // was built to avoid.
+  const bool calChanged = !haveCal_ || prevCalibrated_ != s.calibrated
+                          || prevDecimals_ != s.decimals;
   if (calChanged) {
     haveCal_ = true;
     prevCalibrated_ = s.calibrated;
+    prevDecimals_ = s.decimals;
     // Counts run to seven digits and a sign; kilograms to six characters. They
     // cannot share a size, so the size follows the mode -- set here, on the
     // transition, rather than per frame.
     //
-    // The uncalibrated side stays on the BUILT-IN Montserrat 28 rather than a
-    // generated size, because eight glyphs at 56 px do not fit a 240 px panel
-    // under any label width. It is also the size that keeps the subset font
-    // honest: font_mass_56 has digits and nothing else, and counts need nothing
-    // else either, but there is no reason to spend a second generated size on a
-    // display mode that exists only until somebody calibrates the unit.
-    lv_obj_set_style_text_font(
-        lblTotal, s.calibrated ? &font_mass_56 : &lv_font_montserrat_28, LV_PART_MAIN);
+    lv_obj_set_style_text_font(lblTotal, pickTotalFont(s.calibrated, s.decimals),
+                               LV_PART_MAIN);
   }
 
   if (s.online == 0) {
     // Nothing is converting, so there is no total. Dashes rather than a zero:
     // on a scale, zero is a measurement somebody might act on.
     setIfChanged(lblTotal, prevTotal_, sizeof(prevTotal_), "--");
-    setIfChanged(lblUnit, prevUnit_, sizeof(prevUnit_), "");
     setTotalColor(C_MUTED);
     setIfChanged(lblCaption, prevCaption_, sizeof(prevCaption_), "total");
   } else {
     if (s.calibrated) formatKg(buf, sizeof(buf), s.totalGrams, s.decimals);
     else snprintf(buf, sizeof(buf), "%ld", (long)s.totalCounts);
     setIfChanged(lblTotal, prevTotal_, sizeof(prevTotal_), buf);
-    setIfChanged(lblUnit, prevUnit_, sizeof(prevUnit_), s.calibrated ? "kg" : "cts");
     setTotalColor(s.overRange ? C_CELL_FAULT : C_TEXT);
 
     // "AT LEAST", NOT "TOTAL", WHEN A CELL IS MISSING. The sum of the cells
@@ -566,10 +675,14 @@ void updateWeight(const State &st) {
     // missing corner cannot carry a negative share of it. What it is not is the
     // total, and a caption saying so would turn a useful partial measurement
     // into a wrong complete one.
+    // THE UNIT RIDES HERE NOW, after the word, the way a chart labels an axis.
+    // It is the same fact it was when it stood beside the number; what it no
+    // longer is, is 30 px of the number's line.
     const bool partial = s.online < CELLS;
-    const char *cap = s.calibrated
-                          ? (partial ? "at least" : "total")
-                          : (partial ? "at least, uncalibrated" : "total, uncalibrated");
+    const char *cap =
+        s.calibrated ? (partial ? "at least, kg" : "total, kg")
+                     : (partial ? "at least, uncalibrated cts"
+                                : "total, uncalibrated cts");
     setIfChanged(lblCaption, prevCaption_, sizeof(prevCaption_), cap);
   }
 
@@ -639,6 +752,16 @@ void updateWeight(const State &st) {
       else lv_obj_add_flag(cellBox, LV_OBJ_FLAG_HIDDEN);
     }
     if (wantCells) {
+      // Decided ONCE for the row set, not per cell: the shares are knowable or
+      // they are not, and three corners cannot disagree about it.
+      const bool shares = sharesKnowable(s);
+      // The same quantity the column beside it is printing, so the two can
+      // never tell different stories. It makes no arithmetic difference -- one
+      // calibration factor scales every cell, so the grams ratio and the counts
+      // ratio are the same number -- but a reader checking the percentage
+      // against the kilograms should be checking it against THOSE kilograms.
+      const float denom = s.calibrated ? s.totalGrams : (float)s.totalCounts;
+
       for (uint8_t i = 0; i < CELLS; i++) {
         const CellView &c = s.cell[i];
         char cb[20];
@@ -655,6 +778,30 @@ void updateWeight(const State &st) {
           snprintf(cb, sizeof(cb), "%ld cts", (long)c.counts);
         }
         setIfChanged(lblCellVal[i], prevCell_[i], sizeof(prevCell_[i]), cb);
+
+        // --- the share -----------------------------------------------------
+        char pb[8] = {0};
+        uint32_t pcol = C_MUTED;
+        if (shares && denom != 0.0f) {
+          const float mine = s.calibrated ? c.grams : (float)c.counts;
+          const float pct = 100.0f * mine / denom;
+          const bool off = (pct < SHARE_EVEN_PCT - SHARE_TOL_PCT) ||
+                           (pct > SHARE_EVEN_PCT + SHARE_TOL_PCT);
+          // OUTSIDE -99..199 THE FIGURE STOPS BEING INFORMATION. A share that
+          // far out means a corner is being lifted while another is pressed --
+          // real, and worth the red, but the digits are not something anybody
+          // acts on and they would not fit the column anyway. The colour still
+          // carries, because "this is badly wrong" is the whole message.
+          if (pct < -99.0f || pct > 199.0f) snprintf(pb, sizeof(pb), "--");
+          else snprintf(pb, sizeof(pb), "%d%%", (int)(pct < 0 ? pct - 0.5f : pct + 0.5f));
+          if (off) pcol = C_CELL_FAULT;
+        }
+        setIfChanged(lblCellPct[i], prevPct_[i], sizeof(prevPct_[i]), pb);
+        if (!havePctColor_[i] || prevPctColor_[i] != pcol) {
+          havePctColor_[i] = true;
+          prevPctColor_[i] = pcol;
+          lv_obj_set_style_text_color(lblCellPct[i], lv_color_hex(pcol), LV_PART_MAIN);
+        }
       }
     }
   }

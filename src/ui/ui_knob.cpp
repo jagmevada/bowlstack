@@ -39,6 +39,43 @@ const int32_t BOWL_H = 136;
 // 1.6 : 1, top to base, as specified.
 const int32_t BOWL_BASE_W = (int32_t)(BOWL_TOP_W / 1.6f);  // 147
 
+// WHAT THE ATTENDANT'S "100%" IS, AND IT IS NOT A BRIMMING VESSEL.
+//
+// A bowl filled to the rim spills when it is carried, so the kitchen never
+// fills one that far: a full service bowl has air above the food. Painting
+// 100% as a frustum full to the top asked the attendant to match the knob
+// against a bowl that does not exist on the counter, and the picture is what
+// decides what the number means on this page.
+//
+// 0.88 is theirs and it was read off this very drawing -- dial the knob until
+// the picture matches a full bowl and it stops at 88. So 100 now paints what
+// 88 painted: a waterline 124.7 px up a 136 px vessel with 11 px of air above
+// it. (Only 8% of the DEPTH, because a frustum is widest at the top and that
+// last slice holds a lot -- which is the same arithmetic depthForFraction()
+// exists for, applied to the headroom.)
+//
+// NOTHING ELSE IN THE FIRMWARE MOVES. The number the attendant sets, the byte
+// in NVS and the value PATCHed to device_status and appended to weight_samples
+// are all untouched; this constant decides where the paint stops and nothing
+// else. But two things outside the firmware DO depend on it, and neither is
+// enforced anywhere, so they are written down here rather than assumed:
+//
+//   1. trial_vessel_capacity.capacity_g must be the mass of a full bowl AS THE
+//      KITCHEN FILLS IT, not of one filled to the brim. The dashboard computes
+//      kilograms as pct/100 x capacity_g, so a brim mass there re-introduces
+//      exactly the ~13.6% this constant just took out -- in the opposite
+//      direction and invisibly. The dashboard's own label says "Full vessel
+//      at <meal>", which does not say which, and neither does the column
+//      comment in supabase/migrate_manual_fill.sql. That wording is a genuine
+//      open risk, not a settled convention.
+//
+//   2. Rows recorded before this build are on the OLD mapping -- the same
+//      bowl was dialled at ~88 then and at 100 now. They are not poolable with
+//      later rows. BOWLSTACK_FW_VERSION was bumped to V1.1 260831 in the same
+//      change so weight_samples.firmware can separate the two eras; see the
+//      note beside it in platformio.ini.
+const float SERVING_FULL_VOL = 0.88f;
+
 lv_obj_t *bowl_ = nullptr;
 lv_obj_t *lblPct_ = nullptr;
 lv_obj_t *lblSign_ = nullptr;
@@ -98,6 +135,10 @@ float volumeTo(float h) {
 // row of the comparison the trial exists to produce.
 //
 // So the shaded region is solved to be a true fraction of the volume.
+//
+// A TRUE FRACTION OF THE FRUSTUM, which is not the same as a true fraction of
+// what the attendant calls a full bowl -- see SERVING_FULL_VOL. This function
+// is pure geometry and is told the former; the caller does the conversion.
 //
 // Bisection rather than the closed-form cubic root: twenty-four iterations of a
 // three-multiply polynomial is nothing beside a redraw, it runs only when the
@@ -187,7 +228,12 @@ void bowlDraw(lv_event_t *e) {
                 C_EMPTY);
 
   if (bowlPct_ > 0) {
-    const float depth = depthForFraction(bowlPct_ / 100.0f);
+    // SCALED, and scaled HERE rather than inside depthForFraction() so that the
+    // geometry stays geometry: that function answers "how deep is this fraction
+    // of the vessel", and the fact that a full serving is 88% of the vessel is
+    // a fact about the kitchen, not about frustums. Keeping them apart is what
+    // makes each one checkable on its own.
+    const float depth = depthForFraction(bowlPct_ / 100.0f * SERVING_FULL_VOL);
     const int32_t yWater = yBot - (int32_t)(depth + 0.5f);
     fillTrapezoid(layer, cx, yWater, yBot, halfWidthAt(depth),
                   BOWL_BASE_W * 0.5f, C_FOOD);
@@ -278,6 +324,9 @@ void buildKnob(lv_obj_t *parent) {
   // NO TARE HERE. Taring zeroes the reference the trial is measured against,
   // and that button has no business within reach of the one person deliberately
   // not being shown that reference.
+  //
+  // The weight page has none either now, for a plainer reason -- it was being
+  // pressed by accident. Both pages send you to Settings > Scale > Tare.
   lv_obj_t *acts = lv_obj_create(scr);
   flat(acts);
   lv_obj_set_width(acts, LV_PCT(100));

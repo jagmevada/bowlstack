@@ -596,11 +596,6 @@ void onRestoreDefault() {
   ui::calibSetMass(0.0f);  // re-prefilled from the snapshot on the next entry
 }
 
-void onTareBoth() {
-  Serial.println("ui: tare (dashboard button)");
-  scale::tare();
-}
-
 
 void onCycleAvg() {
   Serial.printf("ui: averaging -> %u samples\n", scale::cycleWindow());
@@ -1076,8 +1071,11 @@ void setup() {
     ui::scopeSetBuffer(scopeBuf);
   }
 
+  // THE ONLY TARE PATH. There were two -- this and ui::weightOnTare(onTareBoth)
+  // for the dashboard button -- and the button is gone, so the second install
+  // and its handler went with it rather than being left dangling off a widget
+  // nothing creates.
   ui::pagesOnScaleTare(onTare);
-  ui::weightOnTare(onTareBoth);
   ui::pagesOnScaleClearCal(onClearCal);
   ui::pagesOnScaleCycleAvg(onCycleAvg);
   ui::pagesOnScaleCyclePrecision(onCyclePrecision);

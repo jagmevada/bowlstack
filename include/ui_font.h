@@ -54,6 +54,27 @@ extern "C" {
 // Montserrat Medium, 56 px, 4 bpp. Digits, '.', '-' and space ONLY.
 extern const lv_font_t font_mass_56;
 
+// The same subset at 84 px -- half again the size of the 56, and as large as a
+// WEIGHT can be drawn on a 240 px panel.
+//
+// WHY NOT 100, TO MATCH THE KNOB PAGE'S PER-CENT. Because a percentage is "100"
+// and a weight is "100.0", and that one extra glyph is the whole difference:
+//
+//     "100.0" at 100 px = 260 px   wider than the panel; not a layout problem
+//                                  to solve, an impossible one
+//     "100.0" at  84 px = 218 px   fits 224, with the unit moved off the line
+//
+// So 100 px is not a target this label failed to reach; it is what having one
+// fewer character to draw buys the other page.
+//
+// AND IT IS NOT ALWAYS THE FACE IN USE. Precision is a setting and it goes to
+// three places, where the worst reading is "-19.999" -- 290 px here, which
+// LV_LABEL_LONG_CLIP would silently truncate into a different weight. So the
+// page picks the size from the decimals in force: 84 at one place, 56 beyond
+// that, 56 being itself the largest that fits a three-decimal reading. See
+// pickTotalFont() in ui_weight.cpp.
+extern const lv_font_t font_mass_84;
+
 // TRIAL HARNESS: the knob page's percentage, and the largest type in the
 // project by a wide margin.
 //

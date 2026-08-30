@@ -110,7 +110,34 @@ enum : uint8_t {
   ROW_SCALE_RESTORE,
 };
 
-void doTare() { if (onTare_) onTare_(); }
+// TARE, THEN OUT TO THE WEIGHT PAGE. The navigation is the confirmation.
+//
+// This action used to have a button of its own on the dashboard, and it was
+// getting pressed by accident: widest target on the screen, thumb height, on
+// the one page used with a bowl in the other hand. A stray tare is not a
+// visible mistake -- it silently redefines zero and every reading afterwards
+// inherits it -- so it moved three taps deep, here.
+//
+// That fixed the mis-taps and cost the operator the one thing the dashboard
+// button gave them for free: watching the total drop. So this row gives it
+// back by navigating. Tare, close the overlays, land on the weight page, where
+// the 84 px total says 0.0 kg if it took and something else if it did not.
+// No confirmation widget and no toast to time out -- the number that is
+// already that page's entire purpose does the job, and it keeps saying it.
+//
+// THE WEIGHT TILE, NOT defaultTile(). Every other route home deliberately goes
+// through defaultTile(), and this one deliberately does not: during the trial
+// the default is the blinded knob page, which shows no total and would confirm
+// nothing at all. Landing on the weight page is safe because the idle timeout
+// still routes through defaultTile(), so the panel re-blinds itself a minute
+// after whoever tared walks away.
+void closeAll();
+void goToHome();
+void doTare() {
+  if (onTare_) onTare_();
+  closeAll();
+  goToHome();
+}
 void doClearCal() { if (onClearCal_) onClearCal_(); }
 void doCycleAvg() { if (onCycleAvg_) onCycleAvg_(); }
 void doCyclePrecision() { if (onCyclePrecision_) onCyclePrecision_(); }
@@ -318,12 +345,20 @@ void buildPages() {
   menuAddRow(menuRoot_, "Sensors", nullptr, openSensor);
 
   // HOME, ON THE GEAR'S ROW BUT MIRRORED TO THE LEFT MARGIN. The dashboard's
-  // action row is 64 px tall against the bottom padding, and the gear is the
-  // right-hand 64 px of it:
+  // action row is 56 px tall against the bottom padding, and the gear is the
+  // right-hand 56 px of it:
   //
-  //     gear   x = 8 (page pad) + 152 (TARE) + 8 (gap) = 168, w = 64
-  //     home   x = 8 (the same page pad, from the left)
-  //     both   y = 294 - 8 (page pad) - 64             = 222, h = 64
+  //     gear   x = 224 (content width) - 56 = 168, w = 56, right-anchored
+  //     home   x = 8 (the same page pad, from the left), w = 56
+  //     both   y = 278 (content height) - 56 = 222, h = 56
+  //
+  // THIS USED TO BE DERIVED LEFT TO RIGHT, THROUGH TARE: "8 + 152 (TARE) + 8
+  // = 168, w = 64". Both numbers had already rotted -- TARE shrank to 96 when
+  // the swap button was added, and the gear has been 56 wide, not 64, since
+  // then -- and it only landed on the right answer because two errors of 56
+  // and -56 cancelled. It cannot rot again: the row is LV_FLEX_ALIGN_END now,
+  // so the gear is anchored to the RIGHT margin and nothing placed to its left
+  // can move it. The arithmetic above runs right to left for that reason.
   //
   // SAME BAND, OPPOSITE END. Sharing the exact coordinates put both buttons
   // under one thumb, which is quick but means the pixel that leaves a page is
@@ -353,7 +388,10 @@ void buildPages() {
     lv_obj_t *home = lv_button_create(tileMenu_);
     lv_obj_add_flag(home, LV_OBJ_FLAG_IGNORE_LAYOUT);
     lv_obj_set_pos(home, 8 - padL, 222 - padT);
-    lv_obj_set_size(home, 64, 64);
+    // 56, MATCHING THE GEAR. Both dropped from 64 when the dashboard's action
+    // row was shortened to make room for the bigger total; leaving this one at
+    // 64 would have made "same band, opposite end" false by 8 px at the bottom.
+    lv_obj_set_size(home, 56, 56);
     lv_obj_set_style_radius(home, 8, LV_PART_MAIN);
     lv_obj_set_style_bg_color(home, lv_color_hex(0x21262D), LV_PART_MAIN);
     // THE DEFAULT PAGE, not the weight page. This button and the idle timeout
@@ -420,8 +458,10 @@ void buildPages() {
 
   // The Scale page is three rows rather than a screen of its own, which is the
   // whole reason ui_menu exists: adding a setting is adding a row. Tare is
-  // first because it is the one done every service; calibration is done once
-  // per assembly and clearing it almost never.
+  // first because it is the one done every service -- and since the dashboard
+  // button was removed it is the ONLY way to tare from the panel, which is
+  // another reason it must not be buried under the once-per-assembly rows.
+  // Calibration is done once per assembly and clearing it almost never.
   detailScale_ = makeDetail(scr);
   scaleMenu_ = menuCreate(detailScale_, "Scale", back);
   menuAddRow(scaleMenu_, "Tare", nullptr, doTare);
@@ -503,9 +543,11 @@ void pagesGoHome() {
   // With the trial's default set to Knob the device booted blinded and the menu
   // home button returned there -- so the setting looked correct -- and then
   // sixty seconds of inactivity dragged the panel to the WEIGHT page and left
-  // it there. The attendant walks back to kilograms, the per-cell breakdown and
-  // a TARE button: precisely the three things the blinded page exists to hide,
-  // and the trial measures them copying the scale's answer from that point on.
+  // it there. The attendant walks back to kilograms and the per-cell breakdown:
+  // precisely what the blinded page exists to hide, and the trial measures them
+  // copying the scale's answer from that point on. (It was three things until
+  // the TARE button left that page; the two that remain are the ones that
+  // matter, because they are the answer the knob is supposed to be guessing.)
   //
   // It survived because it LOOKED covered: a third reference to defaultTile()
   // sits inside `#if UI_AUTO_CYCLE_MS`, which is defined nowhere in the repo,
@@ -581,8 +623,11 @@ void pagesTick(uint32_t nowMs) {
     // The Average row shows the value it will change, which is what makes a
     // tap-to-cycle row usable at all -- otherwise you are guessing where in the
     // sequence you are.
-    // Row 1 is Calibrate: its hint is the mass it will open pre-filled with, so
-    // the row still says what it does now that the label no longer can.
+    // The Calibrate row's hint is the mass it will open pre-filled with, so the
+    // row still says what it does now that the label no longer can. Addressed
+    // by the ROW_SCALE_CALIBRATE constant rather than a literal -- this comment
+    // used to say "row 1" and Calibrate has been row 2 since Set platform zero
+    // went in above it.
     lastCalMassG_ = s.scale.calMassG;
     static char mass[12];
     snprintf(mass, sizeof(mass), "%ld g", (long)(s.scale.calMassG + 0.5f));

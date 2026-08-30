@@ -6,9 +6,11 @@
 //
 // THE TYPE SCALE IS THE ONE IN lv_conf.h AND IT IS NOT NEGOTIABLE HERE.
 //
-//   48   the total. The one thing someone walked over to see.
-//   24   the TARE button, the only control on the page.
-//   16   the caption and the unit.
+//   84   the total. The one thing someone walked over to see, and the largest
+//        a WEIGHT fits on a 240 px panel -- 56 at two or three decimals and 28
+//        for uncalibrated counts, which are longer strings. See ui_font.h.
+//   24   the two icon buttons in the action row, both navigation.
+//   16   the caption, which carries the unit as well now.
 //   14   the rate line, which is diagnostics rather than information.
 //
 // 14 and 16 are the "read deliberately, up close" tier and 18 is the floor for
@@ -45,18 +47,14 @@ void updateWeight(const State &s);
 // is fine -- it sets one bool.
 void weightPageHidden();
 
-// The one button on the page. Tares EVERY cell.
+// THERE IS NO weightOnTare(). Taring is not reachable from this page at all
+// any more -- it is Settings > Scale > Tare, wired through pagesOnScaleTare().
 //
-// PER-CELL ZEROING IS NOT HERE ANY MORE. Zeroing one corner against the other
-// is a setup job -- it is how you tell an uneven mounting from an uneven pair
-// of cells -- and it is meaningless without the raw counts beside it, so it
-// lives on Settings > Diagnose with the figures that give it meaning. What is
-// left on the dashboard is the action somebody performs while holding a bowl.
-//
-// A function pointer for the same reason ui_state.h exists: src/ui/ is pure
-// LVGL and cannot reach scale.cpp.
-void weightOnTare(void (*cb)(void));
-
+// It was here, as the widest button on the screen at thumb height, and it was
+// being hit by accident during service. Everything else on this page is either
+// a reading or navigation, so a mis-tap is recoverable; a mis-tap on that one
+// silently moved zero. The Scale row navigates back to this page after it
+// fires, which is what confirms it: the total reads 0.0 kg or it does not.
 // The gear button, which goes to the menu page -- the same place a swipe leads.
 //
 // The swipe is not removed and still works. It is simply not good enough to be
@@ -70,7 +68,7 @@ void weightOnSettings(void (*cb)(void));
 // knob. A swipe already does it and this exists because a swipe on this panel
 // has to be slow and deliberate to register, which is the wrong thing to ask of
 // somebody holding a serving spoon. It goes away with the trial, leaving the
-// TARE and settings buttons this row had before.
+// gear alone in this row.
 void weightOnSwap(void (*cb)(void));
 
 }  // namespace ui
