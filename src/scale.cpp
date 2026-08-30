@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <Preferences.h>
+#include <esp_system.h>   // esp_restart, for the cable-at-boot case
 
 #define LGFX_USE_V1
 #include <LovyanGFX.hpp>
@@ -325,6 +326,38 @@ int32_t platformZero_[CELLS] = {0, 0, 0};
 // cycle starts from the platform zero and re-tares.
 int32_t tare_[CELLS] = {0, 0, 0};
 bool tareSet_[CELLS] = {false, false, false};
+
+// --- the I2C cable is a USB-C pigtail, and it can be unplugged ---------------
+// 3V3, SDA, SCL and GND run from the electronics enclosure to the load-cell
+// housing over a USB-C lead. It is a connector, so it will be disconnected --
+// during assembly, during cleaning, and by accident mid-service.
+//
+// TWO CASES, AND THEY NEED OPPOSITE TREATMENT. The distinction is whether this
+// power cycle ever had working cells, which is what everOnline_ records.
+//
+//   CABLE PULLED MID-RUN.  The tare is still valid: the platform has not moved,
+//     the stored zero still describes it, and the food on it is the same food.
+//     Re-taring here would silently redefine empty as whatever is currently on
+//     the scale -- so the converters are re-initialised and the tare is left
+//     exactly alone. Re-init touches only the NAU7802's own registers (gain,
+//     LDO, rate); platformZero_ and tare_ live up here and are not disturbed.
+//
+//   CABLE ABSENT AT BOOT.  Nothing was ever initialised and nothing was ever
+//     tared, so there is no session state worth preserving -- and the auto-tare
+//     that should have run at power-up has by now given up on its deadline.
+//     Re-initialising in place would leave a scale that works and has never
+//     been zeroed, which reads as a working scale. A full restart is both
+//     simpler and more honest: it re-runs the whole boot, including auto-tare,
+//     and lands in the state the device would have had if the cable had been
+//     connected in the first place.
+bool everOnline_ = false;
+uint32_t nextLinkProbeMs_ = 0;
+bool linkLostAnnounced_ = false;
+
+// One second, as asked. Cheap: a single byte written to the mux address, and
+// only ever attempted when no cell is answering, so a healthy station never
+// runs it at all.
+const uint32_t LINK_PROBE_MS = 1000;
 
 // Everything the reading is measured from.
 inline int32_t offsetOf(uint8_t i) { return platformZero_[i] + tare_[i]; }
@@ -870,6 +903,65 @@ void serviceCommands() {
 // it succeeds or gives up. It never re-arms: a device that could silently
 // re-zero itself mid-service would turn a full bowl into an empty reading, and
 // that failure is far worse than the inconvenience it would be saving.
+// Called every pass of the scale task. Does nothing while a cell is answering.
+void serviceLink(uint32_t now) {
+  uint8_t online = 0;
+  for (uint8_t i = 0; i < CELLS; i++)
+    if (cell_[i].state() == CellState::Online) online++;
+
+  if (online > 0) {
+    everOnline_ = true;
+    linkLostAnnounced_ = false;
+    return;
+  }
+
+  if (!linkLostAnnounced_) {
+    linkLostAnnounced_ = true;
+    Serial.println(
+        everOnline_
+            ? "scale: every cell went silent -- I2C cable unplugged? probing 1 Hz"
+            : "scale: no cells at boot -- CONNECT THE USB-C CABLE TO THE LOAD "
+              "CELL HOUSING. Probing 1 Hz; the device will restart when it "
+              "appears.");
+  }
+
+  if ((int32_t)(now - nextLinkProbeMs_) < 0) return;
+  nextLinkProbeMs_ = now + LINK_PROBE_MS;
+
+  // The mux is the whole cable's proxy: it sits in the load-cell housing at the
+  // far end of the lead, so it cannot answer unless 3V3, GND, SDA and SCL are
+  // all through. Probing a converter instead would need a channel selected
+  // first and would report the same thing more slowly.
+  i2cmux::invalidate();
+  if (!i2cmux::begin()) return;
+
+  if (!everOnline_) {
+    // Nothing to preserve, and an un-taured scale is worse than a restart.
+    Serial.println("scale: cable detected -- restarting so the normal boot runs "
+                   "(including auto-tare)");
+    Serial.flush();
+    delay(50);  // let the line reach the console before the reset takes it
+    esp_restart();
+  }
+
+  uint8_t up = 0;
+  for (uint8_t i = 0; i < CELLS; i++)
+    if (cell_[i].begin()) up++;
+  if (up == 0) {
+    // The mux answered and no converter did. The lead is in but something
+    // downstream of the mux is not, which is a different fault from a missing
+    // cable and is worth saying so rather than looping silently.
+    Serial.println("scale: mux answers but no converter does -- check the cells "
+                   "behind it, not the cable");
+    return;
+  }
+
+  // TARE DELIBERATELY UNTOUCHED. See everOnline_ above.
+  Serial.printf("scale: I2C link restored -- %u/%u converters re-initialised, "
+                "tare kept\n", up, CELLS);
+  linkLostAnnounced_ = false;
+}
+
 void serviceAutoTare(uint32_t now) {
   if (autoTare_ == AutoTare::Done || autoTare_ == AutoTare::GaveUp ||
       autoTare_ == AutoTare::Off) {
@@ -1054,6 +1146,10 @@ void scaleTask(void *) {
       if (cell_[i].state() == CellState::Offline) window_[i].clear();
     }
 
+    // BEFORE the auto-tare service, so a restored link is seen as online on
+    // the same pass rather than counting as one more "cells not ready" tick
+    // against the auto-tare deadline.
+    serviceLink(now);
     serviceAutoTare(now);
     serviceCommands();
 

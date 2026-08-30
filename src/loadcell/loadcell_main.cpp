@@ -1360,9 +1360,20 @@ void loop() {
                     mg < 0 ? "-" : "", amg / 1000L, amg % 1000L, sn.countsPerGram, sn.window,
                     (int)(sn.decimals ? sn.decimals : 3), 0);
     } else {
-      Serial.printf("  total  %ld counts   UNCALIBRATED -- Menu > Settings > Scale\n",
-                    (long)(sn.cell[0].counts - sn.cell[0].platformZero - sn.cell[0].tare +
-                           sn.cell[1].counts - sn.cell[1].platformZero - sn.cell[1].tare));
+      // SUMMED OVER scale::CELLS, AND ONLY THE ONLINE ONES -- the same rule
+      // publishScale() uses for the panel and scale_telemetry::netCounts() uses
+      // for net_counts, so the three cannot disagree about the same instant.
+      // This was written as cell[0]+cell[1] literally in the two-cell era and
+      // survived the move to three, which made a perfectly good corner C look
+      // like a wiring fault: pressing it moved the panel and the per-cell line
+      // above and left the console total alone.
+      int32_t net = 0;
+      for (uint8_t i = 0; i < scale::CELLS; i++) {
+        const scale::CellSnapshot &c = sn.cell[i];
+        if (c.state != CellState::Online) continue;
+        net += c.counts - c.platformZero - c.tare;
+      }
+      Serial.printf("  total  %ld counts   UNCALIBRATED -- Menu > Settings > Scale\n", (long)net);
     }
     // THE UPLINK LINE. A station that weighs perfectly and publishes nothing
     // looks, from the panel, exactly like one doing both -- and the dashboard

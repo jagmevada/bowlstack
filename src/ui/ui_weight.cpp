@@ -587,6 +587,12 @@ void updateWeight(const State &st) {
     static char down[16];
     if (s.online == 0) {
       flag = "no cell talking";
+    } else if (s.online == 0) {
+      // NAMES THE CABLE, because that is the fix nine times in ten. The cells
+      // live in a separate housing on a USB-C lead carrying 3V3 and the I2C
+      // pair, so "0 cells" almost always means a connector, not a converter --
+      // and "3 cells down" sends somebody to open the wrong enclosure.
+      flag = "connect load-cell cable";
     } else {
       const uint8_t missing = (uint8_t)(CELLS - s.online);
       snprintf(down, sizeof(down), "%u cell%s down", missing, missing == 1 ? "" : "s");
