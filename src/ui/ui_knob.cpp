@@ -225,9 +225,19 @@ void buildKnob(lv_obj_t *parent) {
   lv_obj_t *row = lv_obj_create(scr);
   flat(row);
   lv_obj_set_width(row, LV_PCT(100));
-  lv_obj_set_height(row, 76);  // font_pct_100 measures 73 -- see ui_font.h
-  // 10 px of air between the vessel and the figure. Paid for by two pixels
-  // off the bowl and the eight that were spare -- see the budget below.
+  // 86 = 73 of glyph + 10 of pad + 3 of margin, and the 73 is MEASURED.
+  //
+  // This was 76, which looked generous against a 73 px line height and was not:
+  // LVGL heights are outer, so 10 px of top padding left a 66 px content area
+  // and the digits lost their bottom three. The give-away was that the clipping
+  // appeared only after the padding went in, while the dead space below the
+  // number -- the flex gap pushing the buttons down -- stayed exactly the same.
+  // The room was there; the box was not asking for it.
+  //
+  // font_pct_100's ink occupies y 0..73 of a 73 px line box: no ascender or
+  // descender slack at all, because the subset is digits. A face with letters
+  // in it would have had room to lose.
+  lv_obj_set_height(row, 86);
   lv_obj_set_style_pad_top(row, 10, LV_PART_MAIN);
   lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
   lv_obj_set_style_pad_column(row, 4, LV_PART_MAIN);
