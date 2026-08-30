@@ -12,9 +12,15 @@ name: Deploy dashboard to Pages
 
 on:
   push:
-    # `frontend` is here so the trial can deploy without first merging a
-    # dashboard into main. Drop it once this lands on main.
-    branches: [main, frontend]
+    # `frontend` and `loadcell` are here so a trial can deploy without first
+    # merging a dashboard into main. Drop both once this lands on main.
+    #
+    # THERE IS ONE PAGES SITE, so whichever branch pushed last is what
+    # https://jagmevada.github.io/bowlstack/ serves. Deploying from `loadcell`
+    # REPLACES the build from `main` until main is pushed again -- that is the
+    # point during the knob-vs-scale trial, and it is worth knowing before
+    # somebody wonders why a fix on main did not appear.
+    branches: [main, frontend, loadcell]
     paths:
       - 'web/**'
       - '.github/workflows/pages.yml'
