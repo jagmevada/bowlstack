@@ -399,14 +399,25 @@ void begin() {
   // is written unless something is put. bringup_wifi.cpp learned this the same
   // way.
   if (prefs_.begin(NVS_NS, false)) {
+    // EVERY READ BEFORE THE end(), and that is not a style point -- it is the
+    // bug this block had. prefs_.end() closed the handle and the fill estimate
+    // was read AFTER it, so getUChar found no open namespace and returned its
+    // default. The knob saved correctly, the console said so, and every power
+    // cycle still came back at 0%.
+    //
+    // Preferences does not complain about a read on a closed handle; it hands
+    // back the fallback you passed, which is indistinguishable from a key that
+    // has never been written. So the failure looked like "the save is broken"
+    // and was in the load, three lines further down.
     position_ = prefs_.getInt(KEY_ENCPOS, 0);
-    prefs_.end();
-    savedPos_ = position_;
-    haveSaved_ = true;
     // TRIAL: the fill estimate survives a power cycle too. A station rebooted
     // mid-service must not come back claiming an empty vessel -- that is a
     // reading somebody would act on.
     fillPct_ = prefs_.getUChar(KEY_FILLPCT, 0);
+    prefs_.end();
+
+    savedPos_ = position_;
+    haveSaved_ = true;
     if (fillPct_ > 100) fillPct_ = 100;
     savedFillPct_ = fillPct_;
   } else {

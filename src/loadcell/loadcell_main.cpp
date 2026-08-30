@@ -1087,6 +1087,31 @@ void setup() {
   // on a fresh board is the build default.
   ui::calibSetMass(scale::calMass());
 
+  // WHICH PAGE TO OPEN ON, READ BEFORE THE PAGES EXIST.
+  //
+  // This used to sit with the other panel-control setup, thirty lines further
+  // down -- which is AFTER buildPages(), and buildPages is what chooses the
+  // first tile. So the setting persisted perfectly and the device ignored it:
+  // every boot opened on the weight page, and the menu row underneath cheerfully
+  // read "Knob".
+  //
+  // The give-away was that the idle timeout and the home button DID honour it,
+  // because both run later and read the value through State. Only the very
+  // first tile was wrong, which is the one moment nothing has re-read anything
+  // yet.
+  {
+    // Read-write to open it, for the same reason inputs.cpp does: a namespace
+    // that has never been written does not exist, and a read-only open of one
+    // fails and logs an error that looks exactly like corruption.
+    Preferences p;
+    if (p.begin("bowlinput", false)) {
+      defaultPage_ = p.getUChar("defpage", 0);
+      p.end();
+    }
+    if (defaultPage_ > 1) defaultPage_ = 0;
+  }
+  ui::demoOverrideDefaultPage(defaultPage_);
+
   ui::buildPages();
   bootMark("scope canvas + buildPages -- SPLASH ENDS HERE");
   Serial.println(
@@ -1103,17 +1128,6 @@ void setup() {
   // charge-sense line is already being read when the battery block prints what
   // it thinks of the charger.
   inputs::begin();
-  {
-    // Read-write to open it, for the same reason inputs.cpp does: a namespace
-    // that has never been written does not exist, and a read-only open of one
-    // fails and logs an error that looks exactly like corruption.
-    Preferences p;
-    if (p.begin("bowlinput", false)) {
-      defaultPage_ = p.getUChar("defpage", 0);
-      p.end();
-    }
-    if (defaultPage_ > 1) defaultPage_ = 0;
-  }
   ui::pagesOnCycleDefaultPage(onCycleDefaultPage);
   Serial.printf("  TRIAL    default page is %s -- Menu > Settings > Default page\n",
                 defaultPage_ ? "Knob" : "Weight");

@@ -484,6 +484,12 @@ void buildPages() {
   // never the reason it worked, so the fix is to state the dependency rather
   // than restore the traffic.
   lv_obj_update_layout(scr);
+  // SEEDED FROM THE FIXTURE, because pagesTick() has not run yet and the
+  // static above is still zero. Without this the first tile is always the
+  // weight page however the setting is stored -- and the setting would then
+  // start working a second later, the moment the first tick arrived, which is
+  // the sort of half-fix that reads as a flaky device.
+  defaultPage_ = demoLatest(0).defaultPage;
   lv_tileview_set_tile(tv_, defaultTile(), LV_ANIM_OFF);
   lastActive_ = nullptr;
   depth_ = 0;
