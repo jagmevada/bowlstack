@@ -304,8 +304,31 @@ static const int8_t CAM_SCCB_SCL = 16;
 // A0/A1/A2 to GND gives 0x70. They have no internal pull-downs in the silicon;
 // most breakouts fit their own, but a floating address pin is an address that
 // moves, so strap them.
-static const int8_t CELL_SDA = 21;  // == CAM_SCCB_SDA, R4 4.7k fitted
-static const int8_t CELL_SCL = 16;  // == CAM_SCCB_SCL, R5 4.7k fitted
+// MOVED TO IO11/IO12, AND THE ONE THING THAT MADE THE OLD PAIR SPECIAL IS GONE
+// WITH IT: R4 and R5, the 4.7k pull-ups the camera connector already carried on
+// IO21/IO16. IO11 and IO12 have none, so THE BUS NEEDS EXTERNAL PULL-UPS -- one
+// 4.7k from each line to 3V3, or a mux breakout that fits its own on the trunk
+// side (most do; check before adding a second pair, since two in parallel make
+// 2.4k and that is a lot of current for a converter to sink).
+//
+// Without them the bus does not fail cleanly. It half-works: short wires and a
+// slow clock get away with the pins' own leakage, and the symptom is a
+// converter that NAKs intermittently and reads like a flaky part. That is
+// exactly what happened here before -- see the retired arrangement above, where
+// cell B was bit-banged on this same pair at 100 kHz because 400 kHz produced
+// NAKs. The clock is 400 kHz now, so the resistors are not optional.
+//
+// WHAT IS BETTER ABOUT IT, and it is not nothing: the whole load-cell loom now
+// leaves on P2 -- signals at P2-9/P2-10, power at P2-1/P2-2 -- where the old
+// pair split it across both headers, signals on P1 and 3V3 necessarily on P2
+// because P1 has none. The panel loom is entirely on P1 and the cell loom
+// entirely on P2, which is the separation the pin audit wanted and could not
+// have while the bus was on the camera pair.
+//
+// IO21 and IO16 are free again, and they are the two most valuable free pins on
+// the board: a complete I2C bus with pull-ups already fitted.
+static const int8_t CELL_SDA = 11;  // P2-9   -- NO on-board pull-up, fit 4.7k
+static const int8_t CELL_SCL = 12;  // P2-10  -- NO on-board pull-up, fit 4.7k
 
 static const uint8_t MUX_ADDR = 0x70;  // A0/A1/A2 grounded
 
@@ -342,18 +365,15 @@ static const uint8_t NAU7802_ADDR = 0x2A;
 //
 //     P2-8   IO13   charge sense (STAT)      DEFINED, NOT WIRED -- see below
 //
-// ############################################################################
-// ##  P1-7, BETWEEN THE SWITCH AND DT, IS CELL_SDA. DO NOT LAND A WIRE ON IT.
-// ############################################################################
+// THE HAZARD THAT USED TO BE HERE HAS MOVED. While the cell bus was on the
+// camera pair, P1-4 and P1-7 were CELL_SCL and CELL_SDA -- sitting between the
+// LED and the encoder, one slipped wire from taking every load cell down. The
+// bus is on P2-9/P2-10 now, so P1 carries nothing but panel controls and a
+// misplaced lead here costs at worst one input.
 //
-// IO21 was asked for as the switch pin and it is the load-cell I2C data line.
-// A switch there shorts SDA to ground on every press: the bus hangs, all three
-// NAU7802s go dark, and the scale -- the entire product -- stops reading. IO18
-// at P1-6 is the pin immediately next to it and is free.
-//
-// This is also why the encoder should go on THREE INDIVIDUAL LEADS rather than
-// a housing spanning P1-6..P1-9. A four-way shell would have to keep position 2
-// blank, and a shell that can be seated wrongly eventually is.
+// IO21 was originally asked for as the switch pin, back when it was CELL_SDA;
+// it is free again today. IO18 stays the switch because nothing is gained by
+// moving a working wire.
 //
 // IO18 IS THE ONE PIN ON THIS BOARD WITH A TWO-NODE NET -- {P1-6, U2-24}, and
 // no stub on J1, the camera FPC. Every other free pin carries a third node

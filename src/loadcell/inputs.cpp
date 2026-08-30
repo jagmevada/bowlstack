@@ -416,7 +416,7 @@ void begin() {
   Serial.println("\n--- panel controls ---");
   Serial.printf("  encoder  CLK GPIO%d (P1-8)  DT GPIO%d (P1-9)  SW GPIO%d (P1-6)\n",
                 board::PIN_ENC_CLK, board::PIN_ENC_DT, board::PIN_ENC_SW);
-  Serial.println("           !! P1-7 between SW and DT is CELL_SDA -- no wire there");
+  Serial.println("           the cell bus moved to P2-9/P2-10, so P1 is all panel now");
   Serial.printf("  LED      GPIO%d (P1-3), active %s -- steady on battery, "
                 "1 Hz on mains\n",
                 board::PIN_STATUS_LED,
@@ -577,8 +577,8 @@ void dumpState() {
   if (encEdges_ == 0) {
     Serial.println("  !! no quadrature edges at all -- CLK/DT are not moving.");
     Serial.println("     Check the encoder's ground at P1-13 and that CLK/DT");
-    Serial.println("     are on P1-9 and P1-8. If the load cells have ALSO gone");
-    Serial.println("     quiet, a wire is on P1-7 -- that is CELL_SDA.");
+    Serial.println("     are on P1-9 and P1-8. The cell bus is on P2 now, so a");
+    Serial.println("     panel wire can no longer take the load cells down with it.");
   } else if (encAborted_ > encEdges_ / 2) {
     Serial.println("  !! most sequences abandoned before completing.");
     Serial.println("     The state machine discards these rather than guessing,");
