@@ -61,7 +61,27 @@ bool externalPower();     // VBUS present
 bool chargeSenseFitted(); // board::CHARGER_STATUS_READABLE, restated here so
                           // callers do not have to include the board header
 
-void setStatusLed(bool on);
+// --- the power-on indicator -------------------------------------------------
+// WHAT THE LED IS FOR, because it is not a status light. The display blanks on
+// an inactivity timeout and the unit then looks dead while still drawing from
+// the cell. This says otherwise, so somebody flips the battery switch at the
+// end of a service instead of finding a flat pack in the morning.
+//
+//     on mains    blinking 1 Hz
+//     on battery  steady            <- the urgent one, so the louder signal
+//
+// Auto is the normal mode and it needs nothing from the caller: `loop()` drives
+// the pin from the VBUS reading every tick. ForceOn / ForceOff exist for
+// bring-up, so a wire can be confirmed without waiting on a charger.
+enum class LedMode : uint8_t { Auto, ForceOn, ForceOff };
+
+void setLedMode(LedMode m);
+LedMode ledMode();
+const char *ledModeName();
+
+// Where the pin is RIGHT NOW, after the policy has been applied. Not the
+// commanded state -- in Auto on mains this alternates at 1 Hz, and a caller
+// asking "is the LED lit" wants the answer, not the intent.
 bool statusLed();
 
 // --- bring-up ---------------------------------------------------------------

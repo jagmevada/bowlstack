@@ -128,6 +128,35 @@ Debounced sw_, stat_, vbus_;
 uint32_t swDownAtMs_ = 0;
 bool longFired_ = false;
 bool ledOn_ = false;
+LedMode ledMode_ = LedMode::Auto;
+
+// Half-period of the mains blink. 500 ms each way is the 1 Hz asked for.
+const uint32_t BLINK_HALF_MS = 500;
+
+void driveLed(bool on) {
+  ledOn_ = on;
+  digitalWrite(board::PIN_STATUS_LED,
+               (on == board::STATUS_LED_ACTIVE_HIGH) ? HIGH : LOW);
+}
+
+// FREE-RUNNING off millis() rather than a toggle with its own timer. A stored
+// phase would have to be reset whenever the mode changed, and getting that
+// wrong gives a blink that stalls on one edge -- which reads as a failed LED.
+// Derived from the clock, it cannot stall; it only glitches once per millis()
+// wrap, every 49.7 days, by at most one half-period.
+void applyLedPolicy(uint32_t nowMs) {
+  switch (ledMode_) {
+    case LedMode::ForceOn:  driveLed(true);  return;
+    case LedMode::ForceOff: driveLed(false); return;
+    case LedMode::Auto:
+    default:
+      // Steady on battery, blinking on mains. The steady state is the one that
+      // costs current, and it is deliberately the battery one: a light left on
+      // a device that looks switched off is the message.
+      driveLed(vbus_.level ? (((nowMs / BLINK_HALF_MS) & 1u) == 0u) : true);
+      return;
+  }
+}
 
 }  // namespace
 
@@ -153,7 +182,7 @@ void begin() {
   pinMode(board::PIN_VBUS_SENSE, INPUT_PULLDOWN);
 
   pinMode(board::PIN_STATUS_LED, OUTPUT);
-  setStatusLed(false);
+  driveLed(false);
 
   // Seed the decoder from the pins as they are RIGHT NOW. Starting from a
   // hardcoded zero would make the first movement look like a transition from a
@@ -166,9 +195,12 @@ void begin() {
   attachInterrupt(digitalPinToInterrupt(board::PIN_ENC_DT), encIsr, CHANGE);
 
   Serial.println("\n--- panel controls ---");
-  Serial.printf("  encoder  CLK GPIO%d (P1-1)  DT GPIO%d (P1-2)  SW GPIO%d (P1-3)\n",
+  Serial.printf("  encoder  CLK GPIO%d (P1-9)  DT GPIO%d (P1-8)  SW GPIO%d (P1-6)\n",
                 board::PIN_ENC_CLK, board::PIN_ENC_DT, board::PIN_ENC_SW);
-  Serial.printf("  LED      GPIO%d (P1-5), active %s\n", board::PIN_STATUS_LED,
+  Serial.println("           !! P1-7 between SW and DT is CELL_SDA -- no wire there");
+  Serial.printf("  LED      GPIO%d (P1-3), active %s -- steady on battery, "
+                "1 Hz on mains\n",
+                board::PIN_STATUS_LED,
                 board::STATUS_LED_ACTIVE_HIGH ? "HIGH" : "LOW");
   Serial.printf("  charge   GPIO%d (P2-8) STAT, LOW = charging -- %s\n",
                 board::PIN_CHARGE_STAT,
@@ -217,6 +249,11 @@ Events loop(uint32_t nowMs) {
   e.externalChanged =
       settle(vbus_, digitalRead(board::PIN_VBUS_SENSE) == HIGH, nowMs, CHARGE_DWELL_MS);
 
+  // AFTER the VBUS read, so a plug event is reflected on the same tick it is
+  // reported rather than 250 ms later. Unconditional -- the blink needs driving
+  // every pass, not only when something changed.
+  applyLedPolicy(nowMs);
+
   return e;
 }
 
@@ -226,10 +263,14 @@ bool charging() { return stat_.level; }
 bool externalPower() { return vbus_.level; }
 bool chargeSenseFitted() { return board::CHARGER_STATUS_READABLE; }
 
-void setStatusLed(bool on) {
-  ledOn_ = on;
-  digitalWrite(board::PIN_STATUS_LED,
-               (on == board::STATUS_LED_ACTIVE_HIGH) ? HIGH : LOW);
+void setLedMode(LedMode m) { ledMode_ = m; }
+LedMode ledMode() { return ledMode_; }
+const char *ledModeName() {
+  switch (ledMode_) {
+    case LedMode::ForceOn:  return "forced ON";
+    case LedMode::ForceOff: return "forced off";
+    default:                return "auto (steady on battery, 1 Hz on mains)";
+  }
 }
 bool statusLed() { return ledOn_; }
 
@@ -261,15 +302,15 @@ void dumpState() {
   Serial.printf("  charging %s%s\n", stat_.level ? "YES" : "no",
                 board::CHARGER_STATUS_READABLE ? "" : "   (mod not declared fitted)");
   Serial.printf("  external %s\n", vbus_.level ? "5 V PRESENT" : "on battery");
-  Serial.printf("  LED      %s\n", ledOn_ ? "on" : "off");
+  Serial.printf("  LED      %s, %s\n", ledOn_ ? "lit" : "dark", ledModeName());
 
   // THE TWO FAILURES THAT LOOK THE SAME FROM THE POSITION FIGURE ALONE, named
   // so the console answers the question rather than just posing it.
   if (encEdges_ == 0) {
     Serial.println("  !! no quadrature edges at all -- CLK/DT are not moving.");
     Serial.println("     Check the encoder's ground at P1-13 and that CLK/DT");
-    Serial.println("     are on P1-1 and P1-2 -- P1-4 is CELL_SCL, so a housing");
-    Serial.println("     slid one position inboard breaks the load cells too.");
+    Serial.println("     are on P1-9 and P1-8. If the load cells have ALSO gone");
+    Serial.println("     quiet, a wire is on P1-7 -- that is CELL_SDA.");
   } else if (encInvalid_ > encEdges_ / 4) {
     Serial.println("  !! a quarter of transitions rejected -- bouncing badly.");
     Serial.println("     A bare EC11 on internal pull-ups alone can do this;");

@@ -327,56 +327,91 @@ static const uint8_t NAU7802_ADDR = 0x2A;
 // number is what the firmware needs and they are not interchangeable. See the
 // P2 correction in section 7 for why that distinction is written down twice.
 //
-// ON P1, BECAUSE THAT IS WHERE THE ENCODER PHYSICALLY IS. An earlier version of
-// this put the knob on P2, which is the better electrical answer -- P2's free
-// run ends on a ground pin, and P1's abuts CELL_SCL. It lost to the loom: the
-// encoder is a panel part on a short harness, and routing it to the far header
-// to save an argument about ADC channels nobody is using is how a prototype
-// acquires a wire that gets snagged.
+// ON P1, BECAUSE THAT IS WHERE THE ENCODER PHYSICALLY IS. P2 is the better
+// electrical answer -- its free run ends on a ground pin where P1's abuts
+// CELL_SCL -- and it lost to the loom. The encoder is a panel part on a short
+// harness, and routing it to the far header to protect ADC channels nobody is
+// using is how a prototype acquires a wire that gets snagged.
 //
-//     P1-1   IO2    encoder CLK              \  three contiguous positions
-//     P1-2   IO4    encoder DT                |  butted against the physical
-//     P1-3   IO6    encoder SW               /   end of the header
-//     P1-5   IO17   status LED               (see below -- it can do nothing else)
-//     P1-10  IO10   VBUS sense               4.7k from P1-14, 10k to GND
+//     P1-3   IO6    status LED               power / charge indicator
+//     P1-6   IO18   encoder SW
+//     P1-8   IO8    encoder DT
+//     P1-9   IO7    encoder CLK
+//     P1-10  IO10   VBUS sense               5k/10k divider from P1-14
 //     P1-13  GND    encoder common, switch return, LED cathode
 //
-//     P2-8   IO13   charge sense (STAT)      lone flying lead to LED1 cathode
+//     P2-8   IO13   charge sense (STAT)      DEFINED, NOT WIRED -- see below
 //
-// THE HOUSING GOES AT THE END OF THE HEADER, at P1-1, and that placement is
-// load-bearing rather than tidy. P1-4 is CELL_SCL. A three-way shell that slid
-// one position inboard would put the encoder's switch on the load-cell clock
-// line -- so it is butted against the board edge where it cannot slide out, and
-// an inboard error leaves a visible empty position at P1-1.
+// ############################################################################
+// ##  P1-7, BETWEEN THE SWITCH AND DT, IS CELL_SDA. DO NOT LAND A WIRE ON IT.
+// ############################################################################
 //
-// WHAT THIS SPENDS: IO2, IO4 and IO6 are ADC1_CH1/CH3/CH5, and ADC1 is the only
-// ADC usable while WiFi is up. Three of its channels now carry contact inputs.
-// That is a real cost and it is accepted knowingly: the load cells have their
-// own converters, the battery has GPIO5, and nothing in this product has ever
-// wanted another analog input. IO7, IO8 and IO9 remain if that changes.
+// IO21 was asked for as the switch pin and it is the load-cell I2C data line.
+// A switch there shorts SDA to ground on every press: the bus hangs, all three
+// NAU7802s go dark, and the scale -- the entire product -- stops reading. IO18
+// at P1-6 is the pin immediately next to it and is free.
 //
-// Charge sense is deliberately NOT in the encoder's housing, and on the other
-// header. The knob is a panel part and will be unplugged; charge sense is a
-// board-side lead to a component pad and must not come away with it.
-static const int8_t PIN_ENC_CLK    = 2;   // P1-1
-static const int8_t PIN_ENC_DT     = 4;   // P1-2
-static const int8_t PIN_ENC_SW     = 6;   // P1-3
+// This is also why the encoder should go on THREE INDIVIDUAL LEADS rather than
+// a housing spanning P1-6..P1-9. A four-way shell would have to keep position 2
+// blank, and a shell that can be seated wrongly eventually is.
+//
+// IO18 IS THE ONE PIN ON THIS BOARD WITH A TWO-NODE NET -- {P1-6, U2-24}, and
+// no stub on J1, the camera FPC. Every other free pin carries a third node
+// there. The one mark against it is that it is also the only sub-19 GPIO with a
+// HIGH-level power-up glitch (~60 us), so at reset the pad may briefly drive
+// into a closed switch contact. Survivable and accepted: 60 us into a
+// mechanical contact is nothing, and the alternative was splitting the encoder
+// across both ends of the header.
+//
+// WHAT THIS SPENDS: IO6, IO7 and IO8 are ADC1_CH5/CH6/CH7, and ADC1 is the only
+// ADC usable while WiFi is up. Three of its channels now carry a contact input
+// pair and an LED. Accepted knowingly -- the load cells have their own
+// converters and the battery has GPIO5, so nothing here has ever wanted another
+// analog input. IO2, IO4 and IO9 remain if that changes.
+//
+// A NOTE ON IO17, which is two positions from the LED at P1-5 and would have
+// been free. R6 makes it the one pin that can NEVER be an input, so spending it
+// on the one output would have kept IO6's ADC channel. Not done, because the
+// LED is a panel part and P1-3 is where it lands; the swap is a one-line change
+// here if the analog channel is ever wanted back.
+static const int8_t PIN_ENC_CLK    = 7;   // P1-9
+static const int8_t PIN_ENC_DT     = 8;   // P1-8
+static const int8_t PIN_ENC_SW     = 18;  // P1-6  -- NOT 21, that is CELL_SDA
+
+// DEFINED BUT NOT WIRED. The VBUS tap on IO10 is what drives the indicator, and
+// it answers "on mains", not "charging" -- the ETA6098 terminates when the cell
+// is full and 5 V stays present, so a VBUS-driven indicator keeps signalling
+// charge after charging has stopped. That is a deliberate simplification for
+// one indicator LED and it is fine there.
+//
+// It is NOT fine for the `charging` column, which is why nothing publishes it:
+// CHARGER_STATUS_READABLE stays false while this pin has no wire on it, and
+// device_status carries `unknown` rather than a guess. Fitting the 1k tap in
+// section 5 and defining BOWLSTACK_CHARGE_SENSE is what changes that.
 static const int8_t PIN_CHARGE_STAT = 13; // P2-8, ETA6098 STAT, LOW = charging
 
-// GPIO17 AND ONLY GPIO17, because it is the one pin that can do nothing else.
-// R6 is a 10k pull-down from this net to GND, which against the internal
-// pull-up divides to 3.3 x 10/55 = 0.60 V -- below V_IL, so an INPUT_PULLUP
-// here reads a hard LOW whatever is connected. It is not a weak input, it is a
-// pin with no input at all. As a push-pull output it is perfectly good, so the
-// allocation spends it on the one signal that is an output and keeps every
-// usable input pin free.
+// THE POWER-ON REMINDER, and its real job is to be seen when nothing else on
+// the unit is. The display blanks on an inactivity timeout and the board then
+// looks dead while still drawing from the cell -- so this LED says "the battery
+// switch is still on", which is the thing somebody needs to know at the end of
+// a service.
 //
-// Two side effects of R6, both benign and both worth knowing. It holds the pin
-// low through reset, so the LED is dark from power-on until firmware drives it
-// -- no boot flash. And it wastes 330 uA whenever the LED is lit, on top of the
-// LED's own current, which is a ~16% overhead on an indicator that exists to
-// burn while the display is off.
-static const int8_t PIN_STATUS_LED = 17;  // P1-5
+//     on mains    blinking at 1 Hz     charging, or at least connected
+//     on battery  steady               running down the cell -- switch me off
+//
+// STEADY IS THE BATTERY STATE, WHICH IS THE MORE URGENT ONE, and that is the
+// right way round even though it costs more current. A blink is easy to miss
+// across a room and easy to mistake for a status indicator doing something
+// harmless; a steady light on a device that appears to be off reads as a
+// mistake, which is exactly what it is. At ~2 mA that is ~32 mAh over a
+// sixteen-hour night -- a few per cent of a cell, and self-limiting, because
+// the whole point is that somebody sees it and flips the switch.
+//
+// It also survives deep sleep, if the power-management work goes that far: IO6
+// is RTC-capable so gpio_hold_en() can hold the level through sleep. Only the
+// steady state can be held -- blinking needs a CPU -- and that works out,
+// because deep sleep only ever happens on battery, which is the steady case.
+static const int8_t PIN_STATUS_LED = 6;   // P1-3
 
 // VBUS presence, and it answers a DIFFERENT QUESTION from PIN_CHARGE_STAT.
 // STAT says "current is going into the cell"; this says "the unit is on mains".

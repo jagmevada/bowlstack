@@ -648,17 +648,14 @@ void serviceInputs(uint32_t nowMs) {
   if (e.pressed) {
     switchSeen_ = true;
     Serial.println("input: switch DOWN");
-    // The LED follows the switch during bring-up, so ONE gesture confirms both
-    // the input and the output. It is a temporary binding -- the LED's real job
-    // is to say "still powered" once the display blanks, which is the power
-    // management work this branch has not started.
-    inputs::setStatusLed(true);
   }
   if (e.longPress) Serial.println("input: switch LONG press");
-  if (e.released) {
-    Serial.println("input: switch up");
-    inputs::setStatusLed(false);
-  }
+  if (e.released) Serial.println("input: switch up");
+  // The LED is NOT bound to the switch. It has a real job -- steady on battery,
+  // 1 Hz on mains -- and borrowing it for bring-up feedback would mean the one
+  // indicator on the unit lies about the power state while somebody is
+  // deliberately testing the power state. Plugging USB in confirms both the LED
+  // and the VBUS divider in one gesture anyway, which is the better test.
 
   if (e.chargeChanged) {
     chargeSeen_ = true;
@@ -756,8 +753,14 @@ void serviceConsole() {
         break;
       case 'l':
       case 'L':
-        inputs::setStatusLed(!inputs::statusLed());
-        Serial.printf("\n> status LED %s\n", inputs::statusLed() ? "ON" : "off");
+        // Cycles rather than toggles, and always lands back on Auto, so a
+        // bring-up session cannot leave the indicator permanently lying.
+        inputs::setLedMode(inputs::ledMode() == inputs::LedMode::Auto
+                               ? inputs::LedMode::ForceOn
+                           : inputs::ledMode() == inputs::LedMode::ForceOn
+                               ? inputs::LedMode::ForceOff
+                               : inputs::LedMode::Auto);
+        Serial.printf("\n> status LED -> %s\n", inputs::ledModeName());
         break;
       case 'w':
       case 'W':
@@ -780,8 +783,10 @@ void serviceConsole() {
             "  x      clear the calibration and go back to counts\n"
             "  i      dump the panel controls: raw pin levels, encoder\n"
             "         position, decoder health, charge and VBUS state\n"
-            "  l      toggle the status LED (it otherwise follows the knob\n"
-            "         switch during bring-up)\n"
+            "  l      status LED: auto -> forced on -> forced off -> auto.\n"
+            "         Auto is steady on battery and 1 Hz on mains, which is\n"
+            "         what says the battery switch is still on when the\n"
+            "         display has blanked\n"
             "  w      step the moving average 8 -> 16 -> 32 -> 64 -> 128 -> 8\n"
             "  d      step the reading 0.0 -> 0.00 -> 0.000 kg -> 0.0 (display\n"
             "         only; Diagnose keeps all three places whatever this says)\n"
