@@ -53,6 +53,7 @@
 #include "lgfx_waveshare_s3.h"
 #include "logo128.h"
 #include "scale.h"
+#include "inputs.h"
 #include "scale_telemetry.h"
 #include "ui_calib.h"
 #include "ui_demo.h"
@@ -616,6 +617,84 @@ void onClearCal() {
   scale::clearCalibration();
 }
 
+// --- panel controls, and what bring-up needs from them ----------------------
+// EVERY EVENT PRINTS. Not because the product wants a chatty console, but
+// because this is the only way to confirm a hand-soldered joint: turn the knob
+// and either a line appears or it does not, and if it does not, the heartbeat
+// below says whether the pin is stuck high, stuck low, or moving but decoding
+// wrong. Those are three different soldering mistakes and they are
+// indistinguishable from the UI.
+//
+// Silence when nothing is happening. The heartbeat only prints while something
+// is UNCONFIRMED, so a board whose controls all work stops talking about them.
+bool encoderSeen_ = false;
+bool switchSeen_ = false;
+bool chargeSeen_ = false;
+bool vbusSeen_ = false;
+uint32_t nextTraceMs_ = 0;
+
+void serviceInputs(uint32_t nowMs) {
+  const inputs::Events e = inputs::loop(nowMs);
+
+  if (e.turned) {
+    encoderSeen_ = true;
+    // The count is printed even when it is 1, because "CW x1" and "CW" read
+    // differently when you have just spun the knob a quarter turn and want to
+    // know whether the firmware saw four clicks or one.
+    Serial.printf("input: encoder %s x%d  -> position %ld\n",
+                  e.turned > 0 ? "CW " : "CCW", abs((int)e.turned),
+                  (long)inputs::position());
+  }
+  if (e.pressed) {
+    switchSeen_ = true;
+    Serial.println("input: switch DOWN");
+    // The LED follows the switch during bring-up, so ONE gesture confirms both
+    // the input and the output. It is a temporary binding -- the LED's real job
+    // is to say "still powered" once the display blanks, which is the power
+    // management work this branch has not started.
+    inputs::setStatusLed(true);
+  }
+  if (e.longPress) Serial.println("input: switch LONG press");
+  if (e.released) {
+    Serial.println("input: switch up");
+    inputs::setStatusLed(false);
+  }
+
+  if (e.chargeChanged) {
+    chargeSeen_ = true;
+    Serial.printf("input: charge STAT -> %s\n",
+                  inputs::charging() ? "CHARGING" : "not charging");
+  }
+  if (e.externalChanged) {
+    vbusSeen_ = true;
+    Serial.printf("input: VBUS -> %s\n",
+                  inputs::externalPower() ? "5 V PRESENT" : "on battery");
+  }
+
+  // TWO SIGNALS, AND THEY ARE ALLOWED TO DISAGREE. Reported together on any
+  // change of either, because the interesting state is the combination and
+  // reading it off two separate lines printed seconds apart is how the
+  // termination case gets misread as a fault.
+  if (e.chargeChanged || e.externalChanged) {
+    const bool ext = inputs::externalPower(), chg = inputs::charging();
+    Serial.printf("       => %s\n",
+                  !ext ? "on battery"
+                       : chg ? "on mains, charging"
+                             : "on mains, charge complete (STAT released)");
+  }
+
+  // The heartbeat, and only while something is still unproven.
+  const bool allSeen = encoderSeen_ && switchSeen_ && chargeSeen_ && vbusSeen_;
+  if (!allSeen && (int32_t)(nowMs - nextTraceMs_) >= 0) {
+    nextTraceMs_ = nowMs + 3000;
+    char line[160];
+    inputs::traceLine(line, sizeof(line));
+    Serial.printf("input: %s   [waiting on:%s%s%s%s]\n", line,
+                  encoderSeen_ ? "" : " turn", switchSeen_ ? "" : " press",
+                  chargeSeen_ ? "" : " charge", vbusSeen_ ? "" : " vbus");
+  }
+}
+
 // --- the same three actions, from the console -------------------------------
 // A SECOND ROUTE TO THE SAME FUNCTIONS, not a second implementation: every one
 // of these calls the identical scale:: entry point the menu row does.
@@ -671,6 +750,15 @@ void serviceConsole() {
         Serial.println("\n> clear calibration");
         scale::clearCalibration();
         break;
+      case 'i':
+      case 'I':
+        inputs::dumpState();
+        break;
+      case 'l':
+      case 'L':
+        inputs::setStatusLed(!inputs::statusLed());
+        Serial.printf("\n> status LED %s\n", inputs::statusLed() ? "ON" : "off");
+        break;
       case 'w':
       case 'W':
         Serial.printf("\n> averaging -> %u samples\n", scale::cycleWindow());
@@ -690,6 +778,10 @@ void serviceConsole() {
             "         dead converter -- both look like a cell that reads wrong.\n"
             "         Pauses measurement for ~15 s at 10 SPS.\n"
             "  x      clear the calibration and go back to counts\n"
+            "  i      dump the panel controls: raw pin levels, encoder\n"
+            "         position, decoder health, charge and VBUS state\n"
+            "  l      toggle the status LED (it otherwise follows the knob\n"
+            "         switch during bring-up)\n"
             "  w      step the moving average 8 -> 16 -> 32 -> 64 -> 128 -> 8\n"
             "  d      step the reading 0.0 -> 0.00 -> 0.000 kg -> 0.0 (display\n"
             "         only; Diagnose keeps all three places whatever this says)\n"
@@ -890,6 +982,14 @@ void setup() {
   Serial.println("    Settings -> WiFi, Battery, Scale (tare / calibrate)");
   Serial.println("    Sensors  -> live cell scope, three traces + frame rate");
 
+  // --- panel controls -------------------------------------------------------
+  // AFTER the panel and the cells, because those two own pins and this must not
+  // be the thing that discovers a collision. Before the battery block, so the
+  // charge-sense line is already being read when the battery block prints what
+  // it thinks of the charger.
+  inputs::begin();
+  bootMark("inputs");
+
   // --- battery ------------------------------------------------------------
   analogSetPinAttenuation(board::PIN_BATTERY_ADC, ADC_11db);
   Serial.println("\n--- battery ---");
@@ -910,11 +1010,12 @@ void setup() {
   // placeholder. Fitting the one-resistor mod in todo.md is what makes
   // CHARGER_STATUS_READABLE true, and this line is then the only one that has to
   // learn where the pin went.
-  ui::demoOverrideCharging(board::CHARGER_STATUS_READABLE, false);
+  ui::demoOverrideCharging(board::CHARGER_STATUS_READABLE, inputs::charging());
   Serial.printf("  charge state %s\n",
                 board::CHARGER_STATUS_READABLE
-                    ? "readable"
-                    : "NOT READABLE on this board -- reported as unknown, not as 'no'");
+                    ? "readable -- STAT mod fitted"
+                    : "NOT DECLARED READABLE -- sensed and printed, but reported "
+                      "as unknown rather than as 'no'");
 
   // One reading before the first loop, so the boot log carries a number rather
   // than leaving the first power line 100 ms away and the panel showing the
@@ -957,6 +1058,12 @@ void loop() {
   bringup_wifi::loop(millis());
   bringup_time::publish();
   serviceConsole();
+
+  // EVERY PASS, not on a timer. The encoder's decode is already in an ISR, so
+  // what happens here is draining an int and reading four pins -- microseconds
+  // -- and rate-limiting it would only add latency to the one input a person is
+  // physically waiting on.
+  serviceInputs(millis());
 
   // 20 Hz, matching what the scale task publishes at. Faster would copy the
   // same snapshot repeatedly under a mutex the measuring task wants back.

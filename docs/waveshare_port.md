@@ -116,8 +116,15 @@ Headers, as broken out:
 
 ```
 P1:  IO2  IO4  IO6  IO16 IO17 IO18 IO21 IO8  IO7  IO10 IO20 IO19 GND  5V
-P2:  3V3  GND  IO43 IO44 IO47 IO48 IO13 IO12 IO15 IO11 IO14 IO9  GND  VBAT
+P2:  3V3  GND  IO43 IO44 IO47 IO48 IO15 IO13 IO11 IO12 IO14 IO9  GND  VBAT
 ```
+
+> **P2 positions 7-10 were listed wrongly here** as `IO13 IO12 IO15 IO11`. The
+> board is `IO15 IO13 IO11 IO12` — verified against the netlist in
+> `ESP32-S3-Touch-LCD-2-SchDoc.pdf` p1 (`PIP207`→IO15, `PIP208`→IO13,
+> `PIP209`→IO11, `PIP2010`→IO12). The *set* is unchanged, so no firmware was
+> ever affected; only somebody counting header positions with a wire in hand,
+> for whom a lead meant for IO13 lands on IO15 and the board still boots.
 
 | Signal | GPIO | Header | Why this pin |
 | --- | --- | --- | --- |
@@ -125,8 +132,8 @@ P2:  3V3  GND  IO43 IO44 IO47 IO48 IO13 IO12 IO15 IO11 IO14 IO9  GND  VBAT
 | Sensor I2C SCL | 16 | P1-4 | same pair |
 | XSHUT `f1` | 2 | P1-1 | |
 | XSHUT `f2` | 4 | P1-2 | |
-| XSHUT `f3` | 13 | P2-7 | |
-| XSHUT `f4` | 12 | P2-8 | |
+| XSHUT `f3` | 13 | P2-8 | position corrected — this table said P2-7 |
+| XSHUT `f4` | 12 | P2-10 | position corrected — this table said P2-8 |
 | Sensor 3V3 / GND | — | P2-1 / P2-2 | **P1 has only GND and 5 V** — sensor power must come off P2 |
 
 The camera's SCCB bus is the find worth using: a complete I2C pair, pull-ups

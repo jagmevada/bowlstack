@@ -312,18 +312,42 @@ static const uint8_t PIN_BATTERY_ADC = 35;
 // pull-down's loose tolerance never enters the measurement. It only has to win
 // against leakage when nothing is connected, which it does easily.
 #if BOWLSTACK_BOARD_WAVESHARE_S3
-// NOT READABLE ON THIS BOARD, and 27 would be actively wrong: GPIO26-32 are the
-// in-package quad flash. The ETA6098's STAT output drives the charge LED's
-// cathode and reaches no GPIO at all, so charge state is genuinely unknown here
-// until the one-resistor mod in todo.md is fitted.
+// The STAT tap, once the mod is fitted -- board_waveshare_s3.h section 9 has the
+// pin and section 5 has why the tap is safe without a divider. PIN_NONE until
+// then, because a pin constant pointing at an unwired GPIO would report a
+// floating input as a charge state.
+//
+// NOTE 27 WOULD BE ACTIVELY WRONG HERE, which is why this branch exists at all:
+// GPIO26-32 are the in-package quad flash on this part.
+#ifdef BOWLSTACK_CHARGE_SENSE
+static const uint8_t PIN_CHARGING = 13;
+#else
 static const uint8_t PIN_CHARGING = PIN_NONE;
+#endif
 #else
 static const uint8_t PIN_CHARGING = 27;
 #endif
 
-// FALSE: this senses the charger's 5 V rail, so the pin is HIGH while charging.
-// True would suit a TP4056-style open-drain STAT output, which pulls low.
-static const bool CHARGING_ACTIVE_LOW = false;
+// BOARD-BRANCHED, and it has to be: the two products sense opposite things and
+// therefore opposite polarities.
+//
+// The discrete board taps the charger's 5 V RAIL, so its pin is HIGH while
+// charging. The Waveshare board taps the ETA6098's STAT output, which is
+// open-drain and pulls LOW while charging. One global `false` served the first
+// correctly and would have inverted the second.
+//
+// This was very nearly got wrong. PIN_BATTERY_ADC and PIN_CHARGING above are
+// both inside the #if; this constant sat outside it, and todo.md's mod
+// checklist said "set CHARGING_ACTIVE_LOW = true" -- which, followed literally,
+// would have flipped charge sense on the three DISCRETE images that are in the
+// field, all of which link device_status.cpp and read this flag. A one-line
+// instruction that silently breaks a different product is exactly the shape of
+// change that gets made at the end of a long evening.
+#if BOWLSTACK_BOARD_WAVESHARE_S3
+static const bool CHARGING_ACTIVE_LOW = true;   // ETA6098 STAT, open-drain
+#else
+static const bool CHARGING_ACTIVE_LOW = false;  // 5 V rail sense
+#endif
 
 // Majority vote over this many reads. Does not make a floating input correct,
 // but it stops a single noise sample from flipping the reported charge state.

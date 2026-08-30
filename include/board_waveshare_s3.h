@@ -160,8 +160,38 @@ static const float  BATTERY_DIVIDER_NOMINAL = 3.0f;  // (200k + 100k) / 100k
 //     ETA6098 STAT (LED1 cathode) --[10k]-- free GPIO (INPUT_PULLUP)
 //
 // Note this inverts the sense used on the discrete board, where the pin is
-// HIGH while charging. Flipping that flag is the entire software change.
+// HIGH while charging.
+//
+// WHY THAT TAP IS SAFE, which was not obvious and had to be got from the
+// netlist rather than assumed. The worry with tapping an indicator LED is what
+// the node floats to when the open-drain output releases -- on a 5 V rail it
+// would sit above this chip's 3.6 V absolute maximum. It does not, because
+// LED1's anode is not on 5 V:
+//
+//     anode   net = { LED1-A , R13 }  -> R13 is 3K to VBAT
+//     cathode net = { LED1-K , U6 pin 9 }        <- exactly two nodes; tap here
+//
+// So the highest the cathode can be pulled is VBAT - Vf ~= 4.2 - 1.9 = 2.3 V,
+// which is BELOW the 3.3 V an INPUT_PULLUP holds the pin at. The LED therefore
+// carries no current, the node follows the pin rather than the other way
+// round, and the pin reads a clean 3.3 V. Charging pulls it hard to GND. No
+// divider, no clamping, no series resistor needed for levels -- the 10k above
+// is strain relief for a fragile pad joint and short protection for a slipped
+// probe, nothing more.
+//
+// FINDING THE CATHODE WITH A METER AND NO SCHEMATIC: board unpowered, measure
+// each LED1 pad to P2-14 (VBAT). The pad reading ~3k is the ANODE, through
+// R13. The pad reading open is the CATHODE. Solder to the LED pad and never to
+// U6 pin 9 -- the ETA6098 is a 0.5 mm-pitch DFN-10.
+//
+// Set -DBOWLSTACK_CHARGE_SENSE=1 once the wire is on. Until then this stays
+// false and `charging` is published as unknown, because an unfitted mod that
+// reported `false` would be a claim rather than an absence.
+#ifdef BOWLSTACK_CHARGE_SENSE
+static const bool CHARGER_STATUS_READABLE = true;
+#else
 static const bool CHARGER_STATUS_READABLE = false;
+#endif
 
 // ---------------------------------------------------------------------------
 // 6. TF card (shares the display's SPI bus)
@@ -178,7 +208,23 @@ static const int8_t SD_CS   = 41;
 // flash, PSRAM, the panel, the touch/IMU bus, USB or the console.
 //
 //   P1:  IO2  IO4  IO6  IO16 IO17 IO18 IO21 IO8  IO7  IO10 IO20 IO19 GND 5V
-//   P2:  3V3  GND  IO43 IO44 IO47 IO48 IO13 IO12 IO15 IO11 IO14 IO9  GND VBAT
+//   P2:  3V3  GND  IO43 IO44 IO47 IO48 IO15 IO13 IO11 IO12 IO14 IO9  GND VBAT
+//
+// P2 POSITIONS 7-10 WERE WRONG HERE until the netlist was re-read. This file
+// said `IO13 IO12 IO15 IO11`; the board is `IO15 IO13 IO11 IO12`. The SET of
+// free pins was right and the firmware never cared, which is exactly why it
+// survived -- nothing built from these numbers fails, because nothing in the
+// image counts header positions. It is only wrong for the person holding the
+// wire, and it is wrong in the worst way: a lead intended for IO13 lands on
+// IO15, one intended for IO12 lands on IO13, and both are free pins, so the
+// board comes up and the signal is simply somewhere else.
+//
+// Netlist evidence, ESP32-S3-Touch-LCD-2-SchDoc.pdf p1:
+//     PIP207 -> CAM_D2/IO15    PIP208  -> CAM_D1/IO13
+//     PIP209 -> CAM_D3/IO11    PIP2010 -> CAM_D0/IO12
+// cross-checked against the drawing's own pinout table.
+//
+// docs/waveshare_port.md carried the same permutation in a wiring table.
 //
 // Three of those are already claimed by something you probably want to keep:
 //
@@ -255,5 +301,79 @@ static const int8_t CELL_MUX_CH[CELL_COUNT] = {0, 1, 2};
 
 // Fixed and unchangeable -- see above.
 static const uint8_t NAU7802_ADDR = 0x2A;
+
+// ---------------------------------------------------------------------------
+// 9. Panel controls -- rotary encoder, charge sense, status LED
+// ---------------------------------------------------------------------------
+// Six signals added by hand to a development board. Every one is on a header
+// pin, so this is jumper wire rather than rework, and the physical positions
+// are given because that is what the person holding the wire needs -- the GPIO
+// number is what the firmware needs and they are not interchangeable. See the
+// P2 correction in section 7 for why that distinction is written down twice.
+//
+// The whole allocation lives on P2-8..P2-13, six contiguous positions ending on
+// a ground pin:
+//
+//     P2-8   IO13   charge sense (STAT)      flying lead to LED1 cathode
+//     P2-9   IO11   status LED               \
+//     P2-10  IO12   encoder CLK               |  one 5-way 0.1" housing,
+//     P2-11  IO14   encoder DT                |  no crossovers, GND outermost
+//     P2-12  IO9    encoder SW               /
+//     P2-13  GND    encoder common, switch return, LED cathode
+//
+// P2-7 (IO15) IS DELIBERATELY LEFT EMPTY. It is a one-pitch physical guard
+// between the touch/IMU bus at P2-5/6 and everything added here -- the bus
+// section 3 argues should never share a failure domain with off-board parts.
+//
+// Charge sense is deliberately NOT in the encoder's housing. The knob is a
+// panel part and will be unplugged; charge sense is board-side and should not
+// come away with it.
+static const int8_t PIN_ENC_CLK    = 12;  // P2-10
+static const int8_t PIN_ENC_DT     = 14;  // P2-11
+static const int8_t PIN_ENC_SW     = 9;   // P2-12
+static const int8_t PIN_STATUS_LED = 11;  // P2-9
+static const int8_t PIN_CHARGE_STAT = 13; // P2-8, ETA6098 STAT, LOW = charging
+
+// VBUS presence, and it answers a DIFFERENT QUESTION from PIN_CHARGE_STAT.
+// STAT says "current is going into the cell"; this says "the unit is on mains".
+// They diverge exactly when the battery is full: the charger terminates, STAT
+// releases, and 5 V is still there. Publishing VBUS as `charging` would
+// therefore claim a charge that finished hours ago.
+//
+//     P1-14 (5V) --[4.7k]-- P1-10 (IO10), INPUT_PULLDOWN
+//
+// 4.7k RATHER THAN 10k, and the reason is the pull-down's tolerance rather than
+// the clamp current -- which the larger resistor would actually favour. The
+// internal pull-down is ~45k typical but not tightly specified. If it comes in
+// low, the ESD clamp never engages and the pin is a plain divider:
+//
+//     pull-down 10k, series 10k:  5 x 10/20 = 2.50 V   <- V_IH is 2.48 V
+//     pull-down 10k, series 4.7k: 5 x 10/14.7 = 3.40 V
+//     pull-down 45k, series 4.7k: clamps ~3.8 V at 0.25 mA
+//
+// 10k has a corner where HIGH is a coin flip. 4.7k does not. The clamped case
+// sits 0.2 V over the datasheet's absolute maximum at a quarter of a
+// milliamp -- fine on a bench prototype, and something to replace with a proper
+// divider before it goes near a production run.
+static const int8_t PIN_VBUS_SENSE = 10;  // P1-10
+
+// Active HIGH: GPIO -> 220R -> LED anode, cathode to GND at P2-13.
+//
+// Against this project's usual common-anode convention, and for a physical
+// reason rather than a preference: 3V3 exists at exactly ONE header position
+// (P2-1) and the load cells already need it, because P1 carries no 3V3 at all.
+// GND is available at three. Sourcing from the GPIO is what the connector
+// allows. The board's own backlight is already active-high through an NPN, so
+// the polarity is not foreign here.
+static const bool STATUS_LED_ACTIVE_HIGH = true;
+
+// The encoder's switch is the ONLY deep-sleep wake source this board has, and
+// that is worth knowing before the power-management work starts rather than
+// after. The touch controller cannot do it: TP_INT is GPIO46, which is outside
+// the S3's RTC_GPIO range (0-21) AND whose net reaches no header, so it can
+// neither be used for EXT0 nor re-routed to a pin that could. IO9 is RTC-
+// capable, so SW can wake the chip; IO12 and IO14 are too, if turning the knob
+// should also wake it.
+static const bool ENC_SW_IS_WAKE_CAPABLE = true;
 
 }  // namespace board
