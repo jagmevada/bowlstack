@@ -54,6 +54,25 @@ extern "C" {
 // Montserrat Medium, 56 px, 4 bpp. Digits, '.', '-' and space ONLY.
 extern const lv_font_t font_mass_56;
 
+// TRIAL HARNESS: the knob page's percentage, and the largest type in the
+// project by a wide margin.
+//
+// 100 PX IS THE SIZE THE PANEL ALLOWS, not a preference, and the arithmetic is
+// worth keeping because the next person to want it bigger will redo it. The
+// widest string this label can ever hold is "100"; in Montserrat-Medium at
+// 100 px that is 66.7 + 66.7 + 37.0 = 170.4 px, against 190 px of column once
+// the 30 px level bar and the page padding are taken out. At 112 px the same
+// string is 191 px and clips inside a 240 px screen.
+//
+// The "1" being narrow is what buys the size -- a three-digit reading of "888"
+// would be 200 px and would not fit. This label cannot show one: the value is a
+// percentage clamped to 100.
+//
+// SUBSET TO DIGITS AND A MINUS, eleven glyphs, ~115 KB. No per-cent sign: the
+// caption carries it, which costs nothing and saves 60 px of the number's
+// width. A label that picks this font up for a word renders blanks.
+extern const lv_font_t font_pct_100;
+
 #ifdef __cplusplus
 }
 #endif

@@ -26,7 +26,6 @@ const uint32_t C_PRESENT = 0x1F6FEB;
 
 lv_obj_t *bar_ = nullptr;
 lv_obj_t *lblPct_ = nullptr;
-lv_obj_t *lblSign_ = nullptr;
 lv_obj_t *lblCaption_ = nullptr;
 lv_obj_t *lblAge_ = nullptr;
 
@@ -39,6 +38,10 @@ bool haveStale_ = false;
 void (*onSettings_)(void) = nullptr;
 void settingsClicked(lv_event_t *) {
   if (onSettings_) onSettings_();
+}
+void (*onSwap_)(void) = nullptr;
+void swapClicked(lv_event_t *) {
+  if (onSwap_) onSwap_();
 }
 
 void flat(lv_obj_t *o) {
@@ -55,10 +58,13 @@ void buildKnob(lv_obj_t *parent) {
   lv_obj_t *scr = lv_obj_create(parent);
   flat(scr);
   lv_obj_set_size(scr, LV_PCT(100), LV_PCT(100));
-  lv_obj_set_style_pad_all(scr, 8, LV_PART_MAIN);
-  lv_obj_set_style_pad_top(scr, 30, LV_PART_MAIN);  // clear of the status bar
+  // TIGHT, because every pixel taken here comes off the number. 30 at the top
+  // is the status bar's height and nothing more; the bottom is flush.
+  lv_obj_set_style_pad_all(scr, 6, LV_PART_MAIN);
+  lv_obj_set_style_pad_top(scr, 30, LV_PART_MAIN);  // exactly clears the status bar
+  lv_obj_set_style_pad_bottom(scr, 0, LV_PART_MAIN);
   lv_obj_set_flex_flow(scr, LV_FLEX_FLOW_ROW);
-  lv_obj_set_style_pad_column(scr, 12, LV_PART_MAIN);
+  lv_obj_set_style_pad_column(scr, 8, LV_PART_MAIN);
   lv_obj_set_flex_align(scr, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
                         LV_FLEX_ALIGN_CENTER);
 
@@ -74,8 +80,16 @@ void buildKnob(lv_obj_t *parent) {
   // matches the thing being estimated -- food sits in the bottom of a vessel,
   // and a bar that drained downwards from the top would have to be mentally
   // inverted every time it was read.
+  // FULL HEIGHT, from directly under the status bar to the bottom edge. A bar
+  // that stopped short would be read as a vessel that stopped short -- the
+  // whole point of drawing it as a column is that its extent means something,
+  // so the extent has to be the whole screen.
+  //
+  // 30 px wide rather than 44: narrow enough to leave the number 190 px, wide
+  // enough to read as a level indicator rather than a scrollbar.
   bar_ = lv_bar_create(scr);
-  lv_obj_set_size(bar_, 44, 210);
+  lv_obj_set_width(bar_, 30);
+  lv_obj_set_height(bar_, LV_PCT(100));
   lv_bar_set_range(bar_, 0, 100);
   lv_bar_set_value(bar_, 0, LV_ANIM_OFF);
   lv_obj_set_style_radius(bar_, 6, LV_PART_MAIN);
@@ -100,7 +114,10 @@ void buildKnob(lv_obj_t *parent) {
   lblCaption_ = lv_label_create(col);
   lv_obj_set_style_text_font(lblCaption_, &lv_font_montserrat_16, LV_PART_MAIN);
   lv_obj_set_style_text_color(lblCaption_, lv_color_hex(C_MUTED), LV_PART_MAIN);
-  lv_label_set_text(lblCaption_, "food left");
+  // THE CAPTION CARRIES THE PER-CENT SIGN, so the number does not have to. A
+  // "%" beside a 100 px figure costs about 60 px of width -- a third of the
+  // column -- to repeat what this line already says.
+  lv_label_set_text(lblCaption_, "% food left");
 
   // THE ONLY NUMBER ON THE PAGE, so it gets the whole type budget -- the same
   // 56 px face the weight page spends on its total. Nothing here competes with
@@ -109,25 +126,19 @@ void buildKnob(lv_obj_t *parent) {
   // TWO LABELS, because font_mass_56 is subset to digits, point, minus and
   // space; a per-cent sign in it renders as a blank. The sign sits beside the
   // number on the built-in face, exactly as the weight page's "kg" does.
-  lv_obj_t *row = lv_obj_create(col);
-  flat(row);
-  lv_obj_set_width(row, LV_PCT(100));
-  lv_obj_set_height(row, 66);
-  lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-  lv_obj_set_style_pad_column(row, 3, LV_PART_MAIN);
-  lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_END,
-                        LV_FLEX_ALIGN_START);
-
-  lblPct_ = lv_label_create(row);
-  lv_obj_set_style_text_font(lblPct_, &font_mass_56, LV_PART_MAIN);
+  // NO WRAP, EVER. The label is given the column's full width and told to clip
+  // rather than wrap: a "100" that folded onto two lines would be read as
+  // "10" over "0" for the fraction of a second that matters, and the whole
+  // reason this page exists is that the figure is glanced at rather than
+  // studied. It has been sized so the widest possible string fits -- see
+  // ui_font.h -- and the clip is the belt to that braces.
+  lblPct_ = lv_label_create(col);
+  lv_obj_set_style_text_font(lblPct_, &font_pct_100, LV_PART_MAIN);
   lv_obj_set_style_text_color(lblPct_, lv_color_hex(C_TEXT), LV_PART_MAIN);
+  lv_obj_set_width(lblPct_, LV_PCT(100));
+  lv_label_set_long_mode(lblPct_, LV_LABEL_LONG_CLIP);
+  lv_obj_set_style_text_align(lblPct_, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
   lv_label_set_text(lblPct_, "--");
-
-  lblSign_ = lv_label_create(row);
-  lv_obj_set_style_text_font(lblSign_, &lv_font_montserrat_24, LV_PART_MAIN);
-  lv_obj_set_style_text_color(lblSign_, lv_color_hex(C_MUTED), LV_PART_MAIN);
-  lv_obj_set_style_pad_bottom(lblSign_, 10, LV_PART_MAIN);
-  lv_label_set_text(lblSign_, "%");
 
   // SAYS WHEN IT IS OLD rather than going quiet. A stale estimate is the
   // failure mode this trial exists to quantify, so the page names it instead of
@@ -146,8 +157,30 @@ void buildKnob(lv_obj_t *parent) {
   // NO TARE HERE. Taring is a scale action, and a button that zeroes the
   // reference the trial is measured against has no business within reach of the
   // one person who is deliberately not being shown that reference.
-  lv_obj_t *btn = lv_button_create(col);
-  lv_obj_set_size(btn, 64, 52);
+  lv_obj_t *acts = lv_obj_create(col);
+  flat(acts);
+  lv_obj_set_width(acts, LV_PCT(100));
+  lv_obj_set_height(acts, 52);
+  lv_obj_set_style_pad_bottom(acts, 6, LV_PART_MAIN);
+  lv_obj_set_flex_flow(acts, LV_FLEX_FLOW_ROW);
+  lv_obj_set_style_pad_column(acts, 8, LV_PART_MAIN);
+  lv_obj_set_flex_align(acts, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER);
+
+  // TRIAL: back to the weight page. Still no TARE here -- see above.
+  lv_obj_t *btnSwap = lv_button_create(acts);
+  lv_obj_set_size(btnSwap, 56, 52);
+  lv_obj_set_style_radius(btnSwap, 8, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(btnSwap, lv_color_hex(C_KEY), LV_PART_MAIN);
+  lv_obj_add_event_cb(btnSwap, swapClicked, LV_EVENT_CLICKED, nullptr);
+  lv_obj_t *wl = lv_label_create(btnSwap);
+  lv_obj_set_style_text_font(wl, &lv_font_montserrat_24, LV_PART_MAIN);
+  lv_obj_set_style_text_color(wl, lv_color_hex(C_MUTED), LV_PART_MAIN);
+  lv_label_set_text(wl, LV_SYMBOL_SHUFFLE);
+  lv_obj_center(wl);
+
+  lv_obj_t *btn = lv_button_create(acts);
+  lv_obj_set_size(btn, 56, 52);
   lv_obj_set_style_radius(btn, 8, LV_PART_MAIN);
   lv_obj_set_style_bg_color(btn, lv_color_hex(C_KEY), LV_PART_MAIN);
   lv_obj_add_event_cb(btn, settingsClicked, LV_EVENT_CLICKED, nullptr);
@@ -204,5 +237,6 @@ void updateKnob(const State &s) {
 }
 
 void knobOnSettings(void (*cb)(void)) { onSettings_ = cb; }
+void knobOnSwap(void (*cb)(void)) { onSwap_ = cb; }
 
 }  // namespace ui

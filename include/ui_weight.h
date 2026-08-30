@@ -66,4 +66,11 @@ void weightOnTare(void (*cb)(void));
 // be read as a drag. One tap cannot be half-completed.
 void weightOnSettings(void (*cb)(void));
 
+// TRIAL HARNESS. Jumps to the OTHER main page -- knob from weight, weight from
+// knob. A swipe already does it and this exists because a swipe on this panel
+// has to be slow and deliberate to register, which is the wrong thing to ask of
+// somebody holding a serving spoon. It goes away with the trial, leaving the
+// TARE and settings buttons this row had before.
+void weightOnSwap(void (*cb)(void));
+
 }  // namespace ui

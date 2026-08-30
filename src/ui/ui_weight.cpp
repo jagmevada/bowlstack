@@ -105,6 +105,10 @@ bool encDotLit_ = false;
 
 void (*onTare_)(void) = nullptr;
 void (*onSettings_)(void) = nullptr;
+void (*onSwap_)(void) = nullptr;
+void swapClicked(lv_event_t *) {
+  if (onSwap_) onSwap_();
+}
 
 void tareClicked(lv_event_t *) {
   if (onTare_) onTare_();
@@ -192,6 +196,7 @@ void weightPageHidden() {
 
 void weightOnTare(void (*cb)(void)) { onTare_ = cb; }
 void weightOnSettings(void (*cb)(void)) { onSettings_ = cb; }
+void weightOnSwap(void (*cb)(void)) { onSwap_ = cb; }
 
 void buildWeight(lv_obj_t *parent) {
   lv_obj_t *scr = parent ? parent : lv_screen_active();
@@ -413,8 +418,26 @@ void buildWeight(lv_obj_t *parent) {
   // a drag at all. That is fine for a gesture somebody discovers once and
   // tolerable for one they use occasionally; it is the wrong primary way to
   // reach settings from a screen used one-handed.
+  // TRIAL HARNESS: the page swap, between TARE and the gear.
+  //
+  // TARE LOSES THE WIDTH RATHER THAN THE HEIGHT. It is flex-grow, so adding a
+  // third button takes it from 152 px to 96 -- still far wider than the word
+  // and still the full 64 px tall, which is the dimension a thumb actually
+  // misses on. Shortening it instead would have made the one control used with
+  // a bowl in the other hand harder to hit.
+  lv_obj_t *btnSwap = lv_button_create(actions);
+  lv_obj_set_size(btnSwap, 56, 64);
+  lv_obj_set_style_radius(btnSwap, 8, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(btnSwap, lv_color_hex(C_KEY), LV_PART_MAIN);
+  lv_obj_add_event_cb(btnSwap, swapClicked, LV_EVENT_CLICKED, nullptr);
+  lv_obj_t *wl = lv_label_create(btnSwap);
+  lv_obj_set_style_text_font(wl, &lv_font_montserrat_24, LV_PART_MAIN);
+  lv_obj_set_style_text_color(wl, lv_color_hex(C_MUTED), LV_PART_MAIN);
+  lv_label_set_text(wl, LV_SYMBOL_SHUFFLE);
+  lv_obj_center(wl);
+
   btnSettings = lv_button_create(actions);
-  lv_obj_set_size(btnSettings, 64, 64);
+  lv_obj_set_size(btnSettings, 56, 64);
   lv_obj_set_style_radius(btnSettings, 8, LV_PART_MAIN);
   lv_obj_set_style_bg_color(btnSettings, lv_color_hex(C_KEY), LV_PART_MAIN);
   lv_obj_add_event_cb(btnSettings, settingsClicked, LV_EVENT_CLICKED, nullptr);

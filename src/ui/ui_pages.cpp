@@ -140,6 +140,16 @@ lv_obj_t *defaultTile() {
   if (defaultPage_ == 1 && tileKnob_) return tileKnob_;
   return tileHome_;
 }
+// TRIAL HARNESS. The OTHER main page, worked out from where the tileview
+// actually is rather than from a remembered flag -- a flag would have to be
+// kept in step with the swipe, and the first swipe that forgot to update it
+// would make the button a no-op on one page and correct on the other.
+void goToOther() {
+  if (!tv_ || !tileKnob_ || !tileHome_) return;
+  lv_obj_t *now = lv_tileview_get_tile_active(tv_);
+  lv_tileview_set_tile(tv_, now == tileKnob_ ? tileHome_ : tileKnob_, LV_ANIM_OFF);
+}
+
 void goToDefault() {
   if (tv_ && defaultTile()) lv_tileview_set_tile(tv_, defaultTile(), LV_ANIM_OFF);
 }
@@ -346,8 +356,13 @@ void buildPages() {
     lv_obj_set_size(home, 64, 64);
     lv_obj_set_style_radius(home, 8, LV_PART_MAIN);
     lv_obj_set_style_bg_color(home, lv_color_hex(0x21262D), LV_PART_MAIN);
-    lv_obj_add_event_cb(home, [](lv_event_t *) { goToHome(); }, LV_EVENT_CLICKED,
-                        nullptr);
+    // THE DEFAULT PAGE, not the weight page. This button and the idle timeout
+    // and the boot route all mean "take me to the page this device lives on",
+    // and having one of the three still hardcoded to the weight tile is exactly
+    // how a setting acquires a stale corner: change the default to Knob, press
+    // home, and land somewhere else.
+    lv_obj_add_event_cb(home, [](lv_event_t *) { goToDefault(); },
+                        LV_EVENT_CLICKED, nullptr);
     lv_obj_t *hl = lv_label_create(home);
     lv_obj_set_style_text_font(hl, &lv_font_montserrat_24, LV_PART_MAIN);
     lv_obj_set_style_text_color(hl, lv_color_hex(C_MUTED), LV_PART_MAIN);
@@ -361,6 +376,7 @@ void buildPages() {
   tileHome_ = lv_tileview_add_tile(tv_, 1, 0, (lv_dir_t)(LV_DIR_LEFT | LV_DIR_RIGHT));
   lv_obj_set_style_pad_all(tileHome_, 0, LV_PART_MAIN);
   buildWeight(tileHome_);
+  weightOnSwap(goToOther);  // TRIAL HARNESS
 
   // TRIAL HARNESS: the blinded page, one swipe right of the weight page.
   //
@@ -371,6 +387,7 @@ void buildPages() {
   lv_obj_set_style_pad_all(tileKnob_, 0, LV_PART_MAIN);
   buildKnob(tileKnob_);
   knobOnSettings(goToMenu);
+  knobOnSwap(goToOther);
   weightOnSettings(goToMenu);
 
   // Overlays, created AFTER the tileview so they stack above it.
