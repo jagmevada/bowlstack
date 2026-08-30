@@ -36,6 +36,15 @@ void buildWeight(lv_obj_t *parent = nullptr);
 // string changed -- and this runs every frame against a value that moves.
 void updateWeight(const State &s);
 
+// Tell the page it is no longer the visible one.
+//
+// It exists for one thing: the knob's press dot. updateWeight() runs only while
+// this page is showing, but the switch is read continuously, so without this
+// the first frame after returning would see a moved press counter and flash the
+// dot for a press made somewhere else. Calling it every tick the page is hidden
+// is fine -- it sets one bool.
+void weightPageHidden();
+
 // The one button on the page. Tares EVERY cell.
 //
 // PER-CELL ZEROING IS NOT HERE ANY MORE. Zeroing one corner against the other

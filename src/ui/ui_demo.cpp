@@ -466,7 +466,13 @@ const State &demoLatest(uint32_t nowMs) {
     latest_.encoderPos = encoderPos_;
     latest_.encoderPressCount = encoderPressCount_;
   } else {
-    latest_.encoderPos = (int32_t)(nowMs / 700) - (int32_t)(nowMs / 4900) * 7;
+    // A TRIANGLE THROUGH NEGATIVE AND TWO DIGITS, because the first version was
+    // a sawtooth that only ever showed 0..6 -- so the preview rendered a
+    // one-character field that never went negative, and the one layout question
+    // this row actually raises (does a wide reading push the dot around) was
+    // the one the simulator could not answer.
+    const int32_t t = (int32_t)((nowMs / 700) % 240);
+    latest_.encoderPos = (t < 120) ? (t - 60) : (180 - t);
     latest_.encoderPressCount = nowMs / 4000;
   }
 

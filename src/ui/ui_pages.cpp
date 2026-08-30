@@ -575,6 +575,7 @@ void pagesTick(uint32_t nowMs) {
   lv_obj_t *active = lv_tileview_get_tile_active(tv_);
   if (active != lastActive_) lastActive_ = active;
   if (active == tileHome_) updateWeight(s);
+  else weightPageHidden();
 }
 
 }  // namespace ui

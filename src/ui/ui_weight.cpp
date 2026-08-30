@@ -34,6 +34,12 @@ const uint32_t C_WARN = 0x9E6A03;
 const uint32_t C_FAULT = 0xB62324;
 const uint32_t C_CELL_FAULT = 0xE05C5C;
 const uint32_t C_KEY = 0x21262D;
+// The same blue ui_screens.cpp uses for an occupied level, and chosen here for
+// the reason stated there: it "says occupied without editorialising, which
+// leaves green and red free to mean healthy and faulty on the same screen".
+// Duplicated rather than shared because these constants are already duplicated
+// per file in src/ui/ -- see the block above.
+const uint32_t C_PRESENT = 0x1F6FEB;
 
 lv_obj_t *lblCaption;
 lv_obj_t *lblTotal;
@@ -61,17 +67,35 @@ lv_obj_t *btnSettings;
 // position. It is bring-up instrumentation on the dashboard, deliberately, and
 // deliberately quiet -- 14 px and muted, the diagnostics tier, so it reads as
 // something to consult rather than something to watch.
-lv_obj_t *potDot = nullptr;
-lv_obj_t *lblPot = nullptr;
-char prevPot_[20] = {0};
+lv_obj_t *encDot = nullptr;
+lv_obj_t *lblEnc = nullptr;
+char prevEnc_[20] = {0};
 
 // The dot is held for half a second after each press. LVGL's own tick is the
 // clock rather than anything passed in: src/ui/ must compile on a desktop that
 // has no millis(), and lv_tick_get() is the one time source both targets share.
-uint32_t potFlashUntil_ = 0;
+//
+// ARMED IS NOT OPTIONAL, and the first version of this got it wrong in a way
+// worth recording. It kept only the deadline and tested
+// `(int32_t)(deadline - now) > 0`, with a comment claiming the signed
+// difference made it wrap-safe. It does not. A signed tick comparison is only
+// correct while the deadline is within +/-24.9 days of now, and an unset or
+// long-expired deadline has UNBOUNDED age: with the sentinel 0 still in place,
+// `(int32_t)(0 - now)` turns positive the moment uptime passes 2^31 ms and the
+// dot latches solid for the next 24.9 days, asserting a press nobody made.
+//
+// A mains-fed station runs for months. scale_telemetry.cpp publishes uptime_s
+// precisely because long uptimes are the normal case, and nothing in this image
+// reboots on a schedule -- so day 25 arrives.
+//
+// Disarming on expiry bounds the deadline's age and makes the compare correct
+// again. It is the same reason demoTick() arms nextAt_ rather than counting
+// from zero.
+uint32_t encFlashUntil_ = 0;
+bool encFlashArmed_ = false;
 uint32_t prevPressCount_ = 0;
 bool havePress_ = false;
-bool potDotLit_ = false;
+bool encDotLit_ = false;
 
 void (*onTare_)(void) = nullptr;
 void (*onSettings_)(void) = nullptr;
@@ -151,6 +175,14 @@ void formatKg(char *buf, uint32_t len, float grams, uint8_t decimals) {
 }
 
 }  // namespace
+
+void weightPageHidden() {
+  // Drop the press reference. The next updateWeight() re-reads it instead of
+  // comparing against a count from before the page went away -- which is the
+  // difference between "the knob was just pressed" and "the knob was pressed at
+  // some point while you were in the menu".
+  havePress_ = false;
+}
 
 void weightOnTare(void (*cb)(void)) { onTare_ = cb; }
 void weightOnSettings(void (*cb)(void)) { onSettings_ = cb; }
@@ -289,31 +321,45 @@ void buildWeight(lv_obj_t *parent) {
   // Above the buttons, because it is a readout and they are controls, and a
   // readout that sits below the thing you press gets covered by the hand that
   // presses it.
-  lv_obj_t *potRow = lv_obj_create(scr);
-  styleFlat(potRow);
-  lv_obj_set_width(potRow, LV_PCT(100));
-  lv_obj_set_height(potRow, 18);
-  lv_obj_set_style_pad_bottom(potRow, 4, LV_PART_MAIN);
-  lv_obj_set_flex_flow(potRow, LV_FLEX_FLOW_ROW);
-  lv_obj_set_style_pad_column(potRow, 8, LV_PART_MAIN);
-  lv_obj_set_flex_align(potRow, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+  lv_obj_t *encRow = lv_obj_create(scr);
+  styleFlat(encRow);
+  lv_obj_set_width(encRow, LV_PCT(100));
+  lv_obj_set_height(encRow, 18);
+  lv_obj_set_style_pad_bottom(encRow, 4, LV_PART_MAIN);
+  lv_obj_set_flex_flow(encRow, LV_FLEX_FLOW_ROW);
+  lv_obj_set_style_pad_column(encRow, 8, LV_PART_MAIN);
+  lv_obj_set_flex_align(encRow, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
                         LV_FLEX_ALIGN_CENTER);
 
   // THE DOT IS ALWAYS IN THE LAYOUT AND ONLY ITS OPACITY CHANGES. Hiding it
   // with LV_OBJ_FLAG_HIDDEN would take it out of the flex row, and the position
   // figure beside it would jump eight pixels left every time the dot expired --
   // a twitch, twice a second, on the one screen that is watched continuously.
-  potDot = lv_obj_create(potRow);
-  styleFlat(potDot);
-  lv_obj_set_size(potDot, 12, 12);
-  lv_obj_set_style_radius(potDot, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-  lv_obj_set_style_bg_color(potDot, lv_color_hex(C_CELL_FAULT), LV_PART_MAIN);
-  lv_obj_set_style_bg_opa(potDot, LV_OPA_TRANSP, LV_PART_MAIN);
+  // BLUE, NOT RED, and the palette comment forty lines up is the argument:
+  // "Blue says occupied without editorialising, which leaves green and red free
+  // to mean healthy and faulty on the same screen." C_CELL_FAULT is what a DEAD
+  // CELL is painted on this very page. A knob press is the most ordinary event
+  // the device has, and colouring it with the fault colour twice a second is
+  // how staff learn to stop reading red -- so that when the total really does
+  // go over-range, the one thing on screen that needed noticing is the colour
+  // they have been trained to ignore.
+  encDot = lv_obj_create(encRow);
+  styleFlat(encDot);
+  lv_obj_set_size(encDot, 12, 12);
+  lv_obj_set_style_radius(encDot, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(encDot, lv_color_hex(C_PRESENT), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(encDot, LV_OPA_TRANSP, LV_PART_MAIN);
 
-  lblPot = lv_label_create(potRow);
-  lv_obj_set_style_text_font(lblPot, &lv_font_montserrat_14, LV_PART_MAIN);
-  lv_obj_set_style_text_color(lblPot, lv_color_hex(C_MUTED), LV_PART_MAIN);
-  lv_label_set_text(lblPot, "pot 0");
+  // "enc", NOT "pot". This is a screen about food in kilograms, and on it "pot"
+  // is a cooking vessel -- `pot 3` under a weight reads as three pots, or as a
+  // pot id, by anyone who has not been told otherwise. The rest of the codebase
+  // already calls this an encoder (PIN_ENC_CLK, State::encoderPos), so the
+  // panel may as well use the same word as the header somebody will check it
+  // against.
+  lblEnc = lv_label_create(encRow);
+  lv_obj_set_style_text_font(lblEnc, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_set_style_text_color(lblEnc, lv_color_hex(C_MUTED), LV_PART_MAIN);
+  lv_label_set_text(lblEnc, "enc 0");
 
   // --- the action row -----------------------------------------------------
   // TARE and a way off this page, side by side at the bottom where a thumb
@@ -375,32 +421,41 @@ void updateWeight(const State &st) {
   char buf[40];
 
   // --- the knob row ---------------------------------------------------------
-  if (lblPot != nullptr) {
-    snprintf(buf, sizeof(buf), "pot %ld", (long)st.encoderPos);
-    if (strcmp(buf, prevPot_) != 0) {
-      snprintf(prevPot_, sizeof(prevPot_), "%s", buf);
-      lv_label_set_text(lblPot, buf);
+  if (lblEnc != nullptr) {
+    snprintf(buf, sizeof(buf), "enc %ld", (long)st.encoderPos);
+    if (strcmp(buf, prevEnc_) != 0) {
+      snprintf(prevEnc_, sizeof(prevEnc_), "%s", buf);
+      lv_label_set_text(lblEnc, buf);
     }
 
     // A COUNTER COMPARISON, not an edge on a bool -- see State::encoderPressCount.
-    // havePress_ suppresses the very first frame: the counter starts at zero on
-    // both sides, and without the guard a page rebuilt after the count had
-    // already advanced would flash the dot for a press that happened minutes
-    // ago.
+    //
+    // havePress_ suppresses the first frame after this page becomes visible,
+    // and weightPageHidden() is what re-arms it. Both halves are needed. This
+    // function only runs while the home tile is showing, but the switch is
+    // being read the whole time -- so pressing the knob inside the menu and
+    // swiping back would otherwise arrive as a moved counter and light the dot
+    // for a press that finished a minute ago. During bring-up that is the
+    // COMMON path, not an edge case: the knob is exactly what you press while
+    // looking at the Scale page.
     if (!havePress_) {
       havePress_ = true;
       prevPressCount_ = st.encoderPressCount;
     } else if (st.encoderPressCount != prevPressCount_) {
       prevPressCount_ = st.encoderPressCount;
-      potFlashUntil_ = lv_tick_get() + 500;
+      encFlashUntil_ = lv_tick_get() + 500;
+      encFlashArmed_ = true;
     }
 
-    // Signed difference, so this stays correct across the tick counter's wrap
-    // rather than latching the dot on for 49 days once every 49 days.
-    const bool lit = (int32_t)(potFlashUntil_ - lv_tick_get()) > 0;
-    if (lit != potDotLit_) {
-      potDotLit_ = lit;
-      lv_obj_set_style_bg_opa(potDot, lit ? LV_OPA_COVER : LV_OPA_TRANSP,
+    // Disarm on expiry, so the signed compare above is only ever applied to a
+    // deadline of bounded age -- see the declaration for what an unbounded one
+    // does on day 25 of uptime.
+    if (encFlashArmed_ && (int32_t)(encFlashUntil_ - lv_tick_get()) <= 0) {
+      encFlashArmed_ = false;
+    }
+    if (encFlashArmed_ != encDotLit_) {
+      encDotLit_ = encFlashArmed_;
+      lv_obj_set_style_bg_opa(encDot, encDotLit_ ? LV_OPA_COVER : LV_OPA_TRANSP,
                               LV_PART_MAIN);
     }
   }
