@@ -40,6 +40,7 @@ bool haveEncoder_ = false;
 int32_t encoderPos_ = 0;
 uint32_t encoderPressCount_ = 0;
 
+uint8_t defaultPage_ = 0;
 bool haveFill_ = false;
 uint8_t fillPct_ = 0;
 bool fillRemind_ = false;
@@ -370,6 +371,8 @@ void demoOverrideEncoder(int32_t pos, uint32_t pressCount) {
   encoderPressCount_ = pressCount;
 }
 
+void demoOverrideDefaultPage(uint8_t page) { defaultPage_ = page; }
+
 void demoOverrideFill(bool known, uint8_t pct, bool remind, uint32_t ageSec) {
   haveFill_ = true;
   fillPct_ = pct;
@@ -514,6 +517,7 @@ const State &demoLatest(uint32_t nowMs) {
     latest_.fillReminderDue = latest_.fillAgeSec > 600;
   }
 
+  latest_.defaultPage = defaultPage_;
   latest_.uptimeSec = nowMs / 1000;
   return latest_;
 }

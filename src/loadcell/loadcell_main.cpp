@@ -53,6 +53,8 @@
 #include "lgfx_waveshare_s3.h"
 #include "logo128.h"
 #include "scale.h"
+#include <Preferences.h>
+
 #include "inputs.h"
 #include "scale_telemetry.h"
 #include "ui_calib.h"
@@ -612,6 +614,21 @@ void onToggleCells() {
   Serial.printf("ui: cells on home -> %s\n", scale::toggleShowCells() ? "shown" : "hidden");
 }
 
+// TRIAL HARNESS: which page the device settles on. Persisted here rather than
+// in src/ui/, which has no NVS and no business having one -- the UI asks, the
+// platform stores, and the value comes back through State::defaultPage.
+uint8_t defaultPage_ = 0;
+
+void onCycleDefaultPage() {
+  defaultPage_ = (uint8_t)(defaultPage_ ? 0 : 1);
+  Preferences p;
+  if (p.begin("bowlinput", false)) {
+    p.putUChar("defpage", defaultPage_);
+    p.end();
+  }
+  Serial.printf("\n> default page -> %s\n", defaultPage_ ? "Knob" : "Weight");
+}
+
 void onClearCal() {
   Serial.println("ui: calibration cleared");
   scale::clearCalibration();
@@ -760,6 +777,7 @@ void serviceInputs(uint32_t nowMs) {
   // a snapshot, and a value pushed only on change goes stale after a rebuild.
   ui::demoOverrideFill(true, inputs::fillPercent(), inputs::fillReminderDue(),
                        inputs::fillAgeMs() / 1000);
+  ui::demoOverrideDefaultPage(defaultPage_);
 
   // EVERY PASS, and it was not. This lived only in setup(), so `external_` was
   // frozen at whatever VBUS read during boot and no plug event ever reached the
@@ -1085,6 +1103,20 @@ void setup() {
   // charge-sense line is already being read when the battery block prints what
   // it thinks of the charger.
   inputs::begin();
+  {
+    // Read-write to open it, for the same reason inputs.cpp does: a namespace
+    // that has never been written does not exist, and a read-only open of one
+    // fails and logs an error that looks exactly like corruption.
+    Preferences p;
+    if (p.begin("bowlinput", false)) {
+      defaultPage_ = p.getUChar("defpage", 0);
+      p.end();
+    }
+    if (defaultPage_ > 1) defaultPage_ = 0;
+  }
+  ui::pagesOnCycleDefaultPage(onCycleDefaultPage);
+  Serial.printf("  TRIAL    default page is %s -- Menu > Settings > Default page\n",
+                defaultPage_ ? "Knob" : "Weight");
   Serial.printf("  backlight dims to %u%% after %lu s idle, ON BATTERY ONLY\n",
                 (unsigned)((BL_DIM * 100) / BL_FULL),
                 (unsigned long)(BL_DIM_AFTER_MS / 1000));

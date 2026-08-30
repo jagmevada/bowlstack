@@ -125,4 +125,7 @@ void demoOverrideEncoder(int32_t pos, uint32_t pressCount);
 // the simulator renders the row from the product's own code.
 void demoOverrideFill(bool known, uint8_t pct, bool remind, uint32_t ageSec);
 
+// TRIAL: which page the device settles on. The platform owns the NVS copy.
+void demoOverrideDefaultPage(uint8_t page);
+
 }  // namespace ui

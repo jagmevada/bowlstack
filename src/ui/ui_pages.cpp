@@ -12,6 +12,7 @@
 #include "ui_scope.h"
 #include "ui_screens.h"
 #include "ui_status.h"
+#include "ui_knob.h"
 #include "ui_weight.h"
 #include "ui_wifi.h"
 
@@ -24,6 +25,11 @@ const uint32_t C_MUTED = 0x8B949E;
 lv_obj_t *tv_ = nullptr;
 lv_obj_t *tileMenu_ = nullptr;
 lv_obj_t *tileHome_ = nullptr;
+// TRIAL HARNESS. The blinded page -- see include/ui_knob.h for why it exists.
+lv_obj_t *tileKnob_ = nullptr;
+uint8_t defaultPage_ = 0;
+void (*onCycleDefaultPage_)(void) = nullptr;
+void doCycleDefaultPage() { if (onCycleDefaultPage_) onCycleDefaultPage_(); }
 lv_obj_t *lastActive_ = nullptr;
 lv_obj_t *menuRoot_ = nullptr;
 
@@ -92,6 +98,7 @@ enum : uint8_t {
   ROW_SET_SCALE,
   ROW_SET_DIAGNOSE,
   ROW_SET_PRECISION,
+  ROW_SET_DEFAULT_PAGE,  // TRIAL HARNESS
 };
 enum : uint8_t {
   ROW_SCALE_TARE = 0,
@@ -121,6 +128,20 @@ void goToMenu() {
 }
 void goToHome() {
   if (tv_ && tileHome_) lv_tileview_set_tile(tv_, tileHome_, LV_ANIM_OFF);
+}
+
+// WHERE THE DEVICE SETTLES, which is not always the weight page any more.
+//
+// Both the idle timeout and the first frame after boot route through here, so
+// there is one answer to "which page is home" rather than two that can drift.
+// During the trial that answer is the knob page, and the attendant never has to
+// swipe back to it after walking away.
+lv_obj_t *defaultTile() {
+  if (defaultPage_ == 1 && tileKnob_) return tileKnob_;
+  return tileHome_;
+}
+void goToDefault() {
+  if (tv_ && defaultTile()) lv_tileview_set_tile(tv_, defaultTile(), LV_ANIM_OFF);
 }
 
 void showOnly(lv_obj_t *which) {
@@ -334,9 +355,22 @@ void buildPages() {
     lv_obj_center(hl);
   }
 
-  tileHome_ = lv_tileview_add_tile(tv_, 1, 0, LV_DIR_LEFT);
+  // LEFT to the menu, RIGHT to the knob page. Adding the direction is what
+  // makes the third tile reachable at all -- a tileview will not scroll toward
+  // a neighbour the tile does not declare.
+  tileHome_ = lv_tileview_add_tile(tv_, 1, 0, (lv_dir_t)(LV_DIR_LEFT | LV_DIR_RIGHT));
   lv_obj_set_style_pad_all(tileHome_, 0, LV_PART_MAIN);
   buildWeight(tileHome_);
+
+  // TRIAL HARNESS: the blinded page, one swipe right of the weight page.
+  //
+  // ORDERED AFTER the weight page rather than before it, so the trial does not
+  // renumber anything: menu stays 0, weight stays 1, and removing this tile
+  // leaves the other two exactly where they were.
+  tileKnob_ = lv_tileview_add_tile(tv_, 2, 0, LV_DIR_LEFT);
+  lv_obj_set_style_pad_all(tileKnob_, 0, LV_PART_MAIN);
+  buildKnob(tileKnob_);
+  knobOnSettings(goToMenu);
   weightOnSettings(goToMenu);
 
   // Overlays, created AFTER the tileview so they stack above it.
@@ -363,6 +397,9 @@ void buildPages() {
   // the digit count, because "0.00 kg" answers the question the row asks and
   // "2" needs translating first.
   menuAddRow(settingsMenu_, "Precision", nullptr, doCyclePrecision);
+  // TRIAL HARNESS. Which page the device returns to when left alone and which
+  // one it opens on after a power cycle.
+  menuAddRow(settingsMenu_, "Default page", nullptr, doCycleDefaultPage);
 
   // The Scale page is three rows rather than a screen of its own, which is the
   // whole reason ui_menu exists: adding a setting is adding a row. Tare is
@@ -430,7 +467,7 @@ void buildPages() {
   // never the reason it worked, so the fix is to state the dependency rather
   // than restore the traffic.
   lv_obj_update_layout(scr);
-  lv_tileview_set_tile(tv_, tileHome_, LV_ANIM_OFF);
+  lv_tileview_set_tile(tv_, defaultTile(), LV_ANIM_OFF);
   lastActive_ = nullptr;
   depth_ = 0;
 }
@@ -442,6 +479,7 @@ void pagesGoHome() {
 
 void pagesBack() { back(); }
 
+void pagesOnCycleDefaultPage(void (*cb)(void)) { onCycleDefaultPage_ = cb; }
 void pagesOnScaleTare(void (*cb)(void)) { onTare_ = cb; }
 void pagesOnScaleClearCal(void (*cb)(void)) { onClearCal_ = cb; }
 void pagesOnScaleCycleAvg(void (*cb)(void)) { onCycleAvg_ = cb; }
@@ -492,7 +530,9 @@ void pagesTick(uint32_t nowMs) {
     static char prec[12];
     const uint8_t d = s.scale.decimals ? s.scale.decimals : 3;
     snprintf(prec, sizeof(prec), "0.%0*d kg", (int)d, 0);
-    menuSetHint(settingsMenu_, ROW_SET_PRECISION, prec);
+    menuSetHint(settingsMenu_, ROW_SET_DEFAULT_PAGE,
+              s.defaultPage == 1 ? "Knob" : "Weight");
+  menuSetHint(settingsMenu_, ROW_SET_PRECISION, prec);
   }
   if (scaleMenu_) {
     // The Scale menu's own rows, updated whenever it exists rather than only
@@ -534,7 +574,7 @@ void pagesTick(uint32_t nowMs) {
       onScope = !onScope;
       closeAll();
       if (onScope) openSensor();
-      else if (tv_) lv_tileview_set_tile(tv_, tileHome_, LV_ANIM_OFF);
+      else if (tv_) lv_tileview_set_tile(tv_, defaultTile(), LV_ANIM_OFF);
     }
   }
 #else
@@ -574,8 +614,15 @@ void pagesTick(uint32_t nowMs) {
 
   lv_obj_t *active = lv_tileview_get_tile_active(tv_);
   if (active != lastActive_) lastActive_ = active;
+  defaultPage_ = s.defaultPage;
+
   if (active == tileHome_) updateWeight(s);
   else weightPageHidden();
+  // TRIAL: cheap enough to run unconditionally -- every write inside is guarded
+  // against its previous value, so an invisible page costs comparisons. Keeping
+  // it current also means the page is right on the frame it becomes visible
+  // rather than the one after.
+  updateKnob(s);
 }
 
 }  // namespace ui

@@ -87,6 +87,11 @@ void pagesOnScalePlatformZero(void (*cb)(void));
 // both layouts through the fixtures instead.
 void pagesOnScaleToggleCells(void (*cb)(void));
 
+// TRIAL HARNESS. Cycles which page the device settles on -- weight or knob.
+// The UI does not persist it: src/ui/ has no NVS and no business having one, so
+// the platform stores the choice and hands it back through State::defaultPage.
+void pagesOnCycleDefaultPage(void (*cb)(void));
+
 // How long without a touch before the UI returns to the stock page.
 //
 // A device left on the WiFi page is a device whose primary readout -- the bowl

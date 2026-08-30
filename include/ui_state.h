@@ -251,6 +251,13 @@ struct State {
   bool fillKnown;
   uint8_t fillPercent;       // 0..100
   bool fillReminderDue;      // the estimate is older than the reminder interval
+
+  // Which page the device settles on: 0 = weight, 1 = knob. A SETTING rather
+  // than a measurement, carried here because State is already the one snapshot
+  // that describes the screen -- the scale's own display settings ride along
+  // the same way. The platform owns the NVS copy; the UI only renders it and
+  // asks for it to be cycled.
+  uint8_t defaultPage;
   uint32_t fillAgeSec;       // how stale it is, for the screen to say so
 };
 

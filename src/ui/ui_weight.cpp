@@ -371,10 +371,11 @@ void buildWeight(lv_obj_t *parent) {
   lv_obj_set_style_text_color(lblFill, lv_color_hex(C_TEXT), LV_PART_MAIN);
   lv_label_set_text(lblFill, "");
 
-  lblEnc = lv_label_create(encRow);
-  lv_obj_set_style_text_font(lblEnc, &lv_font_montserrat_14, LV_PART_MAIN);
-  lv_obj_set_style_text_color(lblEnc, lv_color_hex(C_MUTED), LV_PART_MAIN);
-  lv_label_set_text(lblEnc, "enc 0");
+  // NO RAW DETENT COUNT. It was bring-up instrumentation and it earned its
+  // place while the encoder was unproven; now that the knob works it is a
+  // number with no reader, on the one screen that should carry only figures
+  // somebody acts on. The console still prints it -- `i` on the terminal --
+  // which is where instrumentation belongs.
 
   // --- the action row -----------------------------------------------------
   // TARE and a way off this page, side by side at the bottom where a thumb
@@ -436,7 +437,7 @@ void updateWeight(const State &st) {
   char buf[40];
 
   // --- the knob row ---------------------------------------------------------
-  if (lblEnc != nullptr) {
+  if (lblFill != nullptr) {
     // TRIAL: the manual estimate, and it says when it is STALE rather than
     // going quiet. An estimate nobody has refreshed for a quarter of an hour is
     // the failure mode a knob-based system actually has, so the screen names it
@@ -456,12 +457,6 @@ void updateWeight(const State &st) {
       lv_label_set_text(lblFill, buf);
       lv_obj_set_style_text_color(
           lblFill, lv_color_hex(st.fillReminderDue ? C_WARN : C_TEXT), LV_PART_MAIN);
-    }
-
-    snprintf(buf, sizeof(buf), "enc %ld", (long)st.encoderPos);
-    if (strcmp(buf, prevEnc_) != 0) {
-      snprintf(prevEnc_, sizeof(prevEnc_), "%s", buf);
-      lv_label_set_text(lblEnc, buf);
     }
 
     // A COUNTER COMPARISON, not an edge on a bool -- see State::encoderPressCount.
