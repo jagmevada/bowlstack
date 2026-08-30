@@ -6,35 +6,76 @@ namespace inputs {
 namespace {
 
 // --- quadrature -------------------------------------------------------------
-// A TRANSITION TABLE, NOT AN EDGE COUNT, and the difference is bounce.
+// A FULL-STEP STATE MACHINE, because counting transitions loses slow detents.
 //
-// The naive decoder -- interrupt on CLK's falling edge, read DT, call it a
-// direction -- works on a clean signal and fails on a mechanical encoder,
-// because the contacts bounce and every bounce looks like another click. The
-// usual patch is a time filter, which then eats fast turns.
+// THE BUG THIS REPLACES, recorded because the symptom pointed away from the
+// cause. The first version accumulated +/-1 per valid transition and emitted a
+// detent every fourth one. That is correct arithmetic and it failed in the
+// field: turning SLOWLY produced detents that did not register, while turning
+// FAST worked perfectly.
 //
-// This instead tracks the two-bit state and consults what the PREVIOUS state
-// was. A valid quadrature step moves exactly one bit, and the table says which
-// way. A bounce moves a bit and moves it straight back, so it scores +1 then
-// -1 and cancels to nothing. A transition that changes BOTH bits at once is
-// impossible on a real encoder -- it means an edge was missed -- and scores
-// zero rather than guessing at the direction.
+// The asymmetry is the clue, and the mechanism is worse than "a detent got
+// dropped". The sub-count PERSISTS between detents, so one lost edge does not
+// cost one click -- it leaves the counter permanently off-phase, and from then
+// on a single detent swings it between +2 and -2 without ever crossing the +/-4
+// threshold. Simulated over a dirty detent followed by eight clean
+// back-and-forth clicks, the accumulator reports ONE of the eight. The state
+// machine reports all eight.
 //
-// Index is (previous << 2) | current, where the state is (CLK << 1) | DT.
-const int8_t QDEC[16] = {
-     0, -1, +1,  0,
-    +1,  0,  0, -1,
-    -1,  0,  0, +1,
-     0, +1, -1,  0,
+// Turning fast crosses several detents in one gesture, so 4N transitions
+// arrive, the total clears the threshold anyway, and the fault vanishes -- it
+// hides in precisely the slow, deliberate movement someone makes when they are
+// checking whether it works.
+//
+// THE FIX IS TO STOP COUNTING AND START RECOGNISING. This is Ben Buxton's
+// full-step table: seven states describing the two legal routes from one detent
+// to the next, with a step emitted only on ARRIVAL at rest by a complete valid
+// route. Bounce anywhere in the middle drops the machine back to R_START and it
+// waits for a clean run, which costs nothing -- the shaft has not moved between
+// detents anyway.
+//
+// So a detent is emitted when the encoder reaches one, not when four edges have
+// been counted, and losing an edge mid-sequence costs a retry rather than a
+// click.
+const uint8_t R_START     = 0x0;
+const uint8_t R_CW_FINAL  = 0x1;
+const uint8_t R_CW_BEGIN  = 0x2;
+const uint8_t R_CW_NEXT   = 0x3;
+const uint8_t R_CCW_BEGIN = 0x4;
+const uint8_t R_CCW_FINAL = 0x5;
+const uint8_t R_CCW_NEXT  = 0x6;
+
+const uint8_t DIR_CW     = 0x10;
+const uint8_t DIR_CCW    = 0x20;
+const uint8_t DIR_MASK   = 0x30;
+const uint8_t STATE_MASK = 0x0F;
+
+// Row = current state, column = the pin pair (CLK << 1) | DT. R_START is both
+// contacts open, which is where a detented EC11 rests -- and matches the idle
+// CLK=1 DT=1 the boot trace reports on this board.
+const uint8_t QTABLE[7][4] = {
+    // R_START
+    {R_START,    R_CW_BEGIN,  R_CCW_BEGIN, R_START},
+    // R_CW_FINAL   -- one transition short of a completed clockwise detent
+    {R_CW_NEXT,  R_START,     R_CW_FINAL,  (uint8_t)(R_START | DIR_CW)},
+    // R_CW_BEGIN
+    {R_CW_NEXT,  R_CW_BEGIN,  R_START,     R_START},
+    // R_CW_NEXT
+    {R_CW_NEXT,  R_CW_BEGIN,  R_CW_FINAL,  R_START},
+    // R_CCW_BEGIN
+    {R_CCW_NEXT, R_START,     R_CCW_BEGIN, R_START},
+    // R_CCW_FINAL  -- one transition short of a completed anticlockwise detent
+    {R_CCW_NEXT, R_CCW_FINAL, R_START,     (uint8_t)(R_START | DIR_CCW)},
+    // R_CCW_NEXT
+    {R_CCW_NEXT, R_CCW_FINAL, R_CCW_BEGIN, R_START},
 };
 
-// FOUR TRANSITIONS PER CLICK is what a detented EC11 gives: the shaft rests
-// with both contacts open and passes through the whole Gray cycle between
-// detents. Some cheap encoders are half-step and give two. If a click reports
-// as two turns, this is the number to change -- and `subPosition()` in the
-// bring-up dump is how you find that out in one turn of the knob rather than by
-// reading a datasheet nobody shipped with the part.
-const int8_t STEPS_PER_DETENT = 4;
+// IF ONE CLICK EVER REPORTS AS TWO, the encoder is half-step and this is the
+// wrong table -- Buxton publishes a second one that emits at the midpoint as
+// well. That is a table swap, not a threshold tweak, which is the other reason
+// the accumulator had to go: setting its STEPS_PER_DETENT to 2 looked like it
+// would handle a half-step part and would instead have doubled the slow-turn
+// losses.
 
 // Set true if CW turns report negative. Which pin is "A" is a property of how
 // the encoder was wired, not of the encoder, so this is a wiring constant and
@@ -45,11 +86,11 @@ const bool INVERT_DIRECTION = false;
 // is inside the spinlock -- `volatile` alone would not make the accumulator's
 // read-and-clear atomic against an interrupt landing between the two halves.
 portMUX_TYPE mux_ = portMUX_INITIALIZER_UNLOCKED;
-volatile uint8_t encPrev_ = 0;
-volatile int8_t encSub_ = 0;
+volatile uint8_t encState_ = R_START;
+volatile uint8_t encPins_ = 3;
 volatile int16_t encPending_ = 0;
 volatile uint32_t encEdges_ = 0;
-volatile uint32_t encInvalid_ = 0;
+volatile uint32_t encAborted_ = 0;
 
 int32_t position_ = 0;
 
@@ -57,31 +98,29 @@ void IRAM_ATTR encIsr() {
   // digitalRead is IRAM_ATTR in this core, so it is safe from an ISR. Both pins
   // are read here rather than one being inferred: inferring the other is the
   // same mistake as counting edges, one layer down.
-  const uint8_t s = (uint8_t)((digitalRead(board::PIN_ENC_CLK) << 1) |
-                              digitalRead(board::PIN_ENC_DT));
+  const uint8_t pins = (uint8_t)((digitalRead(board::PIN_ENC_CLK) << 1) |
+                                 digitalRead(board::PIN_ENC_DT));
 
   portENTER_CRITICAL_ISR(&mux_);
-  const uint8_t idx = (uint8_t)((encPrev_ << 2) | s);
-  if (idx != (uint8_t)((encPrev_ << 2) | encPrev_)) {  // state actually moved
-    const int8_t d = QDEC[idx];
-    if (d == 0) {
-      // Both bits changed: an edge was missed, usually because the knob was
-      // spun hard. Counted rather than corrected -- guessing a direction here
-      // is how a fast turn ends up reporting backwards.
-      encInvalid_++;
-    } else {
-      encEdges_++;
-      encSub_ = (int8_t)(encSub_ + d);
-      while (encSub_ >= STEPS_PER_DETENT) {
-        encSub_ = (int8_t)(encSub_ - STEPS_PER_DETENT);
-        encPending_++;
-      }
-      while (encSub_ <= -STEPS_PER_DETENT) {
-        encSub_ = (int8_t)(encSub_ + STEPS_PER_DETENT);
-        encPending_--;
-      }
+  if (pins != encPins_) {
+    encPins_ = pins;
+    encEdges_++;
+
+    const uint8_t was = (uint8_t)(encState_ & STATE_MASK);
+    const uint8_t next = QTABLE[was][pins];
+    encState_ = next;
+
+    switch (next & DIR_MASK) {
+      case DIR_CW:  encPending_++; break;
+      case DIR_CCW: encPending_--; break;
+      default:
+        // A sequence that started and fell back to rest without completing --
+        // bounce, or a hand that changed its mind mid-detent. Counted so the
+        // bring-up dump can tell a dirty encoder from a disconnected one, and
+        // deliberately NOT treated as movement, which is the entire point.
+        if (was != R_START && (next & STATE_MASK) == R_START) encAborted_++;
+        break;
     }
-    encPrev_ = s;
   }
   portEXIT_CRITICAL_ISR(&mux_);
 }
@@ -184,12 +223,14 @@ void begin() {
   pinMode(board::PIN_STATUS_LED, OUTPUT);
   driveLed(false);
 
-  // Seed the decoder from the pins as they are RIGHT NOW. Starting from a
-  // hardcoded zero would make the first movement look like a transition from a
-  // state the shaft was never in, which the table would score as invalid and
-  // the user would see as a first click that did nothing.
-  encPrev_ = (uint8_t)((digitalRead(board::PIN_ENC_CLK) << 1) |
+  // Seed from the pins as they are RIGHT NOW, so the first edge is judged
+  // against where the shaft actually sits rather than an assumption. If the
+  // knob happens to rest between detents at boot the machine simply waits at
+  // R_START for a clean sequence -- one click may be needed to synchronise, and
+  // that is honest behaviour rather than a fabricated first step.
+  encPins_ = (uint8_t)((digitalRead(board::PIN_ENC_CLK) << 1) |
                        digitalRead(board::PIN_ENC_DT));
+  encState_ = R_START;
 
   attachInterrupt(digitalPinToInterrupt(board::PIN_ENC_CLK), encIsr, CHANGE);
   attachInterrupt(digitalPinToInterrupt(board::PIN_ENC_DT), encIsr, CHANGE);
@@ -275,19 +316,19 @@ const char *ledModeName() {
 bool statusLed() { return ledOn_; }
 
 uint32_t transitions() { return encEdges_; }
-uint32_t invalidTransitions() { return encInvalid_; }
-int8_t subPosition() { return encSub_; }
+uint32_t invalidTransitions() { return encAborted_; }
+int8_t subPosition() { return (int8_t)(encState_ & STATE_MASK); }
 
 void traceLine(char *out, size_t n) {
   // RAW levels, deliberately bypassing every filter above. This is the line
   // that says whether a wire is on the pin at all, and a debounced view would
   // hide exactly the fault it is meant to find.
   snprintf(out, n,
-           "CLK=%d DT=%d SW=%d | STAT=%d VBUS=%d | pos=%ld sub=%d edges=%lu bad=%lu",
+           "CLK=%d DT=%d SW=%d | STAT=%d VBUS=%d | pos=%ld st=%d edges=%lu part=%lu",
            digitalRead(board::PIN_ENC_CLK), digitalRead(board::PIN_ENC_DT),
            digitalRead(board::PIN_ENC_SW), digitalRead(board::PIN_CHARGE_STAT),
-           digitalRead(board::PIN_VBUS_SENSE), (long)position_, (int)encSub_,
-           (unsigned long)encEdges_, (unsigned long)encInvalid_);
+           digitalRead(board::PIN_VBUS_SENSE), (long)position_, (int)(encState_ & STATE_MASK),
+           (unsigned long)encEdges_, (unsigned long)encAborted_);
 }
 
 void dumpState() {
@@ -295,9 +336,9 @@ void dumpState() {
   traceLine(line, sizeof(line));
   Serial.println("\n--- panel controls ---");
   Serial.printf("  raw      %s\n", line);
-  Serial.printf("  encoder  position %ld detents, %lu valid edges, %lu rejected\n",
+  Serial.printf("  encoder  position %ld detents, %lu edges, %lu partial sequences abandoned\n",
                 (long)position_, (unsigned long)encEdges_,
-                (unsigned long)encInvalid_);
+                (unsigned long)encAborted_);
   Serial.printf("  switch   %s\n", sw_.level ? "DOWN" : "up");
   Serial.printf("  charging %s%s\n", stat_.level ? "YES" : "no",
                 board::CHARGER_STATUS_READABLE ? "" : "   (mod not declared fitted)");
@@ -311,12 +352,12 @@ void dumpState() {
     Serial.println("     Check the encoder's ground at P1-13 and that CLK/DT");
     Serial.println("     are on P1-9 and P1-8. If the load cells have ALSO gone");
     Serial.println("     quiet, a wire is on P1-7 -- that is CELL_SDA.");
-  } else if (encInvalid_ > encEdges_ / 4) {
-    Serial.println("  !! a quarter of transitions rejected -- bouncing badly.");
-    Serial.println("     A bare EC11 on internal pull-ups alone can do this;");
-    Serial.println("     10k external pull-ups, or 100nF to GND on CLK and DT,");
-    Serial.println("     is the fix. Position stays correct meanwhile: rejected");
-    Serial.println("     transitions are discarded, not counted backwards.");
+  } else if (encAborted_ > encEdges_ / 2) {
+    Serial.println("  !! most sequences abandoned before completing.");
+    Serial.println("     The state machine discards these rather than guessing,");
+    Serial.println("     so POSITION stays right and clicks are merely missed.");
+    Serial.println("     100nF from CLK and DT to GND is the fix if it is bad");
+    Serial.println("     enough to feel.");
   }
 }
 
