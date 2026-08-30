@@ -116,27 +116,56 @@ float depthForFraction(float p) {
   return (lo + hi) * 0.5f;
 }
 
+// A RECTANGLE AND TWO FLARES, not two triangles sharing a diagonal.
+//
+// The first version split the trapezoid corner to corner, and the shared edge
+// showed as a hairline across the vessel at exactly that angle. The cause is
+// antialiasing, and it is unavoidable for that split: the rasteriser softens
+// each triangle's diagonal independently, so along the seam each contributes
+// partial coverage and the two never sum to a full pixel. A diagonal join in an
+// antialiased renderer always leaves a line.
+//
+// So the shape is cut on VERTICAL boundaries instead -- a rectangle spanning the
+// base width, with a triangular flare either side. An edge that lies on an
+// integer x has no partial coverage to soften, so those joins are exact and
+// leave nothing to see. The flares still have soft outer slopes, which is
+// wanted: that is the vessel's silhouette rather than a join.
+//
+// The flares overlap the rectangle by a pixel as well. Belt to the braces --
+// same colour, fully opaque, so an overlap is invisible where a one-pixel gap
+// from a rounding disagreement would not be.
 void fillTrapezoid(lv_layer_t *layer, int32_t cx, int32_t yTop, int32_t yBot,
                    float halfTop, float halfBot, uint32_t rgb) {
+  const int32_t hb = (int32_t)(halfBot + 0.5f);
+  const int32_t ht = (int32_t)(halfTop + 0.5f);
+
+  lv_draw_rect_dsc_t r;
+  lv_draw_rect_dsc_init(&r);
+  r.bg_color = lv_color_hex(rgb);
+  r.bg_opa = LV_OPA_COVER;
+  r.radius = 0;
+  lv_area_t mid;
+  mid.x1 = cx - hb;
+  mid.y1 = yTop;
+  mid.x2 = cx + hb;
+  mid.y2 = yBot;
+  lv_draw_rect(layer, &r, &mid);
+
+  if (ht <= hb) return;  // no flare to draw -- the shape is a rectangle
+
   lv_draw_triangle_dsc_t d;
   lv_draw_triangle_dsc_init(&d);
   d.color = lv_color_hex(rgb);
   d.opa = LV_OPA_COVER;
 
-  d.p[0].x = cx - (int32_t)halfTop;
-  d.p[0].y = yTop;
-  d.p[1].x = cx + (int32_t)halfTop;
-  d.p[1].y = yTop;
-  d.p[2].x = cx + (int32_t)halfBot;
-  d.p[2].y = yBot;
+  d.p[0].x = cx - ht;      d.p[0].y = yTop;
+  d.p[1].x = cx - hb + 1;  d.p[1].y = yTop;
+  d.p[2].x = cx - hb + 1;  d.p[2].y = yBot;
   lv_draw_triangle(layer, &d);
 
-  d.p[0].x = cx - (int32_t)halfTop;
-  d.p[0].y = yTop;
-  d.p[1].x = cx + (int32_t)halfBot;
-  d.p[1].y = yBot;
-  d.p[2].x = cx - (int32_t)halfBot;
-  d.p[2].y = yBot;
+  d.p[0].x = cx + ht;      d.p[0].y = yTop;
+  d.p[1].x = cx + hb - 1;  d.p[1].y = yTop;
+  d.p[2].x = cx + hb - 1;  d.p[2].y = yBot;
   lv_draw_triangle(layer, &d);
 }
 
@@ -171,8 +200,16 @@ void buildKnob(lv_obj_t *parent) {
   lv_obj_t *scr = lv_obj_create(parent);
   flat(scr);
   lv_obj_set_size(scr, LV_PCT(100), LV_PCT(100));
+  // NO TOP PAD FOR THE STATUS BAR. The tileview is ALREADY positioned at
+  // y = STATUS_H with height SCREEN_H - STATUS_H (see ui_pages.cpp), so the
+  // tile's content area begins below the bar before this page does anything.
+  //
+  // Padding another 26 px on top of that pushed the whole page down by a bar's
+  // height: a visible gap under the status row, and the button row hanging off
+  // the bottom edge. One mistake, two symptoms that looked unrelated -- and the
+  // weight page, which pads uniformly and never clears the bar itself, was
+  // sitting right there as the counter-example.
   lv_obj_set_style_pad_all(scr, 2, LV_PART_MAIN);
-  lv_obj_set_style_pad_top(scr, 30, LV_PART_MAIN);  // exactly clears the status bar
   lv_obj_set_flex_flow(scr, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_style_pad_row(scr, 0, LV_PART_MAIN);
   lv_obj_set_flex_align(scr, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
