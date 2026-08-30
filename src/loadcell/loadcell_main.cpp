@@ -1094,7 +1094,8 @@ void setup() {
   // placeholder. Fitting the one-resistor mod in todo.md is what makes
   // CHARGER_STATUS_READABLE true, and this line is then the only one that has to
   // learn where the pin went.
-  ui::demoOverrideCharging(board::CHARGER_STATUS_READABLE, inputs::charging());
+  ui::demoOverrideCharging(board::CHARGER_STATUS_READABLE, inputs::charging(),
+                           inputs::externalPower());
   Serial.printf("  charge state %s\n",
                 board::CHARGER_STATUS_READABLE
                     ? "readable -- STAT mod fitted"

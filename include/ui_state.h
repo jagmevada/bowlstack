@@ -167,6 +167,22 @@ struct State {
   bool chargingKnown;
   bool charging;
 
+  // ON MAINS. A DIFFERENT FACT FROM `charging`, and the reason both exist.
+  //
+  // `charging` is the ETA6098 pushing current into the cell, read from its STAT
+  // pin -- which on this board reaches no GPIO unless the mod in
+  // board_waveshare_s3.h section 5 has been fitted, so it is normally unknown.
+  // This is VBUS presence, measured through a 5k/10k divider on IO10, and it is
+  // known on every board.
+  //
+  // They diverge exactly when the battery fills: the charger terminates, STAT
+  // releases, and 5 V is still there. Which is why the STATUS BAR's bolt hangs
+  // off this one and the `charging` COLUMN in Supabase hangs off the other -- a
+  // bolt means "plugged in", the same thing it means on a phone, and that is
+  // true at 100%. A database field called `charging` saying true into a full
+  // battery would not be.
+  bool externalPower;
+
   bool wifiConnected;
 
   // Signal strength in dBm, for the status bar's bars. 0 means "connected but

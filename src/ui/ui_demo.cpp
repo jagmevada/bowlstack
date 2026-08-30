@@ -34,6 +34,7 @@ Battery ovBand_ = Battery::Unknown;
 bool haveCharging_ = false;
 bool chargingKnown_ = false;
 bool charging_ = false;
+bool external_ = false;
 
 bool haveEncoder_ = false;
 int32_t encoderPos_ = 0;
@@ -351,10 +352,11 @@ void demoOverrideBattery(uint16_t cellMv, uint16_t pinMv, int8_t pct, Battery ba
   ovBand_ = band;
 }
 
-void demoOverrideCharging(bool known, bool charging) {
+void demoOverrideCharging(bool known, bool charging, bool external) {
   haveCharging_ = true;
   chargingKnown_ = known;
   charging_ = charging;
+  external_ = external;
 }
 
 void demoOverrideEncoder(int32_t pos, uint32_t pressCount) {
@@ -451,6 +453,13 @@ const State &demoLatest(uint32_t nowMs) {
   if (haveCharging_) {
     latest_.chargingKnown = chargingKnown_;
     latest_.charging = charging_;
+    latest_.externalPower = external_;
+  } else {
+    // THE PREVIEW HAS TO SHOW THE BOLT, or the one thing this change adds is
+    // the one thing the simulator cannot check. Plugged in for 6 s of every
+    // 14 -- long enough to read, and unequal so it is obviously a fixture
+    // rather than a clock somebody might mistake for real.
+    latest_.externalPower = ((nowMs / 1000) % 14) < 6;
   }
 
   // THE SIMULATOR GETS A MOVING KNOB, and it has to, or the row it renders is

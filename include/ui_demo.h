@@ -106,7 +106,11 @@ void demoOverrideTime(bool known, uint8_t hh, uint8_t mm);
 // somebody fits the one-resistor mod in todo.md. The simulator does not call
 // this, so its scenarios keep exercising both states -- which is what the
 // preview is for.
-void demoOverrideCharging(bool known, bool charging);
+// `known` and `charging` are the STAT reading -- unknown on an unmodified
+// board. `external` is VBUS, which every board can measure. One call because
+// they are one subject and pushing them separately invites a screen that shows
+// half of one instant beside half of another.
+void demoOverrideCharging(bool known, bool charging, bool external);
 
 // The panel knob's position and press count, from whatever is reading the
 // encoder. Platform-specific for the obvious reason -- the desktop has no

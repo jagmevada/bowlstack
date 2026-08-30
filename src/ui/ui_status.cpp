@@ -63,6 +63,11 @@ bool lastWifi_ = false;
 uint8_t lastBatt_ = 255;
 bool lastCharging_ = false;
 bool lastChargingKnown_ = false;
+// SEPARATE FROM lastCharging_, because it is a separate input. Left out of
+// the guard below, the bolt would never appear: on this board charging and
+// chargingKnown never change, so nothing would ever re-enter the block that
+// draws it and plugging in would repaint nothing at all.
+bool lastExternal_ = false;
 bool lastTimeKnown_ = false;
 uint8_t lastHH_ = 255, lastMM_ = 255;
 const char *lastId_ = nullptr;
@@ -267,10 +272,11 @@ void updateStatus(const State &s) {
 
   const uint8_t bIdx = (uint8_t)s.battery;
   if (bIdx != lastBatt_ || s.charging != lastCharging_ ||
-      s.chargingKnown != lastChargingKnown_) {
+      s.chargingKnown != lastChargingKnown_ || s.externalPower != lastExternal_) {
     lastBatt_ = bIdx;
     lastCharging_ = s.charging;
     lastChargingKnown_ = s.chargingKnown;
+    lastExternal_ = s.externalPower;
 
     const uint8_t pct = battFillPct(s.battery);
     lv_obj_set_width(battFill_, (int16_t)((22 * pct) / 100));
@@ -283,10 +289,20 @@ void updateStatus(const State &s) {
         battBody_, lv_color_hex(s.battery == Battery::Unknown ? C_FAULT : C_MUTED),
         LV_PART_MAIN);
 
-    // Shown ONLY when charge state is actually known. On this board it never
-    // is -- the ETA6098's STAT pin reaches no GPIO -- so the bolt stays hidden
-    // rather than asserting "not charging", which the device cannot see.
-    if (s.chargingKnown && s.charging) lv_obj_remove_flag(battBolt_, LV_OBJ_FLAG_HIDDEN);
+    // THE BOLT MEANS PLUGGED IN, which is what a phone's bolt means and what
+    // this board can actually measure -- VBUS, through the divider on IO10.
+    //
+    // It deliberately does NOT mean "current is flowing into the cell". That is
+    // `charging`, read from the ETA6098's STAT pin, which reaches no GPIO on an
+    // unmodified board; gating the bolt on it left the icon permanently hidden
+    // with a charger plugged in, which is its own kind of wrong -- the device
+    // could see mains perfectly well and was declining to say so.
+    //
+    // Once the STAT mod is fitted the two can be told apart on screen: steady
+    // for plugged-in, and a blink while current is actually flowing. Not done
+    // yet, because with STAT unwired a blink would have nothing behind it.
+    const bool plugged = s.externalPower || (s.chargingKnown && s.charging);
+    if (plugged) lv_obj_remove_flag(battBolt_, LV_OBJ_FLAG_HIDDEN);
     else lv_obj_add_flag(battBolt_, LV_OBJ_FLAG_HIDDEN);
   }
 }
