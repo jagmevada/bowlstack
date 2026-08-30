@@ -234,6 +234,24 @@ struct State {
   // pre-computed `showDot` across this seam would put a timer in the sensing
   // task to serve a widget.
   uint32_t encoderPressCount;
+
+  // --- TRIAL HARNESS: the manual fill estimate ------------------------------
+  // TEMPORARY, AND FOR ONE DEVICE. LDC-001 carries a knob so the counter
+  // attendant can eyeball the vessel and dial in how full it is, while the load
+  // cell underneath keeps measuring independently. The point of the exercise is
+  // the GAP between the two -- it is what tells a reviewer whether a knob and a
+  // person are an acceptable substitute for a scale, or a false economy.
+  //
+  // KEPT SEPARATE FROM EVERY MEASURED FIELD, deliberately. Nothing here feeds
+  // the weight, the slot totals or the burn rate: an experiment whose subject
+  // is allowed to contaminate its own control measures nothing.
+  //
+  // fillKnown is false on a device with no knob, which is every device but one.
+  // It is not "0%" -- that would be a claim that the vessel is empty.
+  bool fillKnown;
+  uint8_t fillPercent;       // 0..100
+  bool fillReminderDue;      // the estimate is older than the reminder interval
+  uint32_t fillAgeSec;       // how stale it is, for the screen to say so
 };
 
 // A sensible zero value: everything unknown, nothing claimed. Used as the

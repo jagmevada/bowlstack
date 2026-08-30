@@ -40,6 +40,11 @@ bool haveEncoder_ = false;
 int32_t encoderPos_ = 0;
 uint32_t encoderPressCount_ = 0;
 
+bool haveFill_ = false;
+uint8_t fillPct_ = 0;
+bool fillRemind_ = false;
+uint32_t fillAge_ = 0;
+
 State base() {
   State s = unknownState();
   for (uint8_t i = 0; i < LEVELS; i++) s.sensorOnline[i] = true;
@@ -365,6 +370,14 @@ void demoOverrideEncoder(int32_t pos, uint32_t pressCount) {
   encoderPressCount_ = pressCount;
 }
 
+void demoOverrideFill(bool known, uint8_t pct, bool remind, uint32_t ageSec) {
+  haveFill_ = true;
+  fillPct_ = pct;
+  fillRemind_ = remind;
+  fillAge_ = ageSec;
+  (void)known;  // a board that calls this has a knob, by definition
+}
+
 uint8_t demoCount() { return (uint8_t)(sizeof(SCENARIOS) / sizeof(SCENARIOS[0])); }
 const char *demoName(uint8_t i) { return SCENARIOS[i % demoCount()].name; }
 State demoState(uint8_t i) { return SCENARIOS[i % demoCount()].make(); }
@@ -483,6 +496,22 @@ const State &demoLatest(uint32_t nowMs) {
     const int32_t t = (int32_t)((nowMs / 700) % 240);
     latest_.encoderPos = (t < 120) ? (t - 60) : (180 - t);
     latest_.encoderPressCount = nowMs / 4000;
+  }
+
+  // TRIAL: the manual estimate. The simulator gets a slow sweep so the row and
+  // its stale-warning are both exercised in the preview -- a fixture that sat
+  // at one value would let the layout be checked and not the behaviour.
+  if (haveFill_) {
+    latest_.fillKnown = true;
+    latest_.fillPercent = fillPct_;
+    latest_.fillReminderDue = fillRemind_;
+    latest_.fillAgeSec = fillAge_;
+  } else {
+    latest_.fillKnown = true;
+    const uint32_t t = (nowMs / 400) % 200;
+    latest_.fillPercent = (uint8_t)(t < 100 ? t : 200 - t);
+    latest_.fillAgeSec = (nowMs / 1000) % 900;
+    latest_.fillReminderDue = latest_.fillAgeSec > 600;
   }
 
   latest_.uptimeSec = nowMs / 1000;

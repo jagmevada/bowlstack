@@ -120,4 +120,9 @@ void demoOverrideCharging(bool known, bool charging, bool external);
 // which is what makes the row visible in `pio run -e sim`.
 void demoOverrideEncoder(int32_t pos, uint32_t pressCount);
 
+// TRIAL: the manual fill estimate. Platform-specific because only one board has
+// a knob on it, and installed through the same fixture as everything else so
+// the simulator renders the row from the product's own code.
+void demoOverrideFill(bool known, uint8_t pct, bool remind, uint32_t ageSec);
+
 }  // namespace ui

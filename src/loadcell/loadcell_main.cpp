@@ -756,6 +756,11 @@ void serviceInputs(uint32_t nowMs) {
   // It costs two stores.
   ui::demoOverrideEncoder(inputs::position(), pressCount_);
 
+  // TRIAL: the manual fill estimate. Same cadence and the same reason -- it is
+  // a snapshot, and a value pushed only on change goes stale after a rebuild.
+  ui::demoOverrideFill(true, inputs::fillPercent(), inputs::fillReminderDue(),
+                       inputs::fillAgeMs() / 1000);
+
   // EVERY PASS, and it was not. This lived only in setup(), so `external_` was
   // frozen at whatever VBUS read during boot and no plug event ever reached the
   // screen -- the status bar's bolt and the battery page both sat on a value

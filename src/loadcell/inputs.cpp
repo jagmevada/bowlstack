@@ -122,6 +122,49 @@ Preferences prefs_;
 int32_t savedPos_ = 0;
 bool haveSaved_ = false;
 
+// --- TRIAL HARNESS: the manual fill estimate --------------------------------
+// See inputs.h. One point of fill per detent, clamped hard at both ends.
+//
+// CLAMPED AS STATE, NOT AS DISPLAY, and that distinction is the whole feel of
+// the control. If the raw count were allowed to run past 100 and only the
+// rendering clamped, then overshooting by twelve clicks would need twelve
+// clicks back before the number moved at all -- and the attendant would decide
+// the knob was broken. Clamping the stored value means the very next click the
+// other way is worth one point.
+const char *KEY_FILLPCT = "fillpct";
+uint8_t fillPct_ = 0;
+uint8_t savedFillPct_ = 0;
+bool fillDirty_ = false;
+uint32_t fillChangedAtMs_ = 0;
+
+// Written 2 s after the knob STOPS, not on every detent. At one point per click
+// a sweep from empty to full is a hundred writes; NVS endurance is finite and
+// the intermediate values are not estimates anybody made, they are the knob
+// passing through. The settle window turns a sweep into one write.
+const uint32_t FILL_SETTLE_MS = 2000;
+
+// How long the attendant is left alone before the LED starts asking. The
+// reminder is the experiment's clock: an estimate nobody refreshes is what a
+// knob-based system actually degrades into, so the interval is part of what is
+// being measured rather than a convenience.
+const uint32_t FILL_REMIND_MS = 600000;  // 10 minutes
+uint32_t fillUpdatedAtMs_ = 0;
+
+void storeFill() {
+  if (fillPct_ == savedFillPct_) { fillDirty_ = false; return; }
+  if (!prefs_.begin(NVS_NS, false)) {
+    // println, not printf -- so a literal percent sign, not an escaped one.
+    Serial.println("input: NVS unavailable -- fill % will not persist");
+    fillDirty_ = false;
+    return;
+  }
+  prefs_.putUChar(KEY_FILLPCT, fillPct_);
+  prefs_.end();
+  savedFillPct_ = fillPct_;
+  fillDirty_ = false;
+  Serial.printf("input: fill %u%% stored\n", (unsigned)fillPct_);
+}
+
 void storePosition() {
   if (haveSaved_ && position_ == savedPos_) {
     Serial.printf("input: position %ld already stored\n", (long)position_);
@@ -234,6 +277,15 @@ void applyLedPolicy(uint32_t nowMs) {
     case LedMode::ForceOff: driveLed(false); return;
     case LedMode::Auto:
     default:
+      // TRIAL: THE REMINDER OUTRANKS BOTH POWER STATES, because it is the only
+      // one addressed to a person who is expected to do something. 5 Hz is
+      // deliberately faster than anything else this LED does -- the 1 Hz mains
+      // blink and the steady battery light are ambient status, and an alert
+      // that ticked at a similar rate would be read as more of the same.
+      if (fillReminderDue()) {
+        driveLed(((nowMs / 100u) & 1u) == 0u);
+        return;
+      }
       // Steady on battery, blinking on mains. The steady state is the one that
       // costs current, and it is deliberately the battery one: a light left on
       // a device that looks switched off is the message.
@@ -294,6 +346,12 @@ void begin() {
     prefs_.end();
     savedPos_ = position_;
     haveSaved_ = true;
+    // TRIAL: the fill estimate survives a power cycle too. A station rebooted
+    // mid-service must not come back claiming an empty vessel -- that is a
+    // reading somebody would act on.
+    fillPct_ = prefs_.getUChar(KEY_FILLPCT, 0);
+    if (fillPct_ > 100) fillPct_ = 100;
+    savedFillPct_ = fillPct_;
   } else {
     Serial.println("input: NVS unavailable -- knob starts at 0, will not persist");
   }
@@ -314,6 +372,10 @@ void begin() {
                       "as unknown until -DBOWLSTACK_CHARGE_SENSE=1");
   Serial.printf("  vbus     GPIO%d (P1-10) 5k from P1-14 (5V), 10k to GND\n",
                 board::PIN_VBUS_SENSE);
+  Serial.printf("  TRIAL    manual fill %u%%, restored from NVS. 1%% per detent,\n"
+                "           stored 2 s after the knob stops, and the LED blinks\n"
+                "           at 5 Hz once the estimate is 10 min old.\n",
+                (unsigned)fillPct_);
   Serial.printf("  position %ld restored from NVS -- a press stores the "
                 "current value\n", (long)position_);
 }
@@ -332,6 +394,30 @@ Events loop(uint32_t nowMs) {
   if (pending != 0) {
     e.turned = INVERT_DIRECTION ? (int16_t)-pending : pending;
     position_ += e.turned;
+
+    // --- TRIAL HARNESS ------------------------------------------------------
+    // Saturating rather than wrapping. A vessel cannot be 105% full, and
+    // wrapping to 0 at the top would turn one click of overshoot into a report
+    // that the food had run out.
+    const int32_t want = (int32_t)fillPct_ + e.turned;
+    const uint8_t next = (uint8_t)(want < 0 ? 0 : (want > 100 ? 100 : want));
+    if (next != fillPct_) {
+      fillPct_ = next;
+      fillDirty_ = true;
+      fillChangedAtMs_ = nowMs;
+      // The reminder clock restarts on any movement, including one that lands
+      // back where it started -- the attendant has just looked at the vessel,
+      // which is the thing the reminder exists to provoke.
+    }
+    fillUpdatedAtMs_ = nowMs;
+  }
+
+  // Commit once the knob has been still for a moment. Deliberately not on the
+  // press: pressing is a separate gesture the attendant has no reason to learn,
+  // and an estimate that only persists if you remember a second action is an
+  // estimate that will be lost.
+  if (fillDirty_ && (uint32_t)(nowMs - fillChangedAtMs_) >= FILL_SETTLE_MS) {
+    storeFill();
   }
 
   const bool swRaw = (digitalRead(board::PIN_ENC_SW) == LOW);  // pull-up: LOW = pressed
@@ -370,6 +456,10 @@ Events loop(uint32_t nowMs) {
 
 int32_t position() { return position_; }
 int32_t storedPosition() { return savedPos_; }
+
+uint8_t fillPercent() { return fillPct_; }
+uint32_t fillAgeMs() { return millis() - fillUpdatedAtMs_; }
+bool fillReminderDue() { return fillAgeMs() >= FILL_REMIND_MS; }
 bool switchDown() { return sw_.level; }
 bool charging() { return stat_.level; }
 bool externalPower() { return vbus_.level; }
@@ -414,6 +504,10 @@ void dumpState() {
                 position_ == savedPos_
                     ? " (matches current)"
                     : "  <- press the knob to store the current value");
+  Serial.printf("  fill     %u%%  (%lu s since last update%s)\n",
+                (unsigned)fillPct_,
+                (unsigned long)(fillAgeMs() / 1000),
+                fillReminderDue() ? ", REMINDER DUE" : "");
   Serial.printf("  switch   %s\n", sw_.level ? "DOWN" : "up");
   Serial.printf("  charging %s%s\n", stat_.level ? "YES" : "no",
                 board::CHARGER_STATUS_READABLE ? "" : "   (mod not declared fitted)");

@@ -7,6 +7,7 @@
 
 #include "bringup_wifi.h"
 #include "config.h"
+#include "inputs.h"
 #include "uplink.h"
 #include "version.h"
 
@@ -90,6 +91,7 @@ struct QueuedSample {
   float countsPerGram;     // 0 = never calibrated -> sent as null
   uint16_t batteryMv;
   battery::Level batteryLevel;
+  uint8_t manualFillPct;  // TRIAL: captured with the sample, not at flush
 };
 
 QueuedSample queue_[QUEUE_LEN];
@@ -305,6 +307,7 @@ void enqueue(const scale::Snapshot &s, const char *reason, const char *state,
   e.countsPerGram = s.countsPerGram;
   e.batteryMv = batteryMv;
   e.batteryLevel = batteryLevel;
+  e.manualFillPct = inputs::fillPercent();
 
   if (qCount_ == QUEUE_LEN) {
     // Drop the OLDEST and keep the newest. The newest describes the counter as
@@ -354,6 +357,11 @@ bool flushSamples() {
                           : e.batteryMv;
     if (e.batteryLevel == battery::Level::Unknown) o["battery_level"] = nullptr;
     else o["battery_level"] = battery::levelName(e.batteryLevel);
+    // TRIAL: the estimate as it stood when this sample was TAKEN, not as it
+    // stands now. The whole point is pairing it against the weight from the
+    // same instant; reading it at flush time would compare an estimate to a
+    // measurement made up to an hour earlier.
+    o["manual_fill_pct"] = e.manualFillPct;
     o["firmware"] = BOWLSTACK_FW_VERSION;
   }
 
@@ -458,6 +466,18 @@ bool patchStatus(const scale::Snapshot &s, uint32_t uptimeSec, uint16_t batteryM
   // reports nothing instead of inventing "not charging", which is
   // indistinguishable from a real answer. See board_waveshare_s3.h section 5.
   o["charging"] = nullptr;
+
+  // --- TRIAL HARNESS: the manual fill estimate ------------------------------
+  // Sent BESIDE the weight, never instead of it. The experiment is the gap
+  // between the two, so both have to arrive from the same instant -- and the
+  // server reads this column from nothing except the comparison view.
+  //
+  // The AGE goes with it because staleness is itself a result. An estimate
+  // nobody has refreshed for twenty minutes is exactly the failure mode a
+  // knob-based system has, and a reviewer needs to be able to exclude those
+  // rows -- or count them, which is the more interesting number.
+  o["manual_fill_pct"] = inputs::fillPercent();
+  o["manual_fill_age_s"] = inputs::fillAgeMs() / 1000;
 
   // stack_count, stack_status, levels, sensors_ok and sensors_online are NEVER
   // written. They stay NULL from the row's creation, which is what

@@ -60,6 +60,22 @@ Events loop(uint32_t nowMs);
 // counter that resets whenever somebody unplugs the unit.
 int32_t position();
 int32_t storedPosition();  // what is on flash; differs until the next press
+
+// --- TRIAL HARNESS: the manual fill estimate --------------------------------
+// TEMPORARY, AND FOR ONE DEVICE. LDC-001 carries a knob so the counter attendant
+// can eyeball the vessel and dial in how full it is. The load cell underneath
+// keeps measuring independently, and the point of the exercise is the GAP
+// between the two: it is what tells a reviewer whether a knob and a person are
+// an acceptable substitute for a scale, or a false economy.
+//
+// So nothing here feeds the operational figures. The manual number travels
+// beside the measured one and never replaces it -- an experiment that lets the
+// thing being tested contaminate its own control measures nothing.
+//
+// This is not production code and is meant to be removed. It is one commit.
+uint8_t fillPercent();       // 0..100, one point per detent, clamped
+bool fillReminderDue();      // 10 minutes since the last update
+uint32_t fillAgeMs();        // how stale the estimate is
 bool switchDown();
 bool charging();          // STAT low. Meaningless unless chargeSenseFitted().
 bool externalPower();     // VBUS present

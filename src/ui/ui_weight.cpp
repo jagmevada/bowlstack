@@ -71,6 +71,12 @@ lv_obj_t *encDot = nullptr;
 lv_obj_t *lblEnc = nullptr;
 char prevEnc_[20] = {0};
 
+// TRIAL: the manual fill estimate, on the same row and larger than the raw
+// encoder figure beside it -- it is the number the attendant sets and the one
+// the experiment is about, where the detent count is bring-up instrumentation.
+lv_obj_t *lblFill = nullptr;
+char prevFill_[16] = {0};
+
 // The dot is held for half a second after each press. LVGL's own tick is the
 // clock rather than anything passed in: src/ui/ must compile on a desktop that
 // has no millis(), and lv_tick_get() is the one time source both targets share.
@@ -324,7 +330,7 @@ void buildWeight(lv_obj_t *parent) {
   lv_obj_t *encRow = lv_obj_create(scr);
   styleFlat(encRow);
   lv_obj_set_width(encRow, LV_PCT(100));
-  lv_obj_set_height(encRow, 18);
+  lv_obj_set_height(encRow, 24);  // TRIAL: 24 to seat the 20 px fill figure
   lv_obj_set_style_pad_bottom(encRow, 4, LV_PART_MAIN);
   lv_obj_set_flex_flow(encRow, LV_FLEX_FLOW_ROW);
   lv_obj_set_style_pad_column(encRow, 8, LV_PART_MAIN);
@@ -356,6 +362,15 @@ void buildWeight(lv_obj_t *parent) {
   // already calls this an encoder (PIN_ENC_CLK, State::encoderPos), so the
   // panel may as well use the same word as the header somebody will check it
   // against.
+  // TRIAL: 20 px against the raw count's 14. The type scale reserves 18 as the
+  // floor for anything glanceable, and this has to be read by somebody standing
+  // at the counter deciding whether it still matches the vessel -- where the
+  // detent count beside it is for whoever is debugging the knob.
+  lblFill = lv_label_create(encRow);
+  lv_obj_set_style_text_font(lblFill, &lv_font_montserrat_20, LV_PART_MAIN);
+  lv_obj_set_style_text_color(lblFill, lv_color_hex(C_TEXT), LV_PART_MAIN);
+  lv_label_set_text(lblFill, "");
+
   lblEnc = lv_label_create(encRow);
   lv_obj_set_style_text_font(lblEnc, &lv_font_montserrat_14, LV_PART_MAIN);
   lv_obj_set_style_text_color(lblEnc, lv_color_hex(C_MUTED), LV_PART_MAIN);
@@ -422,6 +437,27 @@ void updateWeight(const State &st) {
 
   // --- the knob row ---------------------------------------------------------
   if (lblEnc != nullptr) {
+    // TRIAL: the manual estimate, and it says when it is STALE rather than
+    // going quiet. An estimate nobody has refreshed for a quarter of an hour is
+    // the failure mode a knob-based system actually has, so the screen names it
+    // instead of presenting an old number as a current one.
+    if (st.fillKnown) {
+      if (st.fillReminderDue) {
+        snprintf(buf, sizeof(buf), "%u%%  (%lu min old)", (unsigned)st.fillPercent,
+                 (unsigned long)(st.fillAgeSec / 60));
+      } else {
+        snprintf(buf, sizeof(buf), "%u%%", (unsigned)st.fillPercent);
+      }
+    } else {
+      buf[0] = '\0';
+    }
+    if (strcmp(buf, prevFill_) != 0) {
+      snprintf(prevFill_, sizeof(prevFill_), "%s", buf);
+      lv_label_set_text(lblFill, buf);
+      lv_obj_set_style_text_color(
+          lblFill, lv_color_hex(st.fillReminderDue ? C_WARN : C_TEXT), LV_PART_MAIN);
+    }
+
     snprintf(buf, sizeof(buf), "enc %ld", (long)st.encoderPos);
     if (strcmp(buf, prevEnc_) != 0) {
       snprintf(prevEnc_, sizeof(prevEnc_), "%s", buf);
