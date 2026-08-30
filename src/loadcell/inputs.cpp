@@ -260,10 +260,62 @@ LedMode ledMode_ = LedMode::Auto;
 // Half-period of the mains blink. 500 ms each way is the 1 Hz asked for.
 const uint32_t BLINK_HALF_MS = 500;
 
-void driveLed(bool on) {
-  ledOn_ = on;
-  digitalWrite(board::PIN_STATUS_LED,
-               (on == board::STATUS_LED_ACTIVE_HIGH) ? HIGH : LOW);
+// --- the indicator, on PWM ---------------------------------------------------
+// FOUR STATES A PERSON CAN TELL APART WITHOUT BEING TAUGHT THEM, which is the
+// whole reason this pin moved off digitalWrite:
+//
+//     steady            on battery, running down the cell
+//     smooth fade       on mains
+//     fast blink 5 Hz   the fill estimate is stale and wants updating
+//     dark              switched off
+//
+// Two square waves at 1 Hz and 5 Hz were distinguishable in principle and not
+// in practice -- both read as "the light is flashing", and somebody glancing
+// across a counter has to count to tell them apart. A fade is a different KIND
+// of signal rather than a different rate, so it separates at a glance, and it
+// carries the meaning most phones have already taught everybody: breathing
+// means charging.
+//
+// CHANNEL 0, AND THAT IS NOT ARBITRARY. LovyanGFX drives the backlight on
+// channel 7, and arduino-esp32 2.0.17 maps a channel to timer (chan >> 1) & 3 --
+// so channel 7 sits on timer 3 and CHANNEL 6 SHARES IT. Calling ledcSetup on 6
+// with a different frequency silently re-times the display's brightness; on 7
+// it steals it outright. Channel 0 lands on timer 0 and touches neither.
+const uint8_t LED_PWM_CH = 0;
+const uint32_t LED_PWM_HZ = 5000;  // far above anything an eye or a camera sees
+const uint8_t LED_PWM_BITS = 8;
+const uint8_t LED_DUTY_MAX = 255;
+
+// Full cycle of the fade, dark to bright to dark. 0.5 Hz.
+const uint32_t FADE_PERIOD_MS = 2000;
+
+uint8_t ledDuty_ = 0;
+
+void driveLed(uint8_t duty) {
+  ledDuty_ = duty;
+  ledOn_ = (duty > 0);
+  // The board's LED is active HIGH (board_waveshare_s3.h section 9); inverting
+  // here rather than at every call site keeps the polarity in one place, and it
+  // is a duty inversion rather than a level one because this is PWM now.
+  ledcWrite(LED_PWM_CH,
+            board::STATUS_LED_ACTIVE_HIGH ? duty : (LED_DUTY_MAX - duty));
+}
+
+// GAMMA, because a linear duty ramp does not look like a linear fade.
+//
+// Perceived brightness goes roughly as the square root of luminous output, so a
+// duty sweeping evenly from 0 to 255 appears to rush through the dim half and
+// crawl through the bright one -- it reads as a flicker followed by a plateau,
+// which is exactly the "blink" this state exists to NOT look like. Squaring the
+// ramp (gamma 2.0) inverts that and gives an even-looking breath. It is one
+// multiply, against the cube-root-accurate 2.2 that would need a table.
+uint8_t fadeDuty(uint32_t nowMs) {
+  const uint32_t ph = nowMs % FADE_PERIOD_MS;
+  const uint32_t half = FADE_PERIOD_MS / 2;
+  // Triangle: up over the first half, down over the second.
+  const uint32_t tri = (ph < half) ? (ph * LED_DUTY_MAX / half)
+                                   : ((FADE_PERIOD_MS - ph) * LED_DUTY_MAX / half);
+  return (uint8_t)((tri * tri) / LED_DUTY_MAX);
 }
 
 // FREE-RUNNING off millis() rather than a toggle with its own timer. A stored
@@ -273,8 +325,8 @@ void driveLed(bool on) {
 // wrap, every 49.7 days, by at most one half-period.
 void applyLedPolicy(uint32_t nowMs) {
   switch (ledMode_) {
-    case LedMode::ForceOn:  driveLed(true);  return;
-    case LedMode::ForceOff: driveLed(false); return;
+    case LedMode::ForceOn:  driveLed(LED_DUTY_MAX); return;
+    case LedMode::ForceOff: driveLed(0);             return;
     case LedMode::Auto:
     default:
       // TRIAL: THE REMINDER OUTRANKS BOTH POWER STATES, because it is the only
@@ -282,14 +334,18 @@ void applyLedPolicy(uint32_t nowMs) {
       // deliberately faster than anything else this LED does -- the 1 Hz mains
       // blink and the steady battery light are ambient status, and an alert
       // that ticked at a similar rate would be read as more of the same.
+      // THE REMINDER OUTRANKS BOTH POWER STATES, because it is the only one
+      // addressed to a person who is expected to do something. A hard 5 Hz
+      // square -- no fade -- so it reads as an alarm rather than as more
+      // ambient status.
       if (fillReminderDue()) {
-        driveLed(((nowMs / 100u) & 1u) == 0u);
+        driveLed(((nowMs / 100u) & 1u) == 0u ? LED_DUTY_MAX : 0);
         return;
       }
-      // Steady on battery, blinking on mains. The steady state is the one that
-      // costs current, and it is deliberately the battery one: a light left on
-      // a device that looks switched off is the message.
-      driveLed(vbus_.level ? (((nowMs / BLINK_HALF_MS) & 1u) == 0u) : true);
+      // On mains it breathes; on battery it is steady. The steady state is the
+      // one that costs current, and it is deliberately the battery one: a light
+      // left on a device that looks switched off is the message.
+      driveLed(vbus_.level ? fadeDuty(nowMs) : LED_DUTY_MAX);
       return;
   }
 }
@@ -317,8 +373,9 @@ void begin() {
   // the 5 V source and read high forever.
   pinMode(board::PIN_VBUS_SENSE, INPUT_PULLDOWN);
 
-  pinMode(board::PIN_STATUS_LED, OUTPUT);
-  driveLed(false);
+  ledcSetup(LED_PWM_CH, LED_PWM_HZ, LED_PWM_BITS);
+  ledcAttachPin(board::PIN_STATUS_LED, LED_PWM_CH);
+  driveLed(0);
 
   // Seed from the pins as they are RIGHT NOW, so the first edge is judged
   // against where the shaft actually sits rather than an assumption. If the
@@ -471,7 +528,8 @@ const char *ledModeName() {
   switch (ledMode_) {
     case LedMode::ForceOn:  return "forced ON";
     case LedMode::ForceOff: return "forced off";
-    default:                return "auto (steady on battery, 1 Hz on mains)";
+    default:
+      return "auto -- steady on battery, fading on mains, 5 Hz when stale";
   }
 }
 bool statusLed() { return ledOn_; }
@@ -512,7 +570,7 @@ void dumpState() {
   Serial.printf("  charging %s%s\n", stat_.level ? "YES" : "no",
                 board::CHARGER_STATUS_READABLE ? "" : "   (mod not declared fitted)");
   Serial.printf("  external %s\n", vbus_.level ? "5 V PRESENT" : "on battery");
-  Serial.printf("  LED      %s, %s\n", ledOn_ ? "lit" : "dark", ledModeName());
+  Serial.printf("  LED      duty %u/255, %s\n", (unsigned)ledDuty_, ledModeName());
 
   // THE TWO FAILURES THAT LOOK THE SAME FROM THE POSITION FIGURE ALONE, named
   // so the console answers the question rather than just posing it.

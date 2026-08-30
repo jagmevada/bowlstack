@@ -453,7 +453,12 @@ static const int8_t PIN_STATUS_LED = 6;   // P1-3
 // which is not a margin, it is a coin flip.
 static const int8_t PIN_VBUS_SENSE = 10;  // P1-10
 
-// Active HIGH: GPIO -> 220R -> LED anode, cathode to GND at P2-13.
+// Active HIGH: GPIO -> 220R -> LED anode, cathode to GND at P1-13.
+//
+// DRIVEN BY LEDC, NOT digitalWrite, so it can fade. Channel 0, which lands on
+// timer 0 -- LovyanGFX has the backlight on channel 7 and arduino-esp32 2.0.17
+// maps channels to timers as (chan >> 1) & 3, so 7 AND 6 both sit on timer 3.
+// Touching either would re-time or steal the display's brightness.
 //
 // Against this project's usual common-anode convention, and for a physical
 // reason rather than a preference: 3V3 exists at exactly ONE header position
