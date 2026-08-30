@@ -45,6 +45,7 @@ bool haveFill_ = false;
 bool fillKnown_ = false;
 uint8_t fillPct_ = 0;
 bool fillRemind_ = false;
+bool fillAgeKnown_ = false;
 uint32_t fillAge_ = 0;
 
 State base() {
@@ -374,9 +375,11 @@ void demoOverrideEncoder(int32_t pos, uint32_t pressCount) {
 
 void demoOverrideDefaultPage(uint8_t page) { defaultPage_ = page; }
 
-void demoOverrideFill(bool known, uint8_t pct, bool remind, uint32_t ageSec) {
+void demoOverrideFill(bool known, uint8_t pct, bool remind, bool ageKnown,
+                      uint32_t ageSec) {
   haveFill_ = true;
   fillKnown_ = known;
+  fillAgeKnown_ = ageKnown;
   fillPct_ = pct;
   fillRemind_ = remind;
   fillAge_ = ageSec;
@@ -510,6 +513,7 @@ const State &demoLatest(uint32_t nowMs) {
     latest_.fillKnown = fillKnown_;
     latest_.fillPercent = fillPct_;
     latest_.fillReminderDue = fillRemind_;
+    latest_.fillAgeKnown = fillAgeKnown_;
     latest_.fillAgeSec = fillAge_;
   } else {
     latest_.fillKnown = true;
@@ -517,6 +521,7 @@ const State &demoLatest(uint32_t nowMs) {
     latest_.fillPercent = (uint8_t)(t < 100 ? t : 200 - t);
     latest_.fillAgeSec = (nowMs / 1000) % 900;
     latest_.fillReminderDue = latest_.fillAgeSec > 600;
+    latest_.fillAgeKnown = true;
   }
 
   latest_.defaultPage = defaultPage_;

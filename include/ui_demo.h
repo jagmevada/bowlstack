@@ -123,7 +123,8 @@ void demoOverrideEncoder(int32_t pos, uint32_t pressCount);
 // TRIAL: the manual fill estimate. Platform-specific because only one board has
 // a knob on it, and installed through the same fixture as everything else so
 // the simulator renders the row from the product's own code.
-void demoOverrideFill(bool known, uint8_t pct, bool remind, uint32_t ageSec);
+void demoOverrideFill(bool known, uint8_t pct, bool remind, bool ageKnown,
+                      uint32_t ageSec);
 
 // TRIAL: which page the device settles on. The platform owns the NVS copy.
 void demoOverrideDefaultPage(uint8_t page);

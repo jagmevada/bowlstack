@@ -336,7 +336,13 @@ void updateKnob(const State &s) {
   }
 
   const bool stale = s.fillKnown && s.fillReminderDue;
-  if (stale) {
+  if (stale && !s.fillAgeKnown) {
+    // NOT "set 0 min ago". The percentage came back from NVS and this board has
+    // no RTC, so how long ago somebody set it is genuinely unmeasurable -- and
+    // printing the uptime there would be an invented measurement on the one
+    // screen the trial is read from.
+    snprintf(buf, sizeof(buf), "not confirmed since restart");
+  } else if (stale) {
     snprintf(buf, sizeof(buf), "set %lu min ago",
              (unsigned long)(s.fillAgeSec / 60));
   } else {

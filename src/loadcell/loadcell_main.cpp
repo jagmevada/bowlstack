@@ -776,7 +776,7 @@ void serviceInputs(uint32_t nowMs) {
   // TRIAL: the manual fill estimate. Same cadence and the same reason -- it is
   // a snapshot, and a value pushed only on change goes stale after a rebuild.
   ui::demoOverrideFill(inputs::fillKnown(), inputs::fillPercent(),
-                       inputs::fillReminderDue(),
+                       inputs::fillReminderDue(), inputs::fillAgeKnown(),
                        inputs::fillAgeKnown() ? inputs::fillAgeMs() / 1000 : 0);
   ui::demoOverrideDefaultPage(defaultPage_);
 

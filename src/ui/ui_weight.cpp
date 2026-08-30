@@ -474,7 +474,9 @@ void updateWeight(const State &st) {
     // the failure mode a knob-based system actually has, so the screen names it
     // instead of presenting an old number as a current one.
     if (st.fillKnown) {
-      if (st.fillReminderDue) {
+      if (st.fillReminderDue && !st.fillAgeKnown) {
+        snprintf(buf, sizeof(buf), "%u%%  (unconfirmed)", (unsigned)st.fillPercent);
+      } else if (st.fillReminderDue) {
         snprintf(buf, sizeof(buf), "%u%%  (%lu min old)", (unsigned)st.fillPercent,
                  (unsigned long)(st.fillAgeSec / 60));
       } else {

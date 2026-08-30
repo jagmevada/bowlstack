@@ -252,6 +252,12 @@ struct State {
   uint8_t fillPercent;       // 0..100
   bool fillReminderDue;      // the estimate is older than the reminder interval
 
+  // Is fillAgeSec MEANINGFUL? False after a restore from NVS, and it cannot be
+  // otherwise -- no RTC, so nothing here can measure wall time across a power
+  // cycle. The screen must say "not confirmed since restart" rather than print
+  // an uptime as though somebody had set the knob that recently.
+  bool fillAgeKnown;
+
   // Which page the device settles on: 0 = weight, 1 = knob. A SETTING rather
   // than a measurement, carried here because State is already the one snapshot
   // that describes the screen -- the scale's own display settings ride along

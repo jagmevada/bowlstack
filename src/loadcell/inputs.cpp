@@ -616,10 +616,20 @@ void dumpState() {
                 position_ == savedPos_
                     ? " (matches current)"
                     : "  <- press the knob to store the current value");
-  Serial.printf("  fill     %u%%  (%lu s since last update%s)\n",
-                (unsigned)fillPct_,
-                (unsigned long)(fillAgeMs() / 1000),
-                fillReminderDue() ? ", REMINDER DUE" : "");
+  if (!fillEverSet_) {
+    Serial.println("  fill     never set on this unit -- published as NULL");
+  } else if (!fillAgeKnown_) {
+    // The old line printed fillAgeMs() here, which after a restore is just the
+    // uptime -- "70 s since last update" on a figure nobody had touched since
+    // before the reboot. An age this board cannot measure is not an age.
+    Serial.printf("  fill     %u%%  (restored from NVS; age unknown, REMINDER DUE)\n",
+                  (unsigned)fillPct_);
+  } else {
+    Serial.printf("  fill     %u%%  (%lu s since last update%s)\n",
+                  (unsigned)fillPct_,
+                  (unsigned long)(fillAgeMs() / 1000),
+                  fillReminderDue() ? ", REMINDER DUE" : "");
+  }
   Serial.printf("  switch   %s\n", sw_.level ? "DOWN" : "up");
   Serial.printf("  charging %s%s\n", stat_.level ? "YES" : "no",
                 board::CHARGER_STATUS_READABLE ? "" : "   (mod not declared fitted)");
