@@ -152,9 +152,11 @@ export function renderDevice(state, params, ctx) {
     h('div', { style: 'margin:.6rem 0' },
       badge(batt.status === 'idle' ? 'idle' : batt.status, batt.glyph, batt.label),
       ' ',
-      dev.charging ? badge('good', '⚡', 'Charging')
-        : dev.charging === null && isScale(dev)
-          ? badge('idle', '?', 'Charge state unknown') : ''),
+      // THE BADGE FOLLOWS THE SAME FOUR STATES AS THE ROW BELOW IT. It used to
+      // show a bare "?" whenever `charging` was null, which is every unmodified
+      // board -- so a plugged-in station wore a question mark beside a battery
+      // the device could see perfectly well was on mains.
+      powerBadge(dev, state)),
     h('dl', { class: 'kv' },
       kv('Cell', dev.battery_mv != null ? `${dev.battery_mv} mV` : 'not detected'),
       kv('Band', dev.battery_level ?? 'none'),
@@ -162,10 +164,20 @@ export function renderDevice(state, params, ctx) {
       // panel's charger drives its LED and reaches no GPIO, so "not charging"
       // is a claim the hardware cannot support -- null means unreadable, and
       // rendering that as a missing badge would read as "no".
-      isScale(dev)
-        ? kv('Charging', dev.charging == null ? 'unknown — no sense pin'
-                                              : (dev.charging ? 'yes' : 'no'))
-        : null),
+      // FOUR STATES, because two different things are known to different
+      // degrees and this row used to report only the one that is not.
+      //
+      // `charging` comes from the ETA6098's STAT pin, which reaches no GPIO
+      // unless the mod is fitted -- so it is usually null and "no sense pin"
+      // was true of it. But the board CAN see VBUS, through the divider on
+      // IO10, and saying nothing about that threw away a fact the device had:
+      // somebody looking at a plugged-in station was told only that something
+      // was unreadable.
+      //
+      // "on mains" is deliberately not "yes". Plugged in is all this hardware
+      // can see without the STAT wire; whether current is still flowing is
+      // exactly what it cannot tell.
+      isScale(dev) ? kv('Charging', chargeText(dev, state)) : null),
     h('div', { class: 'dim', style: 'font-size:.75rem;margin-top:.5rem;line-height:1.4' },
       'The band is hysteretic — it leaves a level lower than it re-enters it, so a band ',
       'that has not moved while the millivolts have is correct, not stale. There is no ',
@@ -426,6 +438,39 @@ function diagnostics(dev, rows, hours) {
 //  second, and when there is no number the card says WHY rather than
 //  showing a dash and leaving somebody to guess.
 // ====================================================================
+// The badge beside the battery, sharing chargeText()'s four states so the two
+// cannot disagree about the same instant -- a bolt for charging, a plug glyph
+// for mains-but-not-charging, and a question mark ONLY when nothing is known.
+function powerBadge(dev, state) {
+  const row = (state.power || []).find(p => p.device_id === dev.device_id);
+  const ext = row ? row.external_power : null;
+  if (dev.charging) return badge('good', '⚡', 'Charging');
+  if (ext === true) return badge('good', '⚡', dev.charging === false
+                                   ? 'On mains — charge complete' : 'On mains');
+  if (ext === false) return badge('idle', '▮', 'On battery');
+  if (dev.charging === null && isScale(dev)) {
+    return badge('idle', '?', 'Charge state unknown — no sense pin');
+  }
+  return '';
+}
+
+// See the Charging row above for why this is four states and not two.
+function chargeText(dev, state) {
+  // external_power lives in device_power, not device_overview -- the view it
+  // belongs in is defined in three files that must agree, so it has its own for
+  // now. See supabase/migrate_vbus_sense.sql.
+  const row = (state.power || []).find(p => p.device_id === dev.device_id);
+  const ext = row ? row.external_power : null;
+  if (dev.charging != null) {
+    if (dev.charging) return 'yes';
+    // Not charging AND on mains is the terminated case -- the cell is full and
+    // the charger has stopped, which is worth distinguishing from running down.
+    return ext ? 'no — charged' : 'no';
+  }
+  if (ext == null) return 'unknown — no sense pin';
+  return ext ? 'on mains' : 'on battery';
+}
+
 function weightCard(dev) {
   const w = deviceWeight(dev);
   const stale = deviceOffline(dev);
@@ -555,40 +600,66 @@ function capacityEditor(state, meal, ctx) {
   if (!meal) return null;
   const cur = (state.trialCap || []).find(c => c.meal_type === meal);
 
+  // EVERY ELEMENT IS LOOKED UP FROM THE LIVE DOM AT CLICK TIME, never captured
+  // in the closure, and that is not defensiveness -- it is the bug this had.
+  //
+  // The dashboard re-renders on every poll through morphNode(), which KEEPS the
+  // existing node and swaps in the new render's listeners. So a handler that
+  // closed over the `input` it was built beside was holding the node morph had
+  // just discarded: it read the value the render had put there and never the
+  // one being typed into the element actually on screen. Typing 13 and pressing
+  // Save saved 18, for ever, and the status text was written to a detached node
+  // so the failure was invisible too.
+  //
+  // Looking the elements up through the event target sidesteps it entirely --
+  // whatever node is on screen is the node the handler reads.
+  const wrap = h('div', {
+    dataset: { capEditor: '1' },
+    style: 'margin-top:.6rem;display:flex;gap:.5rem;align-items:center;flex-wrap:wrap',
+  });
+
   const input = h('input', {
     type: 'number', min: '0.1', max: '200', step: '0.1',
     value: cur ? (Number(cur.capacity_g) / 1000).toFixed(1) : '',
     placeholder: 'kg',
+    dataset: { capInput: '1' },
     style: 'width:5.5rem',
   });
-  const note = h('span', { class: 'dim', style: 'font-size:.75rem' }, '');
+  const note = h('span', {
+    class: 'dim', dataset: { capNote: '1' }, style: 'font-size:.75rem',
+  }, '');
 
-  const save = h('button', { class: 'ghost', onclick: async () => {
-    const kg = parseFloat(input.value);
-    if (!(kg > 0)) { note.textContent = 'enter a number of kilograms'; return; }
-    note.textContent = 'saving…';
+  const save = h('button', { class: 'ghost', onclick: async (ev) => {
+    const box = ev.target.closest('[data-cap-editor]');
+    if (!box) return;
+    const live = box.querySelector('[data-cap-input]');
+    const msg = box.querySelector('[data-cap-note]');
+    const kg = parseFloat(live && live.value);
+    if (!(kg > 0)) { if (msg) msg.textContent = 'enter a number of kilograms'; return; }
+    if (msg) msg.textContent = 'saving…';
     try {
       const { error } = await ctx.client
         .from('trial_vessel_capacity')
         .upsert({ meal_type: meal, capacity_g: Math.round(kg * 1000) },
                 { onConflict: 'meal_type' });
       if (error) throw error;
-      note.textContent = 'saved';
-      // Refetch, so the kilograms above this editor are the ones the server
-      // now holds rather than the ones the browser assumed it wrote.
+      if (msg) msg.textContent = 'saved';
+      // Refetch, so the kilograms above are the ones the server now holds
+      // rather than the ones the browser assumed it wrote.
       ctx.refresh();
     } catch (err) {
-      // NAMED, not swallowed. A capacity that silently failed to save would
-      // make every kilogram on this card wrong for everyone else, with the
-      // person who typed it being the one who could not tell.
-      note.textContent = `not saved: ${err.message || err}`;
+      // NAMED, not swallowed. A capacity that silently failed to save makes
+      // every kilogram on this card wrong for everyone else, with the person
+      // who typed it being the only one who cannot tell.
+      if (msg) msg.textContent = `not saved: ${err.message || err}`;
     }
   } }, 'Save');
 
-  return h('div', { style: 'margin-top:.6rem;display:flex;gap:.5rem;align-items:center;flex-wrap:wrap' },
+  wrap.append(
     h('span', { class: 'muted', style: 'font-size:.82rem' },
       `Full vessel at ${meal}:`),
     input, save, note);
+  return wrap;
 }
 
 // ====================================================================

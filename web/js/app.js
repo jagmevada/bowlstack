@@ -331,7 +331,7 @@ async function refresh(manual = false) {
 
   try {
     const [devices, slots, quantity, burn, series, template, trialFill,
-           trialCap] = await Promise.all([
+           trialCap, power] = await Promise.all([
       client.from('device_overview').select('*')
         .order('location', { nullsFirst: false }).order('food_slot', { nullsFirst: false })
         .then(unwrap),
@@ -382,6 +382,11 @@ async function refresh(manual = false) {
       client.from('trial_vessel_capacity').select('*')
         .then(r => (r.error ? [] : r.data || []))
         .catch(() => []),
+      // Mains presence, which device_overview does not carry -- see
+      // supabase/migrate_vbus_sense.sql for why it is its own view for now.
+      client.from('device_power').select('device_id, external_power')
+        .then(r => (r.error ? [] : r.data || []))
+        .catch(() => []),
     ]);
     state.devices = devices || [];
     state.slots = slots || [];
@@ -395,6 +400,7 @@ async function refresh(manual = false) {
     // but one.
     state.trialFill = trialFill || [];
     state.trialCap = trialCap || [];
+    state.power = power || [];
     state.loadedAt = Date.now();
     state.error = null;
   } catch (err) {

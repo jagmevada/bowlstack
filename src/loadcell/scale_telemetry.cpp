@@ -470,6 +470,14 @@ bool patchStatus(const scale::Snapshot &s, uint32_t uptimeSec, uint16_t batteryM
   // indistinguishable from a real answer. See board_waveshare_s3.h section 5.
   o["charging"] = nullptr;
 
+  // MAINS PRESENCE, which is a different fact and one this board CAN read --
+  // the 5k/10k divider on IO10. Sent beside `charging` rather than instead of
+  // it: the charger terminates when the cell fills and 5 V stays present, so
+  // reporting VBUS as charging would claim a charge that finished hours ago.
+  // Without it the dashboard could only say "unreadable" about a station that
+  // was plainly plugged in.
+  o["external_power"] = inputs::externalPower();
+
   // --- TRIAL HARNESS: the manual fill estimate ------------------------------
   // Sent BESIDE the weight, never instead of it. The experiment is the gap
   // between the two, so both have to arrive from the same instant -- and the

@@ -678,7 +678,12 @@ function table(name) {
           for (const r of [].concat(payload)) trialCap.set(r.meal_type, r.capacity_g);
         }
       }
-      if (name === 'trial_vessel_capacity') {
+      if (name === 'device_power') {
+        // Alternating, so the preview shows both "on mains" and "on battery"
+        // rather than only whichever the fixture happened to pick.
+        data = overview.map(d => ({ device_id: d.device_id,
+                                    external_power: (d.i % 2) === 0 }));
+      } else if (name === 'trial_vessel_capacity') {
         data = [...trialCap].map(([meal_type, capacity_g]) => ({ meal_type, capacity_g }));
       } else if (name === 'trial_manual_fill') {
         data = overview.filter(d => d.kind === 'scale' && d.weight_state === 'ok')
