@@ -17,6 +17,7 @@
 begin;
 
 drop view if exists public.trial_fill_vs_weight;
+drop view if exists public.trial_manual_fill;
 
 drop table if exists public.trial_vessel_capacity;
 
@@ -57,4 +58,5 @@ select 'weight_samples columns',
 union all
 select 'trial objects',
        (to_regclass('public.trial_vessel_capacity') is not null)::int
-     + (to_regclass('public.trial_fill_vs_weight') is not null)::int;
+     + (to_regclass('public.trial_fill_vs_weight') is not null)::int
+     + (to_regclass('public.trial_manual_fill') is not null)::int;

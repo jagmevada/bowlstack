@@ -624,6 +624,14 @@ function applyFilters(data, filters) {
   return out;
 }
 
+// TRIAL HARNESS. Demo mode gets the manual estimate too, or the card that
+// compares it against the scale is code the preview can never render -- and a
+// dashboard feature nobody can see without live hardware is one that quietly
+// stops working. The estimate is deliberately WRONG by a couple of kilograms,
+// because a demo showing perfect agreement would misrepresent the very thing
+// the experiment exists to measure.
+const trialCap = new Map([['Breakfast', 18000], ['Lunch', 18000], ['Dinner', 18000]]);
+
 function table(name) {
   const rec = { filters: [], writes: [] };
   const api = {};
@@ -664,7 +672,28 @@ function table(name) {
       if (rec.writes.length) return Promise.resolve({ data: [], error: null }).then(res, rej);
 
       const overview = deviceOverview();
-      if (name === 'device_overview') data = overview;
+      // TRIAL HARNESS -- writes first, same as the tables above.
+      for (const [op, payload] of rec.writes) {
+        if (name === 'trial_vessel_capacity' && op === 'upsert') {
+          for (const r of [].concat(payload)) trialCap.set(r.meal_type, r.capacity_g);
+        }
+      }
+      if (name === 'trial_vessel_capacity') {
+        data = [...trialCap].map(([meal_type, capacity_g]) => ({ meal_type, capacity_g }));
+      } else if (name === 'trial_manual_fill') {
+        data = overview.filter(d => d.kind === 'scale' && d.weight_state === 'ok')
+          .map(d => ({
+            device_id: d.device_id, location: d.location, food_slot: d.food_slot,
+            // Off by roughly a tenth, alternating sign per device, so the card's
+            // signed error shows both directions in the preview.
+            manual_fill_pct: Math.max(0, Math.min(100, Math.round(
+              (d.weight_g / 18000) * 100 + (d.i % 2 ? 8 : -6)))),
+            manual_fill_age_s: (d.i % 3) * 420,
+            weight_state: d.weight_state, weight_g: d.weight_g,
+            updated_at: d.updated_at,
+          }));
+      }
+      else if (name === 'device_overview') data = overview;
       else if (name === 'slot_overview') data = slotOverview(overview);
       else if (name === 'slot_quantity') data = slotQuantityRows(overview);
       else if (name === 'meal_menu_template') data = [...template.values()];

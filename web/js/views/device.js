@@ -111,6 +111,11 @@ export function renderDevice(state, params, ctx) {
   // it. The stack card is built around four levels that a scale does not have,
   // and `dev.levels || ['unknown' x4]` was drawing all four of them striped --
   // a fabricated ladder on a station whose actual reading is a single number.
+  // TRIAL HARNESS: only ever appears on a scale that has actually reported an
+  // estimate, so every other device and every other deployment is untouched.
+  const trial = isScale(dev) ? trialCard(dev, state, ctx) : null;
+  if (trial) grid.append(trial);
+
   grid.append(isScale(dev) ? weightCard(dev) : h('div', { class: 'card' },
     h('div', { class: 'chart-title' }, 'Stack now'),
     h('div', { style: 'display:flex;gap:1.2rem;align-items:center;margin-top:.5rem' },
@@ -462,6 +467,128 @@ function weightCard(dev) {
       'does not add noise, it makes the total read LOW. That is why fewer than ',
       'three reports no weight at all rather than a partial one. Zero is a real ',
       'weight: a tared, empty platform reads 0.0 kg and means refill me.'));
+}
+
+// ====================================================================
+//  TRIAL HARNESS -- the manual estimate against the measured weight.
+//
+//  ##  TEMPORARY. ONE DEVICE. NOT PRODUCTION.  ##
+//
+//  This card is the experiment's readout. LDC-001 has a knob beside its load
+//  cell; the attendant judges the vessel by eye and dials in a percentage,
+//  and the cell keeps weighing the same food independently. What a reviewer
+//  wants is the GAP, so the card shows both figures and the signed error
+//  between them rather than making anyone subtract in their head.
+//
+//  SIGNED, not absolute. People round up, because a full-looking vessel is
+//  the safe answer -- and a systematic lean is the most useful thing in the
+//  dataset. An absolute error would average it away.
+//
+//  Delete this function, its call site, and the two fetches in app.js to
+//  remove the harness from the dashboard.
+// ====================================================================
+function trialCard(dev, state, ctx) {
+  const row = (state.trialFill || []).find(r => r.device_id === dev.device_id);
+  if (!row || row.manual_fill_pct == null) return null;
+
+  const pct = Number(row.manual_fill_pct);
+  const ageS = row.manual_fill_age_s == null ? null : Number(row.manual_fill_age_s);
+  // STALE IS A RESULT, NOT A NUISANCE. An estimate nobody refreshes is the
+  // failure mode a knob-based system actually has, so the card says so rather
+  // than presenting an old number as a current one.
+  const stale = ageS != null && ageS >= 600;
+
+  // Whichever meal is running. The capacity is per meal because the vessel is;
+  // with none set the percentage cannot become kilograms, and the card says
+  // that instead of inventing a denominator.
+  const meal = state.quantity && state.quantity.length
+    ? state.quantity[0].current_meal : null;
+  const capRow = (state.trialCap || []).find(c => c.meal_type === meal);
+  const capG = capRow ? Number(capRow.capacity_g) : null;
+
+  const manualG = capG == null ? null : (pct / 100) * capG;
+  const measuredG = row.weight_state === 'ok' && row.weight_g != null
+    ? Number(row.weight_g) : null;
+  const errG = (manualG != null && measuredG != null) ? manualG - measuredG : null;
+
+  const kg = g => `${(g / 1000).toFixed(1)} kg`;
+
+  const detail = [];
+  detail.push(kv('Estimated', manualG == null
+    ? `${pct}% — no vessel capacity set for ${meal || 'this meal'}`
+    : `${pct}% of ${kg(capG)} = ${kg(manualG)}`));
+  detail.push(kv('Measured', measuredG == null
+    ? `no usable weight (${row.weight_state || 'unknown'})`
+    : kg(measuredG)));
+  if (errG != null) {
+    detail.push(kv('Error', `${errG >= 0 ? '+' : ''}${kg(errG)}`
+      + (measuredG > 0
+          ? ` (${errG >= 0 ? '+' : ''}${((errG / measuredG) * 100).toFixed(0)}%)`
+          : '')));
+  }
+  if (ageS != null) {
+    detail.push(kv('Estimate age', ageS < 60
+      ? `${ageS} s`
+      : `${Math.round(ageS / 60)} min${stale ? ' — overdue' : ''}`));
+  }
+
+  return h('div', { class: 'card' },
+    h('div', { class: 'chart-title' }, 'Trial — knob vs scale'),
+    h('div', { style: 'display:flex;gap:1.4rem;align-items:baseline;margin-top:.5rem' },
+      h('div', { class: 'hero' + (stale ? ' is-offline' : '') }, `${pct}%`),
+      h('div', { class: 'muted', style: 'font-size:.82rem' },
+        manualG == null ? 'set a vessel capacity below' : kg(manualG))),
+    h('dl', { class: 'kv', style: 'margin-top:.7rem' }, ...detail),
+    capacityEditor(state, meal, ctx),
+    h('div', { class: 'dim', style: 'font-size:.75rem;margin-top:.5rem;line-height:1.4' },
+      'Temporary. The knob is a cheap alternative to a load cell and this card ',
+      'is how the two get compared — the estimate feeds nothing, so the stock ',
+      'and burn-rate figures elsewhere remain the measured ones. Error is ',
+      'signed on purpose: a consistent lean one way is the finding, and an ',
+      'absolute value would hide it.'));
+}
+
+// The vessel capacity, per meal, saved SERVER-SIDE so every browser and every
+// reviewer sees the same denominator. A number kept in the page would be a
+// different experiment per laptop.
+function capacityEditor(state, meal, ctx) {
+  if (!meal) return null;
+  const cur = (state.trialCap || []).find(c => c.meal_type === meal);
+
+  const input = h('input', {
+    type: 'number', min: '0.1', max: '200', step: '0.1',
+    value: cur ? (Number(cur.capacity_g) / 1000).toFixed(1) : '',
+    placeholder: 'kg',
+    style: 'width:5.5rem',
+  });
+  const note = h('span', { class: 'dim', style: 'font-size:.75rem' }, '');
+
+  const save = h('button', { class: 'ghost', onclick: async () => {
+    const kg = parseFloat(input.value);
+    if (!(kg > 0)) { note.textContent = 'enter a number of kilograms'; return; }
+    note.textContent = 'saving…';
+    try {
+      const { error } = await ctx.client
+        .from('trial_vessel_capacity')
+        .upsert({ meal_type: meal, capacity_g: Math.round(kg * 1000) },
+                { onConflict: 'meal_type' });
+      if (error) throw error;
+      note.textContent = 'saved';
+      // Refetch, so the kilograms above this editor are the ones the server
+      // now holds rather than the ones the browser assumed it wrote.
+      ctx.refresh();
+    } catch (err) {
+      // NAMED, not swallowed. A capacity that silently failed to save would
+      // make every kilogram on this card wrong for everyone else, with the
+      // person who typed it being the one who could not tell.
+      note.textContent = `not saved: ${err.message || err}`;
+    }
+  } }, 'Save');
+
+  return h('div', { style: 'margin-top:.6rem;display:flex;gap:.5rem;align-items:center;flex-wrap:wrap' },
+    h('span', { class: 'muted', style: 'font-size:.82rem' },
+      `Full vessel at ${meal}:`),
+    input, save, note);
 }
 
 // ====================================================================

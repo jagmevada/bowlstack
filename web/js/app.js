@@ -330,7 +330,8 @@ async function refresh(manual = false) {
   let quantityError = null;
 
   try {
-    const [devices, slots, quantity, burn, series, template] = await Promise.all([
+    const [devices, slots, quantity, burn, series, template, trialFill,
+           trialCap] = await Promise.all([
       client.from('device_overview').select('*')
         .order('location', { nullsFirst: false }).order('food_slot', { nullsFirst: false })
         .then(unwrap),
@@ -371,6 +372,16 @@ async function refresh(manual = false) {
         .select('location, weekday, meal_type, food_slot, food_name')
         .then(r => (r.error ? [] : r.data || []))
         .catch(() => []),
+      // TRIAL HARNESS. Both tolerate absence the same way the others do -- a
+      // database that has not run migrate_manual_fill.sql is the NORMAL case,
+      // not an error, because this is one prototype's experiment and every
+      // other deployment should never have it.
+      client.from('trial_manual_fill').select('*')
+        .then(r => (r.error ? [] : r.data || []))
+        .catch(() => []),
+      client.from('trial_vessel_capacity').select('*')
+        .then(r => (r.error ? [] : r.data || []))
+        .catch(() => []),
     ]);
     state.devices = devices || [];
     state.slots = slots || [];
@@ -379,6 +390,11 @@ async function refresh(manual = false) {
     state.series = series || [];
     state.quantityError = quantityError;
     state.template = template || [];
+    // TRIAL HARNESS -- see supabase/migrate_manual_fill.sql. Empty on every
+    // database that has not opted into the experiment, which is all of them
+    // but one.
+    state.trialFill = trialFill || [];
+    state.trialCap = trialCap || [];
     state.loadedAt = Date.now();
     state.error = null;
   } catch (err) {

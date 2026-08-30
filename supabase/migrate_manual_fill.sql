@@ -139,6 +139,39 @@ create policy trial_capacity_staff on public.trial_vessel_capacity
 
 grant select, insert, update, delete on public.trial_vessel_capacity to authenticated;
 
+-- --- 4b. what the dashboard reads -------------------------------------
+-- ITS OWN VIEW RATHER THAN A WIDER device_overview, and the reason is drift.
+-- device_overview is defined in THREE files -- schema.sql, migrate_loadcell.sql
+-- and weekly_menu_and_offline.sql -- because a live database cannot be rebuilt
+-- and each path has to arrive at the same view. Appending a trial column means
+-- editing all three and keeping them in step, and the last time two of those
+-- copies disagreed the result was a file that could not run at all.
+--
+-- A separate view costs nothing, joins in one line on the dashboard, and is
+-- deleted by the rollback along with everything else.
+create or replace view public.trial_manual_fill as
+select d.device_id,
+       d.location,
+       d.food_slot,
+       s.manual_fill_pct,
+       s.manual_fill_age_s,
+       -- The measured figure travels WITH it, so a screen showing both cannot
+       -- pair an estimate against a weight from a different poll.
+       s.weight_state,
+       s.weight_g,
+       s.updated_at
+  from public.devices d
+  join public.device_status s using (device_id)
+ where d.kind = 'scale';
+
+comment on view public.trial_manual_fill is
+  'TRIAL HARNESS. Current manual estimate beside the current measured weight, '
+  'per scale. Separate from device_overview so the trial can be dropped without '
+  'touching a view that three migration paths all have to agree about.';
+
+revoke all on public.trial_manual_fill from anon, authenticated, public;
+grant select on public.trial_manual_fill to authenticated;
+
 -- --- 5. the comparison ------------------------------------------------
 -- ONE ROW PER SAMPLE THAT HAS BOTH NUMBERS, which is the only shape an error
 -- analysis can use. Rows with one or the other are excluded rather than
