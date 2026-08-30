@@ -617,6 +617,63 @@ void onClearCal() {
   scale::clearCalibration();
 }
 
+// --- backlight ---------------------------------------------------------------
+// DIM AFTER 30 s IDLE, ON BATTERY ONLY, AND NOTHING ELSE CHANGES.
+//
+// The backlight is the only lever here worth pulling. Everything else on this
+// board is already either irreducible or paced: the scale task owns core 1 and
+// must keep converting, the uplink task owns core 0 and must keep posting, and
+// the render loop already sleeps on lv_timer_handler()'s own next-due time --
+// 2 ms floor so it always yields, 20 ms ceiling so touch stays under a frame.
+// That pacing is what took it from 10% of a core to the 3% ui / 9% loop the
+// console reports now, so there is no idle CPU left to reclaim without slowing
+// something that is doing work.
+//
+// SPECIFICALLY NOT DONE, and deliberately: raising that 20 ms ceiling while
+// idle. It looks free and is not. The encoder's TURN is decoded in an ISR and
+// would not care, but the SWITCH is polled in this loop against a 25 ms
+// debounce dwell -- at a 50 ms period a 30 ms tap can fall entirely between two
+// samples and be lost. The knob is the wake control and, once deep sleep
+// arrives, the only wake source this board has. Trading its reliability for a
+// few milliamps of an already-idle core is the wrong side of that bargain.
+//
+// WHAT THIS DOES NOT TOUCH, because the brief was explicit: WiFi, the Supabase
+// posts, and load sensing all run on their own tasks and are not consulted
+// here. Dimming the panel cannot reach them.
+const uint8_t BL_FULL = 200;  // the boot ramp's target -- one definition of "on"
+const uint8_t BL_DIM = 100;   // 50% duty, and PWM duty is very nearly 50% current
+const uint32_t BL_DIM_AFTER_MS = 30000;
+
+uint8_t blLevel_ = BL_FULL;
+
+void serviceBacklight() {
+  // ONE NOTION OF ACTIVITY FOR THE WHOLE UI. lv_display_get_inactive_time() is
+  // already what ui_pages uses to send the screen home after 60 s, and the
+  // encoder now feeds the same counter (see serviceInputs), so the knob keeps
+  // the screen awake exactly as a fingertip does. A second idle timer here
+  // would eventually disagree with that one, and the failure would be a screen
+  // that dims while somebody is using it.
+  const bool idle = lv_display_get_inactive_time(NULL) > BL_DIM_AFTER_MS;
+
+  // ON BATTERY ONLY. The whole point is cell life, and a mains-fed station has
+  // nothing to save -- so it stays readable across the counter all service.
+  //
+  // A board with no VBUS wire reads false here and therefore dims, which is the
+  // right way for this to fail: the unit that cannot tell whether it is on
+  // mains is the unit that should assume it is not.
+  const bool onBattery = !inputs::externalPower();
+
+  const uint8_t want = (idle && onBattery) ? BL_DIM : BL_FULL;
+  if (want == blLevel_) return;  // setBrightness re-programs the LEDC duty
+
+  blLevel_ = want;
+  gfx.setBrightness(want);
+  Serial.printf("backlight: %s (%u/255) -- %s, %s\n",
+                want == BL_FULL ? "full" : "dim",
+                (unsigned)want, idle ? "idle" : "active",
+                onBattery ? "on battery" : "on mains");
+}
+
 // --- panel controls, and what bring-up needs from them ----------------------
 // EVERY EVENT PRINTS. Not because the product wants a chatty console, but
 // because this is the only way to confirm a hand-soldered joint: turn the knob
@@ -639,6 +696,15 @@ uint32_t nextTraceMs_ = 0;
 
 void serviceInputs(uint32_t nowMs) {
   const inputs::Events e = inputs::loop(nowMs);
+
+  // THE KNOB COUNTS AS ACTIVITY, and it has to be said explicitly because LVGL
+  // does not know the encoder exists -- it is not registered as an indev, so
+  // nothing about turning it would otherwise reset the inactivity counter. A
+  // screen that dims and goes home while somebody is turning the knob is the
+  // exact complaint, and it would have been the default.
+  //
+  // Called from this task, which is the one that makes every other lv_* call.
+  if (e.turned || e.pressed) lv_display_trigger_activity(NULL);
 
   if (e.turned) {
     encoderSeen_ = true;
@@ -1003,6 +1069,9 @@ void setup() {
   // charge-sense line is already being read when the battery block prints what
   // it thinks of the charger.
   inputs::begin();
+  Serial.printf("  backlight dims to %u%% after %lu s idle, ON BATTERY ONLY\n",
+                (unsigned)((BL_DIM * 100) / BL_FULL),
+                (unsigned long)(BL_DIM_AFTER_MS / 1000));
   bootMark("inputs");
 
   // --- battery ------------------------------------------------------------
@@ -1079,6 +1148,11 @@ void loop() {
   // -- and rate-limiting it would only add latency to the one input a person is
   // physically waiting on.
   serviceInputs(millis());
+
+  // After serviceInputs, so a turn or a press taken on this pass has already
+  // reset the inactivity counter and the screen comes back on the same frame
+  // rather than the next one.
+  serviceBacklight();
 
   // 20 Hz, matching what the scale task publishes at. Faster would copy the
   // same snapshot repeatedly under a mutex the measuring task wants back.
