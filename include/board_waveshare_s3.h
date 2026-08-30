@@ -304,19 +304,25 @@ static const int8_t CAM_SCCB_SCL = 16;
 // A0/A1/A2 to GND gives 0x70. They have no internal pull-downs in the silicon;
 // most breakouts fit their own, but a floating address pin is an address that
 // moves, so strap them.
-// MOVED TO IO11/IO12, AND THE ONE THING THAT MADE THE OLD PAIR SPECIAL IS GONE
-// WITH IT: R4 and R5, the 4.7k pull-ups the camera connector already carried on
-// IO21/IO16. IO11 and IO12 have none, so THE BUS NEEDS EXTERNAL PULL-UPS -- one
-// 4.7k from each line to 3V3, or a mux breakout that fits its own on the trunk
-// side (most do; check before adding a second pair, since two in parallel make
-// 2.4k and that is a lot of current for a converter to sink).
+// MOVED TO IO12/IO11, AND NOTE THE ORDER -- SDA is 12 and SCL is 11, which is
+// the reverse of how this pair reads left to right on the header. It is a
+// wiring fact, confirmed on the bench: with the two swapped the mux does not
+// answer at all, and with them this way round all three converters ACK at
+// 400 kHz on the first try.
 //
-// Without them the bus does not fail cleanly. It half-works: short wires and a
-// slow clock get away with the pins' own leakage, and the symptom is a
-// converter that NAKs intermittently and reads like a flaky part. That is
-// exactly what happened here before -- see the retired arrangement above, where
-// cell B was bit-banged on this same pair at 100 kHz because 400 kHz produced
-// NAKs. The clock is 400 kHz now, so the resistors are not optional.
+// PULL-UPS COME FROM THE MUX BREAKOUT HERE, and that is luck rather than
+// design. R4 and R5 -- the 4.7k pair the camera connector carries on IO21/IO16
+// -- are the reason that was the better bus, and IO11/IO12 have nothing. The
+// board fitted happens to pull its own trunk up, verified by both lines idling
+// high at boot and by three clean ACKs at full speed.
+//
+// So do NOT add a second pair. Two 4.7k in parallel is 2.4k, which is more
+// current than a converter should have to sink. But a DIFFERENT mux board may
+// not have them, and without pull-ups this bus does not fail cleanly -- short
+// wires get away with the pins' own leakage and the symptom is a converter that
+// NAKs intermittently and reads like a flaky part. That is this pair's actual
+// history: the retired arrangement above ran cell B bit-banged here at 100 kHz
+// precisely because 400 kHz produced NAKs.
 //
 // WHAT IS BETTER ABOUT IT, and it is not nothing: the whole load-cell loom now
 // leaves on P2 -- signals at P2-9/P2-10, power at P2-1/P2-2 -- where the old
@@ -327,8 +333,8 @@ static const int8_t CAM_SCCB_SCL = 16;
 //
 // IO21 and IO16 are free again, and they are the two most valuable free pins on
 // the board: a complete I2C bus with pull-ups already fitted.
-static const int8_t CELL_SDA = 11;  // P2-9   -- NO on-board pull-up, fit 4.7k
-static const int8_t CELL_SCL = 12;  // P2-10  -- NO on-board pull-up, fit 4.7k
+static const int8_t CELL_SDA = 12;  // P2-10  -- NO on-board pull-up, fit 4.7k
+static const int8_t CELL_SCL = 11;  // P2-9   -- NO on-board pull-up, fit 4.7k
 
 static const uint8_t MUX_ADDR = 0x70;  // A0/A1/A2 grounded
 
