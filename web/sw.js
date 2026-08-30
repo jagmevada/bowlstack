@@ -8,7 +8,7 @@
 // Supabase requests are never cached: a stale bowl count is worse than none,
 // and every screen already says how old its data is.
 
-const CACHE = 'bowlstack-shell-v1.40';
+const CACHE = 'bowlstack-shell-v1.41';
 const SHELL = [
   './',
   'index.html',
@@ -57,7 +57,23 @@ self.addEventListener('fetch', event => {
 
   event.respondWith((async () => {
     try {
-      const fresh = await fetch(req);
+      // REVALIDATE, because "network first" was not.
+      //
+      // A bare fetch() inside a service worker still goes through the browser's
+      // HTTP cache, and GitHub Pages serves this site with Cache-Control:
+      // max-age=600. So for ten minutes after every deploy the SW asked for the
+      // file, the HTTP cache answered from its own copy without touching the
+      // network, and the page rendered code that had already been replaced.
+      // It looked exactly like a stale service worker and was not one -- the SW
+      // does skipWaiting() and clients.claim() and was behaving correctly.
+      //
+      // Twice this cost a round trip of "it is deployed" / "it is not showing".
+      //
+      // no-cache REVALIDATES rather than bypassing: the request carries the
+      // ETag, an unchanged file comes back 304 with no body, and a changed one
+      // comes back whole. Correctness with almost none of the bandwidth that
+      // no-store would throw away.
+      const fresh = await fetch(req, { cache: 'no-cache' });
       if (fresh && fresh.ok) {
         const cache = await caches.open(CACHE);
         cache.put(req, fresh.clone());
