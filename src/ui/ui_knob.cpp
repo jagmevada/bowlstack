@@ -35,7 +35,7 @@ const int32_t BOWL_TOP_W = 236;  // the panel's full width, less a hair
 // glyph extents, and a digits-only subset at 100 px comes to 73 -- not the ~125
 // a full face would need. Thirty spare pixels went into the vessel, which is
 // the thing on this page worth making bigger.
-const int32_t BOWL_H = 138;
+const int32_t BOWL_H = 136;
 // 1.6 : 1, top to base, as specified.
 const int32_t BOWL_BASE_W = (int32_t)(BOWL_TOP_W / 1.6f);  // 147
 
@@ -226,6 +226,9 @@ void buildKnob(lv_obj_t *parent) {
   flat(row);
   lv_obj_set_width(row, LV_PCT(100));
   lv_obj_set_height(row, 76);  // font_pct_100 measures 73 -- see ui_font.h
+  // 10 px of air between the vessel and the figure. Paid for by two pixels
+  // off the bowl and the eight that were spare -- see the budget below.
+  lv_obj_set_style_pad_top(row, 10, LV_PART_MAIN);
   lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
   lv_obj_set_style_pad_column(row, 4, LV_PART_MAIN);
   lv_obj_set_flex_align(row, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
