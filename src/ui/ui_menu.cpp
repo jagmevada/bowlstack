@@ -16,8 +16,27 @@ const uint32_t C_KEY = 0x21262D;
 // index rows without counting past the header. Stored on the menu object rather
 // than in a static, so several menus can exist at once -- which they do: the
 // top-level page and the Settings sub-menu are both live.
+// The rows container, which is the last LAID-OUT child rather than simply the
+// last child.
+//
+// menuCreate() returns its parent, so a menu IS the tile it was built on -- and
+// anything added to that tile afterwards becomes the last child. The top-level
+// menu has a floating home button added after it, so this returned the BUTTON:
+// every menuSetHint() then indexed into a button, found one child instead of a
+// row, and early-returned. The Sensors hint has therefore never rendered, and
+// nothing anywhere errored, because failing to write a hint looks exactly like
+// having no hint to write.
+//
+// Skipping IGNORE_LAYOUT children is the right test rather than a count: those
+// are by definition the floating overlays that are not part of the menu's
+// vertical flow, which is what "the rows" means.
 lv_obj_t *rowsOf(lv_obj_t *menu) {
-  return lv_obj_get_child(menu, lv_obj_get_child_count(menu) - 1);
+  const uint32_t n = lv_obj_get_child_count(menu);
+  for (uint32_t i = n; i > 0; i--) {
+    lv_obj_t *c = lv_obj_get_child(menu, (int32_t)(i - 1));
+    if (!lv_obj_has_flag(c, LV_OBJ_FLAG_IGNORE_LAYOUT)) return c;
+  }
+  return lv_obj_get_child(menu, (int32_t)(n - 1));
 }
 
 void onRowClicked(lv_event_t *e) {

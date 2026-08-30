@@ -336,7 +336,7 @@ void touchCb(lv_indev_t *, lv_indev_data_t *data) {
       Serial.printf(
           "\n!! TOUCH IS NOT ANSWERING: a read took %lu us, which is an I2C timeout and\n"
           "   not a touch controller. GPIO47/48 now carry ONLY the touch chip and the IMU\n"
-          "   -- the cells moved behind the mux on GPIO21/16 -- so unlike the two-cell\n"
+          "   -- the cells moved behind the mux on GPIO12/11 -- so unlike the two-cell\n"
           "   build this can no longer be a load cell dragging the bus down. Backing touch\n"
           "   off to one read every %lu ms so the rest of the UI keeps its frame rate.\n\n",
           (unsigned long)took, (unsigned long)TOUCH_BACKOFF_MS);
@@ -740,7 +740,7 @@ void serviceInputs(uint32_t nowMs) {
   if (e.longPress) Serial.println("input: switch LONG press");
   if (e.released) Serial.println("input: switch up");
   // The LED is NOT bound to the switch. It has a real job -- steady on battery,
-  // 1 Hz on mains -- and borrowing it for bring-up feedback would mean the one
+  // a slow fade on mains -- and borrowing it for bring-up feedback would mean
   // indicator on the unit lies about the power state while somebody is
   // deliberately testing the power state. Plugging USB in confirms both the LED
   // and the VBUS divider in one gesture anyway, which is the better test.
@@ -775,8 +775,9 @@ void serviceInputs(uint32_t nowMs) {
 
   // TRIAL: the manual fill estimate. Same cadence and the same reason -- it is
   // a snapshot, and a value pushed only on change goes stale after a rebuild.
-  ui::demoOverrideFill(true, inputs::fillPercent(), inputs::fillReminderDue(),
-                       inputs::fillAgeMs() / 1000);
+  ui::demoOverrideFill(inputs::fillKnown(), inputs::fillPercent(),
+                       inputs::fillReminderDue(),
+                       inputs::fillAgeKnown() ? inputs::fillAgeMs() / 1000 : 0);
   ui::demoOverrideDefaultPage(defaultPage_);
 
   // EVERY PASS, and it was not. This lived only in setup(), so `external_` was
@@ -894,9 +895,10 @@ void serviceConsole() {
             "  i      dump the panel controls: raw pin levels, encoder\n"
             "         position, decoder health, charge and VBUS state\n"
             "  l      status LED: auto -> forced on -> forced off -> auto.\n"
-            "         Auto is steady on battery and 1 Hz on mains, which is\n"
-            "         what says the battery switch is still on when the\n"
-            "         display has blanked\n"
+            "         Auto is steady on battery, a slow fade on mains, and\n"
+            "         5 Hz once the fill estimate is stale. Steady is what\n"
+            "         says the battery switch is still on when the display\n"
+            "         has blanked\n"
             "  w      step the moving average 8 -> 16 -> 32 -> 64 -> 128 -> 8\n"
             "  d      step the reading 0.0 -> 0.00 -> 0.000 kg -> 0.0 (display\n"
             "         only; Diagnose keeps all three places whatever this says)\n"
@@ -963,14 +965,14 @@ void setup() {
     if (!digitalRead(pins[0]) || !digitalRead(pins[1])) {
       Serial.println("  !! THE TOUCH BUS IS HELD LOW, so the screen will not respond either.");
       Serial.println("     Nothing this branch adds lives on GPIO47/48 any more -- the cells");
-      Serial.println("     moved behind the mux on GPIO21/16 -- so suspect the panel cable.");
+      Serial.println("     moved behind the mux on GPIO12/11 -- so suspect the panel cable.");
     }
     if (!digitalRead(pins[2]) || !digitalRead(pins[3])) {
       // ONE STUB CAN DO THIS THROUGH A CLOSED CHANNEL ONLY IF THE MUX IS ALSO
       // WEDGED. Normally a stuck stub is invisible from the trunk, which is the
       // whole point of the switch -- so a trunk held low is the mux itself, or
       // something wired past it.
-      Serial.println("  !! THE CELL TRUNK IS HELD LOW. GPIO21/16 carry the mux and nothing");
+      Serial.println("  !! THE CELL TRUNK IS HELD LOW. GPIO12/11 carry the mux and nothing");
       Serial.println("     else, so this is the mux, its power, or a converter wired");
       Serial.println("     directly to the trunk instead of to a channel.");
     }

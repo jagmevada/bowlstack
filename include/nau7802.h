@@ -2,7 +2,7 @@
 //
 // WRITTEN HERE RATHER THAN PULLED IN, and the reason is the bus rather than the
 // part. Every Arduino NAU7802 library takes a `TwoWire&`, and this board's cell
-// bus is not one: the cells sit on GPIO21/16, reached through `lgfx::i2c`,
+// bus is not one: the cells sit on GPIO12/11, reached through `lgfx::i2c`,
 // which is also what drives the touch controller on the other port. Opening
 // `Wire` anywhere near a port LovyanGFX owns puts two drivers on one
 // peripheral, and config.h already records what that costs -- the touch chip

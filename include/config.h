@@ -52,7 +52,7 @@ static const uint32_t SERIAL_BAUD = 115200;
 // across two buses, cannot be reproduced here. Both entries point at the same
 // pair; the SensorConfig table keeps its shape so nothing above has to know.
 //
-// GPIO21/16 is the camera's SCCB pair: a complete I2C bus with 4.7k pull-ups
+// GPIO12/11 is the camera's SCCB pair: a complete I2C bus with 4.7k pull-ups
 // already fitted (R4, R5) and broken out on header P1, idle because this
 // project will never fit a camera. See docs/waveshare_port.md.
 //

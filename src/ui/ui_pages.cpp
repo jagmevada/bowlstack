@@ -497,7 +497,20 @@ void buildPages() {
 
 void pagesGoHome() {
   closeAll();
-  if (tv_ && tileHome_) lv_tileview_set_tile(tv_, tileHome_, LV_ANIM_OFF);
+  // THE DEFAULT TILE, NOT THE WEIGHT TILE. This was the last of the three
+  // routes still hardcoded, and it is the one that fires on its own.
+  //
+  // With the trial's default set to Knob the device booted blinded and the menu
+  // home button returned there -- so the setting looked correct -- and then
+  // sixty seconds of inactivity dragged the panel to the WEIGHT page and left
+  // it there. The attendant walks back to kilograms, the per-cell breakdown and
+  // a TARE button: precisely the three things the blinded page exists to hide,
+  // and the trial measures them copying the scale's answer from that point on.
+  //
+  // It survived because it LOOKED covered: a third reference to defaultTile()
+  // sits inside `#if UI_AUTO_CYCLE_MS`, which is defined nowhere in the repo,
+  // so that branch is dead and only the boot route was ever live.
+  if (tv_ && defaultTile()) lv_tileview_set_tile(tv_, defaultTile(), LV_ANIM_OFF);
 }
 
 void pagesBack() { back(); }
@@ -607,8 +620,13 @@ void pagesTick(uint32_t nowMs) {
   // current tile still invalidates it, and firing that every frame once idle
   // would be a permanent redraw for no change.
   if (lv_display_get_inactive_time(NULL) > IDLE_HOME_MS) {
+    // Compared against the SAME tile pagesGoHome() will move to. Fixing only
+    // the action would leave this guard permanently false once parked on the
+    // knob page, and lv_tileview_set_tile would then run every frame for the
+    // whole idle period -- the exact permanent redraw the comment above says
+    // this guard exists to prevent.
     const bool home =
-        (depth_ == 0) && (!tv_ || lv_tileview_get_tile_active(tv_) == tileHome_);
+        (depth_ == 0) && (!tv_ || lv_tileview_get_tile_active(tv_) == defaultTile());
     if (!home) pagesGoHome();
   }
 #endif

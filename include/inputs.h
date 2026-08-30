@@ -74,8 +74,23 @@ int32_t storedPosition();  // what is on flash; differs until the next press
 //
 // This is not production code and is meant to be removed. It is one commit.
 uint8_t fillPercent();       // 0..100, one point per detent, clamped
-bool fillReminderDue();      // 10 minutes since the last update
-uint32_t fillAgeMs();        // how stale the estimate is
+
+// Has anybody ever set it, on this unit? False on a freshly flashed board, and
+// 0% is NOT an answer -- it is a claim that the vessel is empty. Callers must
+// publish nothing rather than zero when this is false.
+bool fillKnown();
+
+// Do we know how old the estimate is? False after a restore from NVS and it
+// cannot be otherwise: no RTC, so nothing here can measure wall time across a
+// power cycle. The percentage survives; its age does not.
+bool fillAgeKnown();
+
+uint32_t fillAgeMs();        // meaningless unless fillAgeKnown()
+
+// True once the estimate is older than the reminder interval, AND immediately
+// after a restore, because an age nobody can measure is exactly the case that
+// wants a human to look at the vessel. False when no estimate exists at all.
+bool fillReminderDue();
 bool switchDown();
 bool charging();          // STAT low. Meaningless unless chargeSenseFitted().
 bool externalPower();     // VBUS present

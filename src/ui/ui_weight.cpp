@@ -75,7 +75,15 @@ char prevEnc_[20] = {0};
 // encoder figure beside it -- it is the number the attendant sets and the one
 // the experiment is about, where the detent count is bring-up instrumentation.
 lv_obj_t *lblFill = nullptr;
-char prevFill_[16] = {0};
+// 32, not 16. The stale form is "37%  (14 min old)" -- eighteen characters plus
+// a terminator -- so at 16 the snprintf truncated, the truncated string never
+// equalled the freshly formatted one, and the guard below failed on EVERY frame
+// once the estimate went stale. A label rewritten and invalidated twenty times
+// a second, permanently, on the page most likely to be left open.
+//
+// The buffer that holds a cached string for comparison has to be able to hold
+// the longest string it will ever compare.
+char prevFill_[32] = {0};
 
 // The dot is held for half a second after each press. LVGL's own tick is the
 // clock rather than anything passed in: src/ui/ must compile on a desktop that

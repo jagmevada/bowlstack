@@ -42,6 +42,7 @@ uint32_t encoderPressCount_ = 0;
 
 uint8_t defaultPage_ = 0;
 bool haveFill_ = false;
+bool fillKnown_ = false;
 uint8_t fillPct_ = 0;
 bool fillRemind_ = false;
 uint32_t fillAge_ = 0;
@@ -375,6 +376,7 @@ void demoOverrideDefaultPage(uint8_t page) { defaultPage_ = page; }
 
 void demoOverrideFill(bool known, uint8_t pct, bool remind, uint32_t ageSec) {
   haveFill_ = true;
+  fillKnown_ = known;
   fillPct_ = pct;
   fillRemind_ = remind;
   fillAge_ = ageSec;
@@ -505,7 +507,7 @@ const State &demoLatest(uint32_t nowMs) {
   // its stale-warning are both exercised in the preview -- a fixture that sat
   // at one value would let the layout be checked and not the behaviour.
   if (haveFill_) {
-    latest_.fillKnown = true;
+    latest_.fillKnown = fillKnown_;
     latest_.fillPercent = fillPct_;
     latest_.fillReminderDue = fillRemind_;
     latest_.fillAgeSec = fillAge_;

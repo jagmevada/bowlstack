@@ -150,6 +150,27 @@ const uint32_t FILL_SETTLE_MS = 2000;
 const uint32_t FILL_REMIND_MS = 600000;  // 10 minutes
 uint32_t fillUpdatedAtMs_ = 0;
 
+// TWO DIFFERENT ABSENCES, and collapsing them is how a trial gets poisoned.
+//
+// fillEverSet_ -- has ANYBODY ever turned this knob, on this unit, ever? A
+//   freshly flashed board has no estimate at all, and 0% is not one: it is a
+//   confident claim that the vessel is empty. Published as NULL instead, so the
+//   comparison view excludes the row rather than recording that the attendant
+//   judged a full pot to be empty.
+//
+// fillAgeKnown_ -- do we know HOW OLD the estimate is? After a restore from
+//   NVS the answer is no, and it cannot be yes: this board has no RTC, so
+//   nothing on it can measure wall time across a power cycle. The percentage
+//   survives; its age does not.
+//
+// Treating an unknown age as zero is what made a reboot launder a stale
+// estimate into a fresh one -- LED steady, no amber warning, and ten minutes
+// before anything prompted. So an unknown age counts as OVERDUE: the reminder
+// fires immediately, because "somebody should look at the vessel" is exactly
+// right for a figure carried over from before the power went off.
+bool fillEverSet_ = false;
+bool fillAgeKnown_ = false;
+
 void storeFill() {
   if (fillPct_ == savedFillPct_) { fillDirty_ = false; return; }
   if (!prefs_.begin(NVS_NS, false)) {
@@ -413,7 +434,10 @@ void begin() {
     // TRIAL: the fill estimate survives a power cycle too. A station rebooted
     // mid-service must not come back claiming an empty vessel -- that is a
     // reading somebody would act on.
-    fillPct_ = prefs_.getUChar(KEY_FILLPCT, 0);
+    // isKey(), not a zero default. getUChar returns 0 both for "stored zero"
+    // and "never stored", and those are opposite facts about a vessel.
+    fillEverSet_ = prefs_.isKey(KEY_FILLPCT);
+    fillPct_ = fillEverSet_ ? prefs_.getUChar(KEY_FILLPCT, 0) : 0;
     prefs_.end();
 
     savedPos_ = position_;
@@ -429,7 +453,7 @@ void begin() {
                 board::PIN_ENC_CLK, board::PIN_ENC_DT, board::PIN_ENC_SW);
   Serial.println("           the cell bus moved to P2-9/P2-10, so P1 is all panel now");
   Serial.printf("  LED      GPIO%d (P1-3), active %s -- steady on battery, "
-                "1 Hz on mains\n",
+                "a slow fade on mains, 5 Hz when stale\n",
                 board::PIN_STATUS_LED,
                 board::STATUS_LED_ACTIVE_HIGH ? "HIGH" : "LOW");
   Serial.printf("  charge   GPIO%d (P2-8) STAT, LOW = charging -- %s\n",
@@ -473,11 +497,16 @@ Events loop(uint32_t nowMs) {
       fillPct_ = next;
       fillDirty_ = true;
       fillChangedAtMs_ = nowMs;
+      fillEverSet_ = true;
       // The reminder clock restarts on any movement, including one that lands
       // back where it started -- the attendant has just looked at the vessel,
       // which is the thing the reminder exists to provoke.
     }
     fillUpdatedAtMs_ = nowMs;
+    // A human has just looked at the vessel, which is the only event that makes
+    // the age meaningful.
+    fillAgeKnown_ = true;
+    fillEverSet_ = true;
   }
 
   // Commit once the knob has been still for a moment. Deliberately not on the
@@ -526,8 +555,22 @@ int32_t position() { return position_; }
 int32_t storedPosition() { return savedPos_; }
 
 uint8_t fillPercent() { return fillPct_; }
+bool fillKnown() { return fillEverSet_; }
+bool fillAgeKnown() { return fillAgeKnown_; }
 uint32_t fillAgeMs() { return millis() - fillUpdatedAtMs_; }
-bool fillReminderDue() { return fillAgeMs() >= FILL_REMIND_MS; }
+
+// AN UNKNOWN AGE IS OVERDUE, not fresh. A percentage carried across a power
+// cycle is exactly the case where somebody should walk over and look at the
+// vessel, so the reminder fires from the first second rather than ten minutes
+// into a shift that started with yesterday's number on screen.
+//
+// A knob nobody has ever touched does NOT prompt, because there is nothing to
+// re-confirm and a station with no estimate is not a station with a stale one.
+bool fillReminderDue() {
+  if (!fillEverSet_) return false;
+  if (!fillAgeKnown_) return true;
+  return fillAgeMs() >= FILL_REMIND_MS;
+}
 bool switchDown() { return sw_.level; }
 bool charging() { return stat_.level; }
 bool externalPower() { return vbus_.level; }

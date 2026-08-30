@@ -92,6 +92,7 @@ struct QueuedSample {
   uint16_t batteryMv;
   battery::Level batteryLevel;
   uint8_t manualFillPct;  // TRIAL: captured with the sample, not at flush
+  bool manualFillKnown;
 };
 
 QueuedSample queue_[QUEUE_LEN];
@@ -308,6 +309,7 @@ void enqueue(const scale::Snapshot &s, const char *reason, const char *state,
   e.batteryMv = batteryMv;
   e.batteryLevel = batteryLevel;
   e.manualFillPct = inputs::fillPercent();
+  e.manualFillKnown = inputs::fillKnown();
 
   if (qCount_ == QUEUE_LEN) {
     // Drop the OLDEST and keep the newest. The newest describes the counter as
@@ -361,7 +363,8 @@ bool flushSamples() {
     // stands now. The whole point is pairing it against the weight from the
     // same instant; reading it at flush time would compare an estimate to a
     // measurement made up to an hour earlier.
-    o["manual_fill_pct"] = e.manualFillPct;
+    if (e.manualFillKnown) o["manual_fill_pct"] = e.manualFillPct;
+    else o["manual_fill_pct"] = nullptr;
     o["firmware"] = BOWLSTACK_FW_VERSION;
   }
 
@@ -476,8 +479,19 @@ bool patchStatus(const scale::Snapshot &s, uint32_t uptimeSec, uint16_t batteryM
   // nobody has refreshed for twenty minutes is exactly the failure mode a
   // knob-based system has, and a reviewer needs to be able to exclude those
   // rows -- or count them, which is the more interesting number.
-  o["manual_fill_pct"] = inputs::fillPercent();
-  o["manual_fill_age_s"] = inputs::fillAgeMs() / 1000;
+  // NULL, NOT ZERO, on a knob nobody has turned -- and the database's own
+  // check allows NULL for exactly this. A confident 0 would enter the
+  // comparison as "the attendant judged a loaded vessel to be empty", which is
+  // a data point nobody produced.
+  if (inputs::fillKnown()) o["manual_fill_pct"] = inputs::fillPercent();
+  else o["manual_fill_pct"] = nullptr;
+
+  // And the age is NULL after a restore, because no RTC means it is genuinely
+  // unmeasurable across a power cycle. Sending 0 there told the dashboard an
+  // estimate from before the reboot had just been made.
+  if (inputs::fillKnown() && inputs::fillAgeKnown())
+    o["manual_fill_age_s"] = inputs::fillAgeMs() / 1000;
+  else o["manual_fill_age_s"] = nullptr;
 
   // stack_count, stack_status, levels, sensors_ok and sensors_online are NEVER
   // written. They stay NULL from the row's creation, which is what

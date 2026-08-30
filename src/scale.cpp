@@ -59,7 +59,7 @@ namespace {
 const int CELL_PORT = 1;
 
 // 400 kHz, the same rate the touch controller runs at on the other port. The
-// converters are rated for it, the TCA9548A is rated for it, and GPIO21/16
+// converters are rated for it, the TCA9548A is rated for it, and GPIO12/11
 // carry real 4.7k pull-ups (R4/R5) rather than the ESP32's ~45 kohm internal
 // ones -- which is precisely the thing that forced the old bus B down to 100.
 //
@@ -1213,7 +1213,7 @@ uint8_t scanBus(int port, const char *name, int sda, int scl, uint32_t hz) {
 //
 // THE TRUNK IS SCANNED WITH EVERY CHANNEL CLOSED FIRST, which is what makes the
 // per-channel answers mean anything: if 0x2A shows up on the trunk with the
-// switch shut, a converter is wired straight to GPIO21/16 past the mux, and
+// switch shut, a converter is wired straight to GPIO12/11 past the mux, and
 // every channel would then appear to contain a cell whether it did or not.
 //
 // A channel that reports nothing is a channel with nothing on it OR one whose

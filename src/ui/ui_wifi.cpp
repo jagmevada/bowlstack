@@ -27,6 +27,20 @@ Network nets_[WIFI_MAX_NETWORKS];
 uint8_t netCount_ = 0;
 uint8_t selected_ = 0;
 
+// THE SSID AS IT WAS WHEN THE ROW WAS TAPPED, copied rather than indexed.
+//
+// nets_ is replaced wholesale by every scan, and scans keep running while the
+// passphrase view is open -- they have to, or the list is stale by the time
+// anybody reads it. The rows are ordered by RSSI, so a neighbouring AP drifting
+// a few dBm reorders them. Joining via nets_[selected_] therefore joined
+// whatever now sits at that index, while the label above the keyboard still
+// named the network the technician chose.
+//
+// The failure is silent and blames the wrong thing: the passphrase is correct
+// for the network they picked and wrong for the one attempted, so the device
+// reports a bad password and somebody retypes a key that was right all along.
+char selectedSsid_[33] = {0};
+
 lv_obj_t *viewMain_ = nullptr;
 lv_obj_t *viewPass_ = nullptr;
 lv_obj_t *lblPassSsid_ = nullptr;
@@ -160,7 +174,8 @@ void onNetworkClicked(lv_event_t *e) {
   const uint32_t idx = (uint32_t)(uintptr_t)lv_event_get_user_data(e);
   if (idx >= netCount_) return;
   selected_ = (uint8_t)idx;
-  lv_label_set_text(lblPassSsid_, nets_[selected_].ssid);
+  snprintf(selectedSsid_, sizeof(selectedSsid_), "%s", nets_[selected_].ssid);
+  lv_label_set_text(lblPassSsid_, selectedSsid_);
   lv_textarea_set_text(taPass_, "");
   upper_ = false;
   symbols_ = false;
@@ -175,7 +190,9 @@ void onJoin(lv_event_t *) {
   // Handed to the platform rather than acted on here. ui_wifi draws and
   // collects; it does not know what a radio is -- the same separation that lets
   // this whole page compile and run in the desktop preview.
-  if (onJoin_) onJoin_(nets_[selected_].ssid, pass);
+  // selectedSsid_, not nets_[selected_] -- the list may have been rescanned and
+  // reordered while the passphrase was being typed.
+  if (onJoin_ && selectedSsid_[0]) onJoin_(selectedSsid_, pass);
   showPassView(false);
 }
 

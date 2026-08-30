@@ -27,6 +27,7 @@ const PARTS = [
   ['assign_loadcells.sql', 'each LDC onto the position of its BWL'],
   ['migrate_weight_samples.sql', 'the analog history a scale appends to'],
   ['migrate_burn_rate.sql', 'consumption rate, and when a dish runs out'],
+  ['migrate_manual_fill.sql', 'TRIAL HARNESS -- the manual fill estimate'],
 ];
 
 // The last two were missing until an adversarial pass ran this file into an
@@ -41,6 +42,18 @@ const PARTS = [
 // curve and no burn rate. The device even handles that case gracefully and
 // carries on reporting current state, which is the wrong kind of robust: it
 // means nothing anywhere is red.
+//
+// THE TRIAL MIGRATION IS IN HERE, and leaving it out was nearly expensive. The
+// firmware sends manual_fill_pct on EVERY status PATCH and every history row --
+// not only when a knob is fitted -- and PostgREST answers a column it does not
+// know with 400. So a database built from the documented applier, with this
+// image flashed against it, reports NOTHING: no weight, no state, no battery,
+// no history. The station looks perfect on its own panel and is simply absent
+// from the dashboard.
+//
+// It did not bite here only because the live project had it applied by hand.
+// The first rebuild, second site or staging copy would have found it, and the
+// symptom points at the network rather than at a missing column.
 //
 // ORDER IS LOAD-BEARING. weight_samples needs devices.kind from
 // migrate_loadcell; burn_rate reads weight_samples. They go last, in this

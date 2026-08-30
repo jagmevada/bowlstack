@@ -290,7 +290,7 @@ static const int8_t CAM_SCCB_SCL = 16;
 //   * A third cell would have been a third bus, and there was no third pair
 //     worth having.
 //
-// SO: one hardware bus, one switch, one channel per cell. GPIO21/16 is the
+// SO: one hardware bus, one switch, one channel per cell. GPIO12/11 is the
 // camera's SCCB pair -- a complete I2C bus with 4.7k pull-ups already fitted
 // (R4, R5), broken out on header P1, and idle because this project will never
 // fit a camera. It reaches hardware I2C port 1; port 0 stays LovyanGFX's, and
