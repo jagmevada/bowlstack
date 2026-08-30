@@ -54,7 +54,12 @@ void begin();
 Events loop(uint32_t nowMs);
 
 // --- current state ---------------------------------------------------------
-int32_t position();       // cumulative detents since boot, signed
+// Signed detents -- and NOT "since boot". A press stores the current value to
+// NVS and begin() restores it, so this counts from whatever was last committed.
+// That makes the knob a setting that survives a power cycle rather than a
+// counter that resets whenever somebody unplugs the unit.
+int32_t position();
+int32_t storedPosition();  // what is on flash; differs until the next press
 bool switchDown();
 bool charging();          // STAT low. Meaningless unless chargeSenseFitted().
 bool externalPower();     // VBUS present

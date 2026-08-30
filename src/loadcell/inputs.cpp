@@ -1,5 +1,7 @@
 #include "inputs.h"
 
+#include <Preferences.h>
+
 #include "board_waveshare_s3.h"
 
 namespace inputs {
@@ -93,6 +95,49 @@ volatile uint32_t encEdges_ = 0;
 volatile uint32_t encAborted_ = 0;
 
 int32_t position_ = 0;
+
+// --- the stored position ----------------------------------------------------
+// A press writes the knob's current position to NVS and begin() restores it, so
+// the encoder is a SETTING that survives a power cycle rather than a counter
+// that resets whenever somebody unplugs the unit.
+//
+// ITS OWN NAMESPACE, following what the rest of the firmware already does: WiFi
+// keeps credentials in "bowlstack", the cells keep calibration in "bowlscale".
+// Each subsystem owns one, so clearing a feature's storage cannot disturb
+// another's and a key name cannot collide across two features that know nothing
+// about each other.
+//
+// A PRIVATE Preferences OBJECT, not a shared one. scale.cpp records why: the
+// object is not reentrant and it is opened from a different task there. NVS
+// itself is safe across distinct handles, so a private handle opened and closed
+// around each access is the shape that cannot go wrong.
+const char *NVS_NS = "bowlinput";
+const char *KEY_ENCPOS = "encpos";
+Preferences prefs_;
+
+// What is actually on flash, so a press that changes nothing writes nothing.
+// NVS is flash with a finite endurance, and the switch is a button somebody may
+// well press twice to be sure -- storing the same number again would spend a
+// write cycle recording that nothing happened.
+int32_t savedPos_ = 0;
+bool haveSaved_ = false;
+
+void storePosition() {
+  if (haveSaved_ && position_ == savedPos_) {
+    Serial.printf("input: position %ld already stored\n", (long)position_);
+    return;
+  }
+  if (!prefs_.begin(NVS_NS, false)) {
+    Serial.println("input: NVS unavailable -- knob position will not persist");
+    return;
+  }
+  prefs_.putInt(KEY_ENCPOS, position_);
+  prefs_.end();
+  savedPos_ = position_;
+  haveSaved_ = true;
+  Serial.printf("input: position %ld stored -- next boot starts here\n",
+                (long)position_);
+}
 
 void IRAM_ATTR encIsr() {
   // digitalRead is IRAM_ATTR in this core, so it is safe from an ISR. Both pins
@@ -235,6 +280,24 @@ void begin() {
   attachInterrupt(digitalPinToInterrupt(board::PIN_ENC_CLK), encIsr, CHANGE);
   attachInterrupt(digitalPinToInterrupt(board::PIN_ENC_DT), encIsr, CHANGE);
 
+  // Restored before the first loop() runs, so nothing ever renders the zero
+  // this started at.
+  //
+  // Opened READ-WRITE even though only a read happens here. A namespace that
+  // has never been written does not exist, and opening it read-only fails and
+  // logs an error -- which would make the first boot after flashing look
+  // identical to a corrupt store. Opening read-write creates it, and no flash
+  // is written unless something is put. bringup_wifi.cpp learned this the same
+  // way.
+  if (prefs_.begin(NVS_NS, false)) {
+    position_ = prefs_.getInt(KEY_ENCPOS, 0);
+    prefs_.end();
+    savedPos_ = position_;
+    haveSaved_ = true;
+  } else {
+    Serial.println("input: NVS unavailable -- knob starts at 0, will not persist");
+  }
+
   Serial.println("\n--- panel controls ---");
   Serial.printf("  encoder  CLK GPIO%d (P1-8)  DT GPIO%d (P1-9)  SW GPIO%d (P1-6)\n",
                 board::PIN_ENC_CLK, board::PIN_ENC_DT, board::PIN_ENC_SW);
@@ -251,6 +314,8 @@ void begin() {
                       "as unknown until -DBOWLSTACK_CHARGE_SENSE=1");
   Serial.printf("  vbus     GPIO%d (P1-10) 5k from P1-14 (5V), 10k to GND\n",
                 board::PIN_VBUS_SENSE);
+  Serial.printf("  position %ld restored from NVS -- a press stores the "
+                "current value\n", (long)position_);
 }
 
 Events loop(uint32_t nowMs) {
@@ -275,6 +340,11 @@ Events loop(uint32_t nowMs) {
       e.pressed = true;
       swDownAtMs_ = nowMs;
       longFired_ = false;
+      // ON THE PRESS, not the release, because the press is the moment the
+      // operator feels as committing. It costs an NVS commit -- a few
+      // milliseconds inside the render loop -- which is one dropped frame at
+      // worst, and only on a deliberate button push.
+      storePosition();
     } else {
       e.released = true;
     }
@@ -299,6 +369,7 @@ Events loop(uint32_t nowMs) {
 }
 
 int32_t position() { return position_; }
+int32_t storedPosition() { return savedPos_; }
 bool switchDown() { return sw_.level; }
 bool charging() { return stat_.level; }
 bool externalPower() { return vbus_.level; }
@@ -339,6 +410,10 @@ void dumpState() {
   Serial.printf("  encoder  position %ld detents, %lu edges, %lu partial sequences abandoned\n",
                 (long)position_, (unsigned long)encEdges_,
                 (unsigned long)encAborted_);
+  Serial.printf("  stored   %ld%s\n", (long)savedPos_,
+                position_ == savedPos_
+                    ? " (matches current)"
+                    : "  <- press the knob to store the current value");
   Serial.printf("  switch   %s\n", sw_.level ? "DOWN" : "up");
   Serial.printf("  charging %s%s\n", stat_.level ? "YES" : "no",
                 board::CHARGER_STATUS_READABLE ? "" : "   (mod not declared fitted)");
