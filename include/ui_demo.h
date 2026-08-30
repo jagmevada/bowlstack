@@ -108,4 +108,12 @@ void demoOverrideTime(bool known, uint8_t hh, uint8_t mm);
 // preview is for.
 void demoOverrideCharging(bool known, bool charging);
 
+// The panel knob's position and press count, from whatever is reading the
+// encoder. Platform-specific for the obvious reason -- the desktop has no
+// GPIO -- and installed through the same fixture as everything else, so the
+// simulator renders the row from the product's own code rather than from a
+// second copy of it. Until this is called the fixture supplies a demo value,
+// which is what makes the row visible in `pio run -e sim`.
+void demoOverrideEncoder(int32_t pos, uint32_t pressCount);
+
 }  // namespace ui

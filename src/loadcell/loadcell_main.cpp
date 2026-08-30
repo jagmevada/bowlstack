@@ -629,6 +629,10 @@ void onClearCal() {
 // is UNCONFIRMED, so a board whose controls all work stops talking about them.
 bool encoderSeen_ = false;
 bool switchSeen_ = false;
+// Counts presses for the dashboard's dot. Monotonic and never reset, because
+// the UI detects a press by noticing this MOVED -- see State::encoderPressCount
+// for why an edge cannot be carried as a bool across a 20 Hz snapshot.
+uint32_t pressCount_ = 0;
 bool chargeSeen_ = false;
 bool vbusSeen_ = false;
 uint32_t nextTraceMs_ = 0;
@@ -647,6 +651,7 @@ void serviceInputs(uint32_t nowMs) {
   }
   if (e.pressed) {
     switchSeen_ = true;
+    pressCount_++;
     Serial.println("input: switch DOWN");
   }
   if (e.longPress) Serial.println("input: switch LONG press");
@@ -679,6 +684,11 @@ void serviceInputs(uint32_t nowMs) {
                        : chg ? "on mains, charging"
                              : "on mains, charge complete (STAT released)");
   }
+
+  // Every pass, not only on change: the fixture is a snapshot and a dropped
+  // update would leave the row showing a stale position after a page rebuild.
+  // It costs two stores.
+  ui::demoOverrideEncoder(inputs::position(), pressCount_);
 
   // The heartbeat, and only while something is still unproven.
   const bool allSeen = encoderSeen_ && switchSeen_ && chargeSeen_ && vbusSeen_;

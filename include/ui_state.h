@@ -196,6 +196,28 @@ struct State {
   // separately, so one struct still describes the whole screen and a page can
   // never render half of one instant beside half of another.
   ScaleView scale;
+
+  // --- the panel knob -------------------------------------------------------
+  // Signed detents since boot. Not wrapped, not clamped: the dashboard shows it
+  // raw because the only question it currently answers is "is the encoder
+  // wired", and a figure that had been massaged could not answer it.
+  int32_t encoderPos;
+
+  // A MONOTONIC COUNTER, NOT A `bool pressed`, and the difference is the whole
+  // reason a press ever shows on screen.
+  //
+  // This struct is a SNAPSHOT, pushed at 20 Hz. A tap on a tactile switch is
+  // 30-80 ms of contact, so a boolean sampled every 50 ms lands inside the
+  // press sometimes and outside it others -- the dot would appear for some taps
+  // and not for others, which reads as a flaky switch rather than as a sampling
+  // artefact. A counter cannot miss an edge: whatever the snapshot rate, the UI
+  // sees the number has moved and knows exactly how many presses it missed.
+  //
+  // The 0.5 s the dot stays lit is decided by the UI, not by the platform. How
+  // long a confirmation blink lasts is a presentation question, and pushing a
+  // pre-computed `showDot` across this seam would put a timer in the sensing
+  // task to serve a widget.
+  uint32_t encoderPressCount;
 };
 
 // A sensible zero value: everything unknown, nothing claimed. Used as the

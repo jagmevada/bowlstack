@@ -56,6 +56,23 @@ lv_obj_t *lblFlag;
 lv_obj_t *btnTare;
 lv_obj_t *btnSettings;
 
+// --- the knob row ----------------------------------------------------------
+// One line directly above the action row: a press dot, then the encoder's
+// position. It is bring-up instrumentation on the dashboard, deliberately, and
+// deliberately quiet -- 14 px and muted, the diagnostics tier, so it reads as
+// something to consult rather than something to watch.
+lv_obj_t *potDot = nullptr;
+lv_obj_t *lblPot = nullptr;
+char prevPot_[20] = {0};
+
+// The dot is held for half a second after each press. LVGL's own tick is the
+// clock rather than anything passed in: src/ui/ must compile on a desktop that
+// has no millis(), and lv_tick_get() is the one time source both targets share.
+uint32_t potFlashUntil_ = 0;
+uint32_t prevPressCount_ = 0;
+bool havePress_ = false;
+bool potDotLit_ = false;
+
 void (*onTare_)(void) = nullptr;
 void (*onSettings_)(void) = nullptr;
 
@@ -268,6 +285,36 @@ void buildWeight(lv_obj_t *parent) {
   lv_obj_set_width(gap, LV_PCT(100));
   lv_obj_set_flex_grow(gap, 1);
 
+  // --- the knob row -------------------------------------------------------
+  // Above the buttons, because it is a readout and they are controls, and a
+  // readout that sits below the thing you press gets covered by the hand that
+  // presses it.
+  lv_obj_t *potRow = lv_obj_create(scr);
+  styleFlat(potRow);
+  lv_obj_set_width(potRow, LV_PCT(100));
+  lv_obj_set_height(potRow, 18);
+  lv_obj_set_style_pad_bottom(potRow, 4, LV_PART_MAIN);
+  lv_obj_set_flex_flow(potRow, LV_FLEX_FLOW_ROW);
+  lv_obj_set_style_pad_column(potRow, 8, LV_PART_MAIN);
+  lv_obj_set_flex_align(potRow, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER);
+
+  // THE DOT IS ALWAYS IN THE LAYOUT AND ONLY ITS OPACITY CHANGES. Hiding it
+  // with LV_OBJ_FLAG_HIDDEN would take it out of the flex row, and the position
+  // figure beside it would jump eight pixels left every time the dot expired --
+  // a twitch, twice a second, on the one screen that is watched continuously.
+  potDot = lv_obj_create(potRow);
+  styleFlat(potDot);
+  lv_obj_set_size(potDot, 12, 12);
+  lv_obj_set_style_radius(potDot, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+  lv_obj_set_style_bg_color(potDot, lv_color_hex(C_CELL_FAULT), LV_PART_MAIN);
+  lv_obj_set_style_bg_opa(potDot, LV_OPA_TRANSP, LV_PART_MAIN);
+
+  lblPot = lv_label_create(potRow);
+  lv_obj_set_style_text_font(lblPot, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_set_style_text_color(lblPot, lv_color_hex(C_MUTED), LV_PART_MAIN);
+  lv_label_set_text(lblPot, "pot 0");
+
   // --- the action row -----------------------------------------------------
   // TARE and a way off this page, side by side at the bottom where a thumb
   // reaches. Both are 64 px tall, which is well over the 44 px the menu rows
@@ -326,6 +373,37 @@ void buildWeight(lv_obj_t *parent) {
 void updateWeight(const State &st) {
   const ScaleView &s = st.scale;
   char buf[40];
+
+  // --- the knob row ---------------------------------------------------------
+  if (lblPot != nullptr) {
+    snprintf(buf, sizeof(buf), "pot %ld", (long)st.encoderPos);
+    if (strcmp(buf, prevPot_) != 0) {
+      snprintf(prevPot_, sizeof(prevPot_), "%s", buf);
+      lv_label_set_text(lblPot, buf);
+    }
+
+    // A COUNTER COMPARISON, not an edge on a bool -- see State::encoderPressCount.
+    // havePress_ suppresses the very first frame: the counter starts at zero on
+    // both sides, and without the guard a page rebuilt after the count had
+    // already advanced would flash the dot for a press that happened minutes
+    // ago.
+    if (!havePress_) {
+      havePress_ = true;
+      prevPressCount_ = st.encoderPressCount;
+    } else if (st.encoderPressCount != prevPressCount_) {
+      prevPressCount_ = st.encoderPressCount;
+      potFlashUntil_ = lv_tick_get() + 500;
+    }
+
+    // Signed difference, so this stays correct across the tick counter's wrap
+    // rather than latching the dot on for 49 days once every 49 days.
+    const bool lit = (int32_t)(potFlashUntil_ - lv_tick_get()) > 0;
+    if (lit != potDotLit_) {
+      potDotLit_ = lit;
+      lv_obj_set_style_bg_opa(potDot, lit ? LV_OPA_COVER : LV_OPA_TRANSP,
+                              LV_PART_MAIN);
+    }
+  }
 
   // TWO DISPLAY MODES, and the uncalibrated one is not a degraded version of
   // the other. Without a known mass there is no counts-to-grams factor, so

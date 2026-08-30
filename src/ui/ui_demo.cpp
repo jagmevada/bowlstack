@@ -35,6 +35,10 @@ bool haveCharging_ = false;
 bool chargingKnown_ = false;
 bool charging_ = false;
 
+bool haveEncoder_ = false;
+int32_t encoderPos_ = 0;
+uint32_t encoderPressCount_ = 0;
+
 State base() {
   State s = unknownState();
   for (uint8_t i = 0; i < LEVELS; i++) s.sensorOnline[i] = true;
@@ -353,6 +357,12 @@ void demoOverrideCharging(bool known, bool charging) {
   charging_ = charging;
 }
 
+void demoOverrideEncoder(int32_t pos, uint32_t pressCount) {
+  haveEncoder_ = true;
+  encoderPos_ = pos;
+  encoderPressCount_ = pressCount;
+}
+
 uint8_t demoCount() { return (uint8_t)(sizeof(SCENARIOS) / sizeof(SCENARIOS[0])); }
 const char *demoName(uint8_t i) { return SCENARIOS[i % demoCount()].name; }
 State demoState(uint8_t i) { return SCENARIOS[i % demoCount()].make(); }
@@ -441,6 +451,23 @@ const State &demoLatest(uint32_t nowMs) {
   if (haveCharging_) {
     latest_.chargingKnown = chargingKnown_;
     latest_.charging = charging_;
+  }
+
+  // THE SIMULATOR GETS A MOVING KNOB, and it has to, or the row it renders is
+  // a picture of a widget rather than evidence about one. Without this the
+  // desktop build would show a permanent `pot 0` and a dot that never lights,
+  // so the layout could be checked and the BEHAVIOUR could not -- and the
+  // behaviour is the part with a timer in it.
+  //
+  // One detent every 700 ms and a press every 4 s: slow enough to read, fast
+  // enough that the 500 ms dot is seen to expire between presses rather than
+  // being permanently lit.
+  if (haveEncoder_) {
+    latest_.encoderPos = encoderPos_;
+    latest_.encoderPressCount = encoderPressCount_;
+  } else {
+    latest_.encoderPos = (int32_t)(nowMs / 700) - (int32_t)(nowMs / 4900) * 7;
+    latest_.encoderPressCount = nowMs / 4000;
   }
 
   latest_.uptimeSec = nowMs / 1000;
