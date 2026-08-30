@@ -157,7 +157,23 @@ static const float  BATTERY_DIVIDER_NOMINAL = 3.0f;  // (200k + 100k) / 100k
 // pulls LOW while charging, which is the TP4056-style sense that
 // CHARGING_ACTIVE_LOW = true was written for:
 //
-//     ETA6098 STAT (LED1 cathode) --[10k]-- free GPIO (INPUT_PULLUP)
+//     ETA6098 STAT (LED1 cathode) --[1k]-- free GPIO (INPUT_PULLUP)
+//
+// 1k, NOT the 10k this file used to say. That value fails silently, in the
+// direction that matters. STAT pulled low sits at ~0.15 V; through 10k against
+// the internal pull-up the pin reads
+//
+//     0.15 + 3.15 x 10/55 = 0.72 V     vs  V_IL(max) = 0.25 x VDD = 0.825 V
+//
+// which is 105 mV of margin -- and the margin cannot be bounded, because
+// Espressif specifies R_PU as "-- 45 --" kOhm: a typical with NO minimum and no
+// maximum. A part whose pull-up comes in below ~36.7k reads HIGH instead, and
+// HIGH means "not charging". A unit would report not-charging while charging,
+// on some boards and not others, with nothing anywhere indicating a fault.
+//
+// 1k gives 0.22 V and breaks only below 3.67k, which nothing plausible
+// violates. It also caps fault current at 3.3 mA if the pin is ever driven
+// high by mistake.
 //
 // Note this inverts the sense used on the discrete board, where the pin is
 // HIGH while charging.
@@ -311,28 +327,56 @@ static const uint8_t NAU7802_ADDR = 0x2A;
 // number is what the firmware needs and they are not interchangeable. See the
 // P2 correction in section 7 for why that distinction is written down twice.
 //
-// The whole allocation lives on P2-8..P2-13, six contiguous positions ending on
-// a ground pin:
+// ON P1, BECAUSE THAT IS WHERE THE ENCODER PHYSICALLY IS. An earlier version of
+// this put the knob on P2, which is the better electrical answer -- P2's free
+// run ends on a ground pin, and P1's abuts CELL_SCL. It lost to the loom: the
+// encoder is a panel part on a short harness, and routing it to the far header
+// to save an argument about ADC channels nobody is using is how a prototype
+// acquires a wire that gets snagged.
 //
-//     P2-8   IO13   charge sense (STAT)      flying lead to LED1 cathode
-//     P2-9   IO11   status LED               \
-//     P2-10  IO12   encoder CLK               |  one 5-way 0.1" housing,
-//     P2-11  IO14   encoder DT                |  no crossovers, GND outermost
-//     P2-12  IO9    encoder SW               /
-//     P2-13  GND    encoder common, switch return, LED cathode
+//     P1-1   IO2    encoder CLK              \  three contiguous positions
+//     P1-2   IO4    encoder DT                |  butted against the physical
+//     P1-3   IO6    encoder SW               /   end of the header
+//     P1-5   IO17   status LED               (see below -- it can do nothing else)
+//     P1-10  IO10   VBUS sense               4.7k from P1-14, 10k to GND
+//     P1-13  GND    encoder common, switch return, LED cathode
 //
-// P2-7 (IO15) IS DELIBERATELY LEFT EMPTY. It is a one-pitch physical guard
-// between the touch/IMU bus at P2-5/6 and everything added here -- the bus
-// section 3 argues should never share a failure domain with off-board parts.
+//     P2-8   IO13   charge sense (STAT)      lone flying lead to LED1 cathode
 //
-// Charge sense is deliberately NOT in the encoder's housing. The knob is a
-// panel part and will be unplugged; charge sense is board-side and should not
-// come away with it.
-static const int8_t PIN_ENC_CLK    = 12;  // P2-10
-static const int8_t PIN_ENC_DT     = 14;  // P2-11
-static const int8_t PIN_ENC_SW     = 9;   // P2-12
-static const int8_t PIN_STATUS_LED = 11;  // P2-9
+// THE HOUSING GOES AT THE END OF THE HEADER, at P1-1, and that placement is
+// load-bearing rather than tidy. P1-4 is CELL_SCL. A three-way shell that slid
+// one position inboard would put the encoder's switch on the load-cell clock
+// line -- so it is butted against the board edge where it cannot slide out, and
+// an inboard error leaves a visible empty position at P1-1.
+//
+// WHAT THIS SPENDS: IO2, IO4 and IO6 are ADC1_CH1/CH3/CH5, and ADC1 is the only
+// ADC usable while WiFi is up. Three of its channels now carry contact inputs.
+// That is a real cost and it is accepted knowingly: the load cells have their
+// own converters, the battery has GPIO5, and nothing in this product has ever
+// wanted another analog input. IO7, IO8 and IO9 remain if that changes.
+//
+// Charge sense is deliberately NOT in the encoder's housing, and on the other
+// header. The knob is a panel part and will be unplugged; charge sense is a
+// board-side lead to a component pad and must not come away with it.
+static const int8_t PIN_ENC_CLK    = 2;   // P1-1
+static const int8_t PIN_ENC_DT     = 4;   // P1-2
+static const int8_t PIN_ENC_SW     = 6;   // P1-3
 static const int8_t PIN_CHARGE_STAT = 13; // P2-8, ETA6098 STAT, LOW = charging
+
+// GPIO17 AND ONLY GPIO17, because it is the one pin that can do nothing else.
+// R6 is a 10k pull-down from this net to GND, which against the internal
+// pull-up divides to 3.3 x 10/55 = 0.60 V -- below V_IL, so an INPUT_PULLUP
+// here reads a hard LOW whatever is connected. It is not a weak input, it is a
+// pin with no input at all. As a push-pull output it is perfectly good, so the
+// allocation spends it on the one signal that is an output and keeps every
+// usable input pin free.
+//
+// Two side effects of R6, both benign and both worth knowing. It holds the pin
+// low through reset, so the LED is dark from power-on until firmware drives it
+// -- no boot flash. And it wastes 330 uA whenever the LED is lit, on top of the
+// LED's own current, which is a ~16% overhead on an indicator that exists to
+// burn while the display is off.
+static const int8_t PIN_STATUS_LED = 17;  // P1-5
 
 // VBUS presence, and it answers a DIFFERENT QUESTION from PIN_CHARGE_STAT.
 // STAT says "current is going into the cell"; this says "the unit is on mains".
@@ -340,21 +384,38 @@ static const int8_t PIN_CHARGE_STAT = 13; // P2-8, ETA6098 STAT, LOW = charging
 // releases, and 5 V is still there. Publishing VBUS as `charging` would
 // therefore claim a charge that finished hours ago.
 //
-//     P1-14 (5V) --[4.7k]-- P1-10 (IO10), INPUT_PULLDOWN
+//     P1-14 (5V) --[5k]--+-- P1-10 (IO10), INPUT_PULLDOWN
+//                        |
+//                     [10k]
+//                        |
+//                       GND
 //
-// 4.7k RATHER THAN 10k, and the reason is the pull-down's tolerance rather than
-// the clamp current -- which the larger resistor would actually favour. The
-// internal pull-down is ~45k typical but not tightly specified. If it comes in
-// low, the ESD clamp never engages and the pin is a plain divider:
+// A REAL DIVIDER, both legs external. That is what makes this sound rather than
+// merely survivable, and the difference is worth stating because the tempting
+// version -- one series resistor into the internal pull-down -- is neither.
 //
-//     pull-down 10k, series 10k:  5 x 10/20 = 2.50 V   <- V_IH is 2.48 V
-//     pull-down 10k, series 4.7k: 5 x 10/14.7 = 3.40 V
-//     pull-down 45k, series 4.7k: clamps ~3.8 V at 0.25 mA
+//     5 x 10/15                    = 3.33 V   divider alone
+//     5 x (10||45)/(5 + 10||45)    = 3.10 V   with the internal pull-down too
+//     5 x (10||20)/(5 + 10||20)    = 2.86 V   even at a 20k internal pull-down
 //
-// 10k has a corner where HIGH is a coin flip. 4.7k does not. The clamped case
-// sits 0.2 V over the datasheet's absolute maximum at a quarter of a
-// milliamp -- fine on a bench prototype, and something to replace with a proper
-// divider before it goes near a production run.
+// Every case clears V_IH (2.48 V) and sits under the 3.6 V absolute maximum, so
+// the ESD clamp is never called on and no current is injected into the 3V3 rail.
+//
+// WHY NOT ONE RESISTOR INTO THE INTERNAL PULL-DOWN. Because that resistance is
+// published as "-- 45 --" kOhm: a typical with no minimum and no maximum. Sized
+// for 3.0 V against 45k, the same resistor gives 2.0 V at 20k (reads LOW, misses
+// mains entirely) and 4.1 V at 100k (over the maximum, clamping into the rail).
+// There is no single value that is correct across the tolerance, which is the
+// whole reason the lower leg has to be a resistor somebody chose.
+//
+// INPUT_PULLDOWN is kept rather than plain INPUT. It is redundant against the
+// external resistor by design -- if that one is ever knocked off, the pin still
+// reads a definite LOW instead of floating and reporting mains power that is
+// not there.
+//
+// 5k above the divider rather than 10k: with the 10k lower leg fitted, 5k puts
+// the node at 3.33 V where 10k would put it at 2.50 V -- and V_IH is 2.48 V,
+// which is not a margin, it is a coin flip.
 static const int8_t PIN_VBUS_SENSE = 10;  // P1-10
 
 // Active HIGH: GPIO -> 220R -> LED anode, cathode to GND at P2-13.
@@ -371,8 +432,8 @@ static const bool STATUS_LED_ACTIVE_HIGH = true;
 // that is worth knowing before the power-management work starts rather than
 // after. The touch controller cannot do it: TP_INT is GPIO46, which is outside
 // the S3's RTC_GPIO range (0-21) AND whose net reaches no header, so it can
-// neither be used for EXT0 nor re-routed to a pin that could. IO9 is RTC-
-// capable, so SW can wake the chip; IO12 and IO14 are too, if turning the knob
+// neither be used for EXT0 nor re-routed to a pin that could. IO6 is RTC-
+// capable, so SW can wake the chip; IO2 and IO4 are too, if turning the knob
 // should also wake it.
 static const bool ENC_SW_IS_WAKE_CAPABLE = true;
 

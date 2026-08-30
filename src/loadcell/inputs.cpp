@@ -145,9 +145,11 @@ void begin() {
   // arithmetic showing VBAT cannot push this pin above the rail.
   pinMode(board::PIN_CHARGE_STAT, INPUT_PULLUP);
 
-  // PULL-DOWN, not pull-up: this pin is fed from 5 V through 4.7k and the
-  // pull-down is the other half of that divider. Configuring it INPUT_PULLUP by
-  // mistake would fight the source and read high forever.
+  // PULL-DOWN, not pull-up. An external 5k/10k divider already sets the level,
+  // so this one is redundant BY DESIGN: if the 10k leg is ever knocked off the
+  // prototype, the pin still reads a definite LOW rather than floating and
+  // reporting mains power that is not connected. INPUT_PULLUP here would fight
+  // the 5 V source and read high forever.
   pinMode(board::PIN_VBUS_SENSE, INPUT_PULLDOWN);
 
   pinMode(board::PIN_STATUS_LED, OUTPUT);
@@ -164,9 +166,9 @@ void begin() {
   attachInterrupt(digitalPinToInterrupt(board::PIN_ENC_DT), encIsr, CHANGE);
 
   Serial.println("\n--- panel controls ---");
-  Serial.printf("  encoder  CLK GPIO%d (P2-10)  DT GPIO%d (P2-11)  SW GPIO%d (P2-12)\n",
+  Serial.printf("  encoder  CLK GPIO%d (P1-1)  DT GPIO%d (P1-2)  SW GPIO%d (P1-3)\n",
                 board::PIN_ENC_CLK, board::PIN_ENC_DT, board::PIN_ENC_SW);
-  Serial.printf("  LED      GPIO%d (P2-9), active %s\n", board::PIN_STATUS_LED,
+  Serial.printf("  LED      GPIO%d (P1-5), active %s\n", board::PIN_STATUS_LED,
                 board::STATUS_LED_ACTIVE_HIGH ? "HIGH" : "LOW");
   Serial.printf("  charge   GPIO%d (P2-8) STAT, LOW = charging -- %s\n",
                 board::PIN_CHARGE_STAT,
@@ -174,7 +176,7 @@ void begin() {
                     ? "mod fitted, will be published"
                     : "NOT declared fitted; sensed and printed here, published "
                       "as unknown until -DBOWLSTACK_CHARGE_SENSE=1");
-  Serial.printf("  vbus     GPIO%d (P1-10) via 4.7k from P1-14 (5V)\n",
+  Serial.printf("  vbus     GPIO%d (P1-10) 5k from P1-14 (5V), 10k to GND\n",
                 board::PIN_VBUS_SENSE);
 }
 
@@ -265,8 +267,9 @@ void dumpState() {
   // so the console answers the question rather than just posing it.
   if (encEdges_ == 0) {
     Serial.println("  !! no quadrature edges at all -- CLK/DT are not moving.");
-    Serial.println("     Check the encoder's ground and that CLK/DT are on");
-    Serial.println("     P2-10 and P2-11, NOT the positions the old pinout gave.");
+    Serial.println("     Check the encoder's ground at P1-13 and that CLK/DT");
+    Serial.println("     are on P1-1 and P1-2 -- P1-4 is CELL_SCL, so a housing");
+    Serial.println("     slid one position inboard breaks the load cells too.");
   } else if (encInvalid_ > encEdges_ / 4) {
     Serial.println("  !! a quarter of transitions rejected -- bouncing badly.");
     Serial.println("     A bare EC11 on internal pull-ups alone can do this;");
