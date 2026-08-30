@@ -19,6 +19,7 @@ import { h, empty, levelColumn, cellColumn, banner, batteryBar } from '../ui.js'
 import {
   compareDevices, deviceSeverity, deviceStack, deviceGlyph, deviceWeight, isScale,
   deviceOffline, fmtRelative,
+  powerState,
 } from '../domain.js';
 
 // `fault` and `degraded` are DIFFERENT failures and get different filters —
@@ -152,7 +153,7 @@ export function renderHealth(state, params) {
 
   if (live.length) {
     const list = h('div', { class: 'dev-list compact' });
-    for (const d of live) list.append(deviceRow(d));
+    for (const d of live) list.append(deviceRow(d, state.power));
     frag.append(h('div', { class: 'section' },
       h('div', { class: 'section-head' },
         h('h2', {}, searching ? 'Matches' : active === 'all' ? 'Deployed' : FILTERS[active].label),
@@ -164,7 +165,7 @@ export function renderHealth(state, params) {
 
   if (waiting.length && waitingShown) {
     const list = h('div', { class: 'dev-list compact' });
-    for (const d of waiting) list.append(deviceRow(d));
+    for (const d of waiting) list.append(deviceRow(d, state.power));
     frag.append(h('div', { class: 'section' },
       h('div', { class: 'section-head' },
         h('h2', { class: 'muted' }, 'Awaiting deployment'),
@@ -193,7 +194,10 @@ function miniLevels(levels) {
 // Everything the old badge stack said now rides the tooltip; the device page
 // says it in full sentences. The full device_id stays (this is the roster
 // someone searches), the position compresses to D3-style.
-function deviceRow(d) {
+// `power` threaded in rather than reached for: this is called from two
+// places and neither had state in scope, which is why the chip here kept
+// the old behaviour after the Power card was fixed.
+function deviceRow(d, power) {
   const sev = deviceSeverity(d);
   const scale = isScale(d);
   // Same six columns whichever product this is, so the roster stays a single
@@ -201,11 +205,15 @@ function deviceRow(d) {
   // laid itself out differently would break the alignment the whole page is.
   const reading = scale ? deviceWeight(d) : deviceStack(d);
   const g = deviceGlyph(d);
+  // Same omission the Stock chips had: the charge state was appended only when
+  // `charging` was truthy, and that is null on every board without the STAT
+  // mod -- so a plugged-in unit's tooltip mentioned power not at all.
+  const pw = powerState(d, power);
   const battWord = d.battery_level == null
     ? 'no battery detected'
     : `battery ${d.battery_level}`
       + `${d.battery_mv ? ` (${d.battery_mv} mV)` : ''}`
-      + `${d.charging ? ' — charging' : ''}`;
+      + ` — ${pw.word}`;
   const title = [
     sev.reasons.join(' · ') || 'Healthy',
     d.updated_at ? `updated ${fmtRelative(d.updated_at)}` : 'never reported',
@@ -239,5 +247,5 @@ function deviceRow(d) {
     }, reading.text),
     d.awaiting_deployment
       ? h('span', { class: 'batt-slot', 'aria-hidden': 'true' })
-      : batteryBar(d.battery_level, d.charging, battWord));
+      : batteryBar(d.battery_level, pw.powered, battWord));
 }

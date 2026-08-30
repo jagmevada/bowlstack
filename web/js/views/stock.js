@@ -17,6 +17,7 @@ import {
   deviceWeight, isScale,
   deviceGlyph, deviceOffline, slotOffline, weekdayOf, serviceDate,
   fmtClock, fmtRelative, serviceState, fmtWeight,
+  powerState,
 } from '../domain.js';
 
 export function renderStock(state) {
@@ -94,7 +95,8 @@ export function renderStock(state) {
     // the status palette (red/green/amber carry meaning; these carry place).
     const grid = h('div', { class: 'slot-grid' });
     for (const sl of rows) {
-      grid.append(slotCard(sl, byPosition.get(`${loc}|${sl.food_slot}`) || [],
+      grid.append(slotCard(state.power, sl,
+        byPosition.get(`${loc}|${sl.food_slot}`) || [],
         inService, tz, state.template || []));
     }
     frag.append(h('section', { class: `area area-${loc}` },
@@ -107,7 +109,7 @@ export function renderStock(state) {
   return frag;
 }
 
-function slotCard(sl, stacks, inService, tz, template) {
+function slotCard(power, sl, stacks, inService, tz, template) {
   const stock = slotStock(sl);
 
   // The server's flags are the authority; the per-device rows only quantify
@@ -257,11 +259,16 @@ function slotCard(sl, stacks, inService, tz, template) {
     for (const d of stacks.sort((a, b) => a.device_id.localeCompare(b.device_id))) {
       const st = isScale(d) ? deviceWeight(d) : deviceStack(d);
       const g = deviceGlyph(d);
+      // THE TOOLTIP SAID "battery good" ON A UNIT THAT WAS PLUGGED IN, because
+      // it appended the charge state only when `charging` was truthy -- and
+      // that is null on every board without the STAT mod. So the one surface
+      // that could have said "on mains" said nothing at all.
+      const pw = powerState(d, power);
       const battWord = d.battery_level == null
         ? 'no battery detected'
         : `battery ${d.battery_level}`
           + `${d.battery_mv ? ` (${d.battery_mv} mV)` : ''}`
-          + `${d.charging ? ' — charging' : ''}`;
+          + ` — ${pw.word}`;
       strip.append(h('a', {
         class: 'dev-line',
         href: `#/device/${encodeURIComponent(d.device_id)}`,
@@ -278,7 +285,7 @@ function slotCard(sl, stacks, inService, tz, template) {
         // kind of thing.
         h('span', { class: 'id' }, d.device_id),
         h('span', { class: 'ct' }, st.text),
-        batteryBar(d.battery_level, d.charging, `${d.device_id}: ${battWord}`)));
+        batteryBar(d.battery_level, pw.powered, `${d.device_id}: ${battWord}`)));
     }
     card.append(strip);
   }

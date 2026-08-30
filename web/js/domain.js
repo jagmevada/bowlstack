@@ -42,6 +42,30 @@ export const SERVICE_WINDOWS = [
 // was detected, which is not the same as flat and must never render as
 // an empty battery.
 
+// POWER STATE FROM THE TWO FACTS THAT CARRY IT, in one place, because doing it
+// per-surface is how the Master chips kept a stale tooltip and no bolt for a
+// day after the Health page was fixed.
+//
+//   charging        the ETA6098's STAT pin -- unreadable without the mod, so
+//                   usually null, and null is NOT "no"
+//   external_power  the VBUS divider -- known on every board that has it
+//
+// `powered` drives the bolt: it means "this unit is on mains", which is what a
+// bolt means on a phone and is still true at 100%. `word` is the tooltip, and
+// it never claims a charge it cannot see.
+export function powerState(dev, powerRows) {
+  const row = (powerRows || []).find(p => p.device_id === dev.device_id);
+  const ext = row ? row.external_power : null;
+  const chg = dev.charging;
+
+  if (chg === true) return { powered: true, word: 'charging' };
+  if (chg === false && ext === true) return { powered: true, word: 'on mains, charge complete' };
+  if (chg === false) return { powered: false, word: 'not charging' };
+  if (ext === true) return { powered: true, word: 'on mains' };
+  if (ext === false) return { powered: false, word: 'on battery' };
+  return { powered: false, word: 'charge state unknown' };
+}
+
 const BATTERY = {
   good:     { label: 'Battery good',     status: 'good',     glyph: '▮' },
   medium:   { label: 'Battery medium',   status: 'good',     glyph: '▮' },
