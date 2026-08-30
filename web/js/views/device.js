@@ -566,10 +566,31 @@ function trialCard(dev, state, ctx) {
     ? `no usable weight (${row.weight_state || 'unknown'})`
     : kg(measuredG)));
   if (errG != null) {
-    detail.push(kv('Error', `${errG >= 0 ? '+' : ''}${kg(errG)}`
-      + (measuredG > 0
-          ? ` (${errG >= 0 ? '+' : ''}${((errG / measuredG) * 100).toFixed(0)}%)`
-          : '')));
+    // A PERCENTAGE OF ALMOST NOTHING IS NOT A PERCENTAGE. Divide a 9 kg
+    // discrepancy by a scale reading 4 g and you get +224900%, which is
+    // arithmetically correct and useless to everyone -- it says nothing about
+    // the attendant's judgement and everything about the denominator.
+    //
+    // Two ways to get there and both are real: the counter is idle with no
+    // vessel on it, or somebody set the full-vessel capacity wrong. Neither is
+    // a measurement of estimation error, so neither earns a precise-looking
+    // number.
+    //
+    // Below the floor the ratio is not reported at all -- the kilograms still
+    // are, because those remain true. Above it, anything past 100% is shown as
+    // a bound: beyond that the exact figure carries no information a person
+    // would act on differently.
+    const EMPTY_FLOOR_G = 200;
+    let pctText = '';
+    if (measuredG != null && measuredG < EMPTY_FLOOR_G) {
+      pctText = ' — scale reads empty, so a ratio would be meaningless';
+    } else if (measuredG > 0) {
+      const pct = (errG / measuredG) * 100;
+      pctText = pct > 100 ? ' (>+100%)'
+              : pct < -100 ? ' (<-100%)'
+              : ` (${pct >= 0 ? '+' : ''}${pct.toFixed(0)}%)`;
+    }
+    detail.push(kv('Error', `${errG >= 0 ? '+' : ''}${kg(errG)}${pctText}`));
   }
   if (ageS != null) {
     detail.push(kv('Estimate age', ageS < 60

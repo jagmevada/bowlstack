@@ -193,10 +193,26 @@ select s.device_id,
        -- an absolute value.
        (s.manual_fill_pct::numeric / 100) * c.capacity_g - s.weight_g
                                                           as error_g,
-       case when s.weight_g > 0
+       -- NULL BELOW A FLOOR, because a percentage of almost nothing is not a
+       -- percentage. A 9 kg discrepancy against a scale reading 4 g is
+       -- +224900%: arithmetically right, and a statement about the denominator
+       -- rather than about anybody's judgement.
+       --
+       -- Two ways to reach it and both are real -- an idle counter with no
+       -- vessel on it, or a full-vessel capacity somebody set wrong. Neither is
+       -- an estimation error, and leaving them in would wreck any mean taken
+       -- over this column: one such row outweighs a thousand honest ones.
+       --
+       -- error_g is still reported for those rows. The kilograms remain true;
+       -- only the ratio stops meaning anything.
+       case when s.weight_g >= 200
             then round((((s.manual_fill_pct::numeric / 100) * c.capacity_g
                          - s.weight_g) / s.weight_g) * 100, 1)
-       end                                                as error_pct
+       end                                                as error_pct,
+       -- So the exclusion is visible rather than looking like missing data, and
+       -- so "how often was the counter idle when an estimate was standing?" is
+       -- itself answerable -- which is a result about how the knob gets used.
+       (s.weight_g < 200)                                 as scale_near_empty
   from public.weight_samples s
   join public.devices d on d.device_id = s.device_id
   left join public.trial_vessel_capacity c
