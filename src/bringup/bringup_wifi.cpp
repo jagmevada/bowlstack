@@ -308,6 +308,19 @@ int8_t pickFromScan(int16_t n) {
         if (!credentialAt(s, &ssid, &pass)) continue;
         Serial.printf("wifi:   '%s' NOT visible\n", ssid);
       }
+      // AND WHAT *IS* ON AIR, because "not visible" on its own cannot tell a
+      // network that is absent from one whose name does not match byte for
+      // byte. An SSID is case sensitive and may carry a trailing space, and
+      // neither shows up on a phone's hotspot screen -- so the LENGTH is
+      // printed beside the name. 'Unodari' is 7; if the line below says 8, the
+      // name has something on the end of it.
+      Serial.printf("wifi: %d on air:\n", (int)n);
+      for (int16_t i = 0; i < n; i++) {
+        const String seen = WiFi.SSID(i);
+        Serial.printf("wifi:   '%s' (%u chars, %d dBm, ch %d%s)\n", seen.c_str(),
+                      (unsigned)seen.length(), (int)WiFi.RSSI(i), (int)WiFi.channel(i),
+                      WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? ", open" : "");
+      }
       Serial.println("wifi: Menu > Settings > WiFi to pick one from the list");
     } else {
       // Every visible candidate has now been tried and refused. Start the walk
