@@ -622,7 +622,13 @@ window.addEventListener('resize', () => {
   if (Math.abs(window.innerWidth - lastWidth) < 24) return;
   lastWidth = window.innerWidth;
   clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(() => { if (!el.app.hidden) render(); }, 200);
+  // render(false), NOT render(). The default is forced=true, which is exactly
+  // what the EDITABLE poll-suppression guard above exists to avoid -- so a
+  // tablet rotation, a desktop drag or a zoom step reverted whatever was typed
+  // into an unsaved Menu or Devices form AND cleared the flag protecting it.
+  // The pixel-sized SVG figures this handler exists for live on stock, master,
+  // health and device, none of which are editable, so they still re-render.
+  resizeTimer = setTimeout(() => { if (!el.app.hidden) render(false); }, 200);
 });
 
 // --- fleet diagnostics -------------------------------------------------

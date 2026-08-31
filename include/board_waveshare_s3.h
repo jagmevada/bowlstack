@@ -290,11 +290,17 @@ static const int8_t CAM_SCCB_SCL = 16;
 //   * A third cell would have been a third bus, and there was no third pair
 //     worth having.
 //
-// SO: one hardware bus, one switch, one channel per cell. GPIO12/11 is the
-// camera's SCCB pair -- a complete I2C bus with 4.7k pull-ups already fitted
-// (R4, R5), broken out on header P1, and idle because this project will never
-// fit a camera. It reaches hardware I2C port 1; port 0 stays LovyanGFX's, and
-// GPIO47/48 now carry nothing but the touch chip and the IMU again.
+// SO: one hardware bus, one switch, one channel per cell. GPIO12/11 is broken
+// out on header P2 -- SDA on P2-10, SCL on P2-9 -- and reaches hardware I2C
+// port 1; port 0 stays LovyanGFX's, and GPIO47/48 now carry nothing but the
+// touch chip and the IMU again.
+//
+// NO ON-BOARD PULL-UPS ON THIS PAIR. The trunk gets them from the mux breakout.
+// This paragraph used to describe GPIO12/11 as the camera's SCCB pair "with
+// 4.7k already fitted (R4, R5)" -- that is GPIO21/16, which is a different pair
+// and is now the free one. Sections 8 and 9 below always said so; this
+// paragraph contradicted them, and a wrong pull-up claim is the kind of thing
+// somebody debugs with a scope rather than doubts.
 //
 // THE MUX IS A SWITCH, NOT A BUFFER. Each downstream stub needs its own 4.7k
 // pair to 3V3 -- fitted on the converter breakout, or fitted by hand. See
@@ -402,7 +408,7 @@ static const uint8_t NAU7802_ADDR = 0x2A;
 // here if the analog channel is ever wanted back.
 static const int8_t PIN_ENC_CLK    = 8;   // P1-8
 static const int8_t PIN_ENC_DT     = 7;   // P1-9
-static const int8_t PIN_ENC_SW     = 18;  // P1-6  -- NOT 21, that is CELL_SDA
+static const int8_t PIN_ENC_SW     = 18;  // P1-6
 
 // DEFINED BUT NOT WIRED. The VBUS tap on IO10 is what drives the indicator, and
 // it answers "on mains", not "charging" -- the ETA6098 terminates when the cell

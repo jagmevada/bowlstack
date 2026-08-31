@@ -14,16 +14,23 @@ NAU7802 bridge converters under one platform instead of four VL53L0X up a pipe.
 
 | | |
 | --- | --- |
-| cells | **GPIO21/16**, hardware I²C port 1, 400 kHz — the camera's SCCB pair, 4.7 k already fitted (R4/R5) |
+| cells | **GPIO12/11** (SDA=12 on P2-10, SCL=11 on P2-9), hardware I²C port 1, 400 kHz — **no on-board pull-ups**, the mux breakout supplies the trunk pair |
 | mux | **TCA9548A at 0x70**, one channel per cell (0/1/2) |
 | port 0 | GPIO47/48 carries the touch chip and the IMU, **and nothing else** |
 | why a mux | the NAU7802's address is fixed at 0x2A and cannot be moved |
 | why three cells | two leave the platform free to rock about the line joining them; three points define a plane |
 
 > This table described **two** cells on two buses until 3e58f87 — cell A sharing
-> the touch bus, cell B bit-banged on GPIO11/12. Both pairs are free now. If you
-> find that arrangement described anywhere else in the repo, it is stale;
+> the touch bus, cell B bit-banged on GPIO11/12. If you find that arrangement
+> described anywhere else in the repo, it is stale;
 > `include/board_waveshare_s3.h` section 8 is the authority.
+>
+> It then said **GPIO21/16** here for two commits after the bus had already
+> moved, and claimed the 4.7 k pull-ups were fitted — both wrong, and wrong in
+> the direction that costs somebody an afternoon with a scope. What is true at
+> HEAD: GPIO47/48 carries the touch chip and the IMU, GPIO11/12 is the cell
+> trunk and needs its pull-ups from the mux breakout, and GPIO21/16 — the SCCB
+> pair with R4/R5 fitted — is the one that is now free.
 
 The ToF branch is `touch-ui` and is untouched; the discrete ToF product is
 `main`. `src/bringup/bringup_display.cpp` and `bringup_sensors.cpp` were removed

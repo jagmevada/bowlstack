@@ -14,7 +14,7 @@
 import { h, empty, banner, batteryBar } from '../ui.js';
 import {
   LOCATION_NAMES, SERVING_LOCATIONS, MAX_BOWLS, slotStock, deviceStack,
-  deviceWeight, isScale,
+  deviceWeight, isScale, deviceSeverity,
   deviceGlyph, deviceOffline, slotOffline, weekdayOf, serviceDate,
   fmtClock, fmtRelative, serviceState, fmtWeight,
   powerState,
@@ -38,11 +38,14 @@ export function renderStock(state) {
   // offline/fault/degraded/battery, so the strip does NOT repeat those counts
   // (they used to show twice); it carries a single deduplicated figure — how
   // many stations have ANY problem — and stays on one line even on a phone.
-  const attention = devices.filter(d => !d.awaiting_deployment
-    && (deviceOffline(d)
-      || d.stack_status === 'discontiguous'
-      || d.stack_status === 'degraded'
-      || ['low', 'critical'].includes(d.battery_level))).length;
+  // THE SAME TEST THE PAGE THIS OPENS USES. It was a hand-written predicate
+  // over stack_status and battery, so it could not fire for any load-cell fault
+  // -- the strip stayed hidden while Health, which the strip LINKS TO, ranked
+  // that station critical. Sharing deviceSeverity()'s rank >= 50 (exactly
+  // health.js's `problems` filter) means the count and the list it opens cannot
+  // disagree again, whatever gets added to either product later.
+  const attention = devices.filter(
+    d => !d.awaiting_deployment && deviceSeverity(d).rank >= 50).length;
   if (attention) {
     frag.append(h('button', {
       class: 'alert-strip',
@@ -155,6 +158,13 @@ function slotCard(power, sl, stacks, inService, tz, template) {
   if (stock.kind === 'fault') {
     card.append(h('div', { class: 'slot-figure' },
       h('span', { class: 'slot-fault' }, '▲ Check station')));
+  } else if (stock.kind === 'counter') {
+    // WEIGHED, WITH NO BOWL COUNT. Deliberately not folded into the branch
+    // below: that one builds its bowl line from stock.trusted, which is null
+    // here, and would render the kilograms over a line reading ">=null".
+    card.append(h('div', { class: 'slot-figure' },
+      h('span', { class: 'slot-kg' }, fmtWeight(stock.measured)),
+      h('span', { class: 'slot-of' }, 'weighed, no bowl count')));
   } else if (stock.kind === 'nodata') {
     card.append(h('div', { class: 'slot-figure' },
       h('span', { class: 'slot-nodata' }, 'No data')));

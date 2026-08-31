@@ -48,6 +48,11 @@ bool fillRemind_ = false;
 bool fillAgeKnown_ = false;
 uint32_t fillAge_ = 0;
 
+// ONE SOURCE FOR THE PREVIEW'S ASSOCIATION, read by both base() and
+// demoInstallWifiMocks(). They held separate literals and disagreed.
+const char *const DEMO_SSID = "Kitchen-2G";
+const int16_t DEMO_RSSI = -58;
+
 State base() {
   State s = unknownState();
   for (uint8_t i = 0; i < LEVELS; i++) s.sensorOnline[i] = true;
@@ -59,7 +64,7 @@ State base() {
   s.batteryPinMv = 1367;  // 4102 / 3.0, the on-board divider ratio
   s.chargingKnown = false;
   s.wifiConnected = true;
-  s.wifiRssi = -58;
+  s.wifiRssi = DEMO_RSSI;
   s.deviceId = "BWL-001";
   s.firmware = "0.3.0";
   return s;
@@ -317,10 +322,23 @@ const Network MOCK_NETS[] = {
 
 void demoInstallWifiMocks() {
   wifiSetNetworks(MOCK_NETS, (uint8_t)(sizeof(MOCK_NETS) / sizeof(MOCK_NETS[0])));
-  // Not connected, matching what the harness can actually claim: it links no
-  // networking at all. Showing a fabricated association would put a number on
-  // screen that no part of this build could have measured.
-  wifiSetConnected(nullptr, 0, nullptr);
+  // THE SAME ASSOCIATION base() ALREADY CLAIMS, because the two halves of this
+  // fixture were contradicting each other. base() sets wifiConnected = true at
+  // DEMO_RSSI, which lights three of four bars in the status bar; this line
+  // then published "no association", so the WiFi PAGE rendered "not connected"
+  // in red underneath them. One fixture, two answers, and the simulator was the
+  // only place you could see both at once -- which is exactly the divergence
+  // CLAUDE.md says must not exist.
+  //
+  // Resolved toward CONNECTED rather than by clearing base(): demoLatest()
+  // gates the preview's fabricated wall clock on wifiConnected, so switching it
+  // off would silently take the clock-known rendering path away too.
+  //
+  // The "no fabricated association" rationale that used to sit here was already
+  // untrue of its neighbours -- base() fabricates the RSSI, MOCK_NETS fabricates
+  // a scan, and sim_main fabricates a MAC. A preview of a networked device that
+  // refuses to show a network is not more honest, only less useful.
+  wifiSetConnected(DEMO_SSID, DEMO_RSSI, nullptr);
 }
 
 void demoOverrideState(const State &s) {

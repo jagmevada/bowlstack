@@ -140,6 +140,28 @@ export function slotStock(slot) {
       note: 'A stack is reporting an impossible level pattern.',
     };
   }
+  // A SCALE AT THIS POSITION IS DATA, even when no bowl stack has reported.
+  //
+  // This tested bowls_trusted alone, so a position with a load cell reporting
+  // weight_state='ok' and no trustworthy stack beside it printed "No data" as
+  // its headline -- while the very same card carried the weight on its device
+  // line and Master had it right. Throwing away a measurement to announce its
+  // absence is the one thing this dashboard is written not to do.
+  //
+  // GATED ON measured_weight_g, NEVER ON slot.weight_g: the view coalesces
+  // weight_g to 0 when the buffer is unknown, so testing that would read an
+  // unknown buffer as a real zero -- the same NULL-versus-zero confusion in the
+  // other direction.
+  const measured = slot.measured_weight_g == null ? null : Number(slot.measured_weight_g);
+  if (trusted == null && measured != null) {
+    return {
+      kind: 'counter',
+      capacity, trusted: null, measured,
+      severity: null,
+      headline: fmtWeight(measured),
+      note: 'Weighed at the counter. No bowl stack here has reported a count.',
+    };
+  }
   if (trusted == null) {
     // NULL is not zero. One sends someone to refill, the other to investigate.
     return {
@@ -330,6 +352,32 @@ export function slotOffline(slot) {
 /** Is this installation a load cell? One place, because `kind` is absent on a
  *  database that predates migrate_loadcell.sql and every caller would
  *  otherwise have to remember that a missing kind means 'stack'. */
+// WHAT COUNTS AS A FAULT, AND AS DEGRADED, FOR EITHER PRODUCT -- in one place.
+//
+// There were three copies of this rule: fleetSummary() below, the Stock alert
+// strip, and health.js's Faults/Degraded filters. Only health.js had been
+// taught about load cells, so the other two counted `stack_status` alone -- and
+// a scale never writes stack_status. Every weight fault a station can report
+// (no_cells, over_range, cells_partial, uncalibrated, untared) was therefore
+// invisible to both fleet roll-ups: the header said "0 faults" and the default
+// Stock page showed no alert strip while a station sat there with not one cell
+// answering. Health, one click away, ranked that same station critical.
+//
+// The split follows deviceSeverity(): a FAULT is a reading that cannot be
+// trusted at all, DEGRADED is one that is a lower bound or unproven.
+export function isFault(dev) {
+  return dev.stack_status === 'discontiguous'
+      || dev.weight_state === 'no_cells'
+      || dev.weight_state === 'over_range';
+}
+
+export function isDegraded(dev) {
+  return dev.stack_status === 'degraded'
+      || dev.weight_state === 'cells_partial'
+      || dev.weight_state === 'uncalibrated'
+      || dev.weight_state === 'untared';
+}
+
 export function isScale(dev) {
   return dev && dev.kind === 'scale';
 }
@@ -500,10 +548,14 @@ export function fleetSummary(devices) {
     // The chip counts everything not talking when it should be — the acute
     // in-window flag and the slept-through-a-window flag alike.
     if (deviceOffline(d)) s.offline++;
-    if (d.stack_status === 'discontiguous') s.fault++;
-    if (d.stack_status === 'degraded') s.degraded++;
+    if (isFault(d)) s.fault++;
+    if (isDegraded(d)) s.degraded++;
     if (d.battery_level === 'low' || d.battery_level === 'critical') s.batteryWarn++;
-    if (d.sensors_online != null && d.sensors_online < 4) s.sensorsDown++;
+    // GUARDED ON THE PRODUCT, the way deviceSeverity() already is. sensors_online
+    // is the ToF array's four-up count; a scale has three cells and does not
+    // populate it, so an unguarded `< 4` would have called every load cell
+    // sensor-down the moment the column existed.
+    if (isScale(d) ? false : (d.sensors_online != null && d.sensors_online < 4)) s.sensorsDown++;
     if (d.in_service) s.inService++;
     // "Reporting" means TALKING: not flagged by either server offline flag.
     // The old count was `d.reported` — has EVER reported — which among

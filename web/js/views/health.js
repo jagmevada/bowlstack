@@ -18,6 +18,7 @@
 import { h, empty, levelColumn, cellColumn, banner, batteryBar } from '../ui.js';
 import {
   compareDevices, deviceSeverity, deviceStack, deviceGlyph, deviceWeight, isScale,
+  isFault, isDegraded,
   deviceOffline, fmtRelative,
   powerState,
 } from '../domain.js';
@@ -37,13 +38,8 @@ const FILTERS = {
   // Keyed on stack_status alone they silently excluded every load cell: a
   // station with no cell answering is the most serious thing on this page and
   // would not have appeared under "Faults" at all.
-  fault:    { label: 'Faults', test: d => d.stack_status === 'discontiguous'
-                                       || d.weight_state === 'no_cells'
-                                       || d.weight_state === 'over_range' },
-  degraded: { label: 'Degraded', test: d => d.stack_status === 'degraded'
-                                         || d.weight_state === 'cells_partial'
-                                         || d.weight_state === 'uncalibrated'
-                                         || d.weight_state === 'untared' },
+  fault:    { label: 'Faults', test: isFault },
+  degraded: { label: 'Degraded', test: isDegraded },
   // Registered but never heard from. These live in their own section rather
   // than the deployed list, so the filter's job is to show THAT section
   // alone — see the render conditions below.
