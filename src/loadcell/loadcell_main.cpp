@@ -52,6 +52,7 @@
 #include "config.h"
 #include "lgfx_waveshare_s3.h"
 #include "logo128.h"
+#include "splash_font.h"
 #include "scale.h"
 #include <Preferences.h>
 
@@ -374,21 +375,27 @@ void bootSplash() {
   gfx.drawPng(LOGO128_PNG, LOGO128_PNG_LEN, (gfx.width() - LOGO128_W) / 2,
               (gfx.height() - LOGO128_H) / 2 - 12);
   gfx.setTextColor(TFT_WHITE, TFT_BLACK);
-  // A REAL TYPEFACE, NOT THE 5x7 GLCD FONT SCALED UP, which is what made this
-  // read as dot matrix: LovyanGFX's default is a 5-by-7 bitmap, and every pixel
-  // of it becomes a visible square the moment it is enlarged. DejaVu is drawn
-  // at its native size from properly shaped glyphs, so the strokes are strokes
-  // rather than stacks of dots.
+  // ANTI-ALIASED, AND IT TOOK A FONT ASSET TO GET THERE. Three faces were tried
+  // on this line and the first two were both one bit per pixel:
   //
-  // It is still ONE BIT PER PIXEL, and that is a limit of the splash rather
-  // than of this font: LovyanGFX only anti-aliases VLW and TTF faces, both of
-  // which mean shipping a font asset. Everything AFTER this screen is drawn by
-  // LVGL in Montserrat at 4 bpp and is genuinely smooth -- the splash is the
-  // one surface that exists before LVGL does, which is the whole reason it is
-  // drawn this way (no dark gap while the widget tree is built).
+  //   Font0    the 5x7 GLCD bitmap, scaled up. Every pixel becomes a visible
+  //            square. This is what "dot matrix" originally meant here.
+  //   Font2    a real 16 px face with proper glyph shapes -- better, and still
+  //            1 bpp, so on a ~200 DPI panel the diagonals still stair-step.
+  //   VLW      8 bits per pixel, which LovyanGFX blends. Smooth.
   //
-  // If the shapes alone are not enough, the fix is to hand the splash to LVGL
-  // as well and accept a beat of black at power-on.
+  // Shape was never the problem; the missing thing was grey. LovyanGFX
+  // anti-aliases VLW and TTF only, and both mean shipping an asset -- so
+  // include/splash_font.h is Montserrat SemiBold at 18 px converted to VLW by
+  // tools/make_vlw.py. 15.6 KB of flash, against 25% used.
+  //
+  // Montserrat because that is what every screen AFTER this one is drawn in.
+  // The splash exists before LVGL does -- that is the whole reason it is raw
+  // LovyanGFX, so the logo is up with no dark gap while the widget tree builds
+  // -- and it should not also be the one screen in a different typeface.
+  //
+  // loadFont() allocates the glyph tables on the heap, so unloadFont() below is
+  // not optional: this runs once at boot and the tables are dead afterwards.
   // THREE LINES: who made it, which unit this is, and what it is running. That
   // is the whole job of a splash on a device that will be one of many -- the
   // last two are the first things anybody asks about a unit that is
@@ -398,27 +405,21 @@ void bootSplash() {
   // so the splash cannot disagree with what the console prints or with what the
   // Diagnose page reports.
   //
-  // FONT2 RATHER THAN A DEJAVU, because 16 px is what is wanted and DejaVu is
-  // shipped at 9/12/18/24/40/56/72 -- 12 is a long way down from 18 and 18 is
-  // not 16. Font2 is lgfx/Fonts/Font16.h: chr_hgt 16, baseline 13, proportional
-  // widths from its own table. It is a different family from DejaVu but it is a
-  // real 16 px face, which is the point -- NOT Font0 scaled up, which is the
-  // 5x7 GLCD bitmap that made this screen read as dot matrix in the first place.
   //
   // THE BLOCK IS ANCHORED TO THE BOTTOM EDGE, not hung off the logo. Growing it
   // downward from the logo pushed the text toward the panel edge as lines were
   // added and crowded the artwork as they were removed; anchoring it to the
   // bottom instead means the logo keeps its air whatever the block does, and a
   // fourth line would eat into the gap rather than run off the screen. With
-  // three lines the text starts at y=262 and the logo ends at y=212, so there
-  // are 50 px of black between them.
-  gfx.setFont(&fonts::Font2);
+  // three 24 px lines the first centre sits at y=252 and the logo ends at
+  // y=212, so there are 40 px of black between them.
+  gfx.loadFont(SPLASH_FONT_VLW);
   gfx.setTextDatum(middle_center);
   {
     const char *const lines[] = {"Unodari", BOWLSTACK_DEVICE_ID,
                                  BOWLSTACK_FW_VERSION};
     const int32_t nLines = (int32_t)(sizeof(lines) / sizeof(lines[0]));
-    const int32_t LINE_H = 20;   // 16 px of glyph plus 4 of leading
+    const int32_t LINE_H = 24;   // 18 px of glyph plus 6 of leading
     const int32_t MARGIN = 8;    // black below the last line
     const int32_t cx = gfx.width() / 2;
     // middle_center, so this is the CENTRE of the first line: the last line's
@@ -428,6 +429,7 @@ void bootSplash() {
     for (int32_t i = 0; i < nLines; i++, y += LINE_H)
       gfx.drawString(lines[i], cx, y);
   }
+  gfx.unloadFont();  // frees the glyph tables loadFont() put on the heap
   gfx.setTextDatum(top_left);
   gfx.setFont(&fonts::Font0);
   bootMark("splash draw");
