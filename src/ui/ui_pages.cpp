@@ -664,7 +664,12 @@ void pagesTick(uint32_t nowMs) {
   // what the indev saw. Guarded on not-already-home, because setting the
   // current tile still invalidates it, and firing that every frame once idle
   // would be a permanent redraw for no change.
-  if (lv_display_get_inactive_time(NULL) > IDLE_HOME_MS) {
+  // WHICH DEADLINE APPLIES DEPENDS ON WHAT IS ON TOP. The WiFi and calibration
+  // pages are the only two that ask somebody to type a long string one tap at a
+  // time; everything else is read or pressed. See IDLE_ENTRY_MS.
+  const bool typing = (depth_ > 0) && (stack_[depth_ - 1] == detailWifi_ ||
+                                       stack_[depth_ - 1] == detailCalib_);
+  if (lv_display_get_inactive_time(NULL) > (typing ? IDLE_ENTRY_MS : IDLE_HOME_MS)) {
     // Compared against the SAME tile pagesGoHome() will move to. Fixing only
     // the action would leave this guard permanently false once parked on the
     // knob page, and lv_tileview_set_tile would then run every frame for the

@@ -100,4 +100,17 @@ void pagesOnCycleDefaultPage(void (*cb)(void));
 // sensors to poll and a network to hold up.
 static const uint32_t IDLE_HOME_MS = 60000;
 
+// THE KEYPAD PAGES GET FIVE MINUTES INSTEAD OF ONE, and it is not a preference.
+// A WPA2 passphrase on a 240 px on-screen keyboard is two or three minutes of
+// deliberate work, read off a slip of paper, with pauses. Every key tap resets
+// LVGL's inactivity clock, so continuous typing was always safe -- but one look
+// away longer than a minute and pagesGoHome() closed the overlay and
+// wifiResetView() wiped the half-typed key, with nothing on screen to say why.
+//
+// Not disabled outright: a panel abandoned on a password screen is a panel not
+// showing the page this device exists to show, and during the trial that is the
+// blinded knob page. Five minutes is longer than anyone types and shorter than
+// a walk away.
+static const uint32_t IDLE_ENTRY_MS = 300000;
+
 }  // namespace ui

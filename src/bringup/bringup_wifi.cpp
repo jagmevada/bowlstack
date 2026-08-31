@@ -622,6 +622,30 @@ void loop(uint32_t nowMs) {
       // happens is a race against esp_wifi_start() finishing. Pacing one at
       // 1.5 s and the other at the idle 45 s would make time-to-first-join
       // depend on which side of that race the boot landed on.
+      // AND ONCE THE COLD-BOOT RETRIES ARE SPENT, STOP THE STACK CHASING AN AP
+      // THAT IS GONE. esp_wifi refuses scan_start while a connect is in flight,
+      // and WiFi.setAutoReconnect(true) in begin() has the stack retrying the
+      // last access point on its own, indefinitely. So losing an AP could wedge
+      // scanning for good -- observed on the bench at "retry 29" after the
+      // joined network was switched off, with the panel showing an empty list
+      // and a QR code and no way back short of a power cycle. In the field that
+      // is a station which drops its network once and then never finds another,
+      // including the two compiled in.
+      //
+      // eraseap = true, deliberately: it clears the STACK's copy of the AP so
+      // auto-reconnect has nothing left to chase. Ours live in our own NVS
+      // namespace -- see the note above credentialAt() -- and WiFi.persistent()
+      // is false, so this touches RAM, not flash. The ranked walk re-joins from
+      // our own store on the first scan that succeeds.
+      //
+      // Gated on being DISASSOCIATED and past the fast retries: a refusal in the
+      // first second of a boot is only the radio still coming up, and tearing
+      // the station down then would fight the thing we are waiting for.
+      if (scanFailures_ > SCAN_FAST_RETRIES && WiFi.status() != WL_CONNECTED) {
+        Serial.println("wifi: scan still refused -- dropping the stack's stale "
+                       "association so the radio can look around");
+        WiFi.disconnect(false, true);
+      }
       nextScanMs_ = nowMs + scanFailBackoff();
       Serial.printf("wifi: scan request refused, retry %u in %lu ms\n", scanFailures_,
                     (unsigned long)(nextScanMs_ - nowMs));
