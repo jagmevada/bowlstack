@@ -935,15 +935,21 @@ void serviceLink(uint32_t now) {
   i2cmux::invalidate();
   if (!i2cmux::begin()) return;
 
-  if (!everOnline_) {
-    // Nothing to preserve, and an un-taured scale is worse than a restart.
-    Serial.println("scale: cable detected -- restarting so the normal boot runs "
-                   "(including auto-tare)");
-    Serial.flush();
-    delay(50);  // let the line reach the console before the reset takes it
-    esp_restart();
-  }
-
+  // THE CONVERTERS ARE ASKED BEFORE THE MUX ANSWERING IS ALLOWED TO MEAN
+  // ANYTHING, and the order is the whole fix. This block used to sit BELOW the
+  // restart below it, which made the restart fire on the mux alone:
+  //
+  //   boot, cable in, one cell's connector loose
+  //     -> mux answers, everOnline_ false            -> esp_restart()
+  //     -> boot again, cells still do not come up    -> mux answers
+  //     -> esp_restart() ... every 1-2 s, for ever
+  //
+  // No UI, no telemetry, and nothing on the console but the same line scrolling
+  // -- on a unit whose whole cable is hot-pluggable by design. Worse, the
+  // "mux answers but no converter does" message right below was UNREACHABLE at
+  // boot, which is precisely the moment it was written to fire: !everOnline_
+  // short-circuited to the restart first, so the one fault it names could never
+  // announce itself.
   uint8_t up = 0;
   for (uint8_t i = 0; i < CELLS; i++)
     if (cell_[i].begin()) up++;
@@ -954,6 +960,17 @@ void serviceLink(uint32_t now) {
     Serial.println("scale: mux answers but no converter does -- check the cells "
                    "behind it, not the cable");
     return;
+  }
+
+  if (!everOnline_) {
+    // Nothing to preserve, and an un-tared scale is worse than a restart. Safe
+    // to restart now and not before: at least one converter has answered, so
+    // the boot this triggers has something to find.
+    Serial.println("scale: cable detected -- restarting so the normal boot runs "
+                   "(including auto-tare)");
+    Serial.flush();
+    delay(50);  // let the line reach the console before the reset takes it
+    esp_restart();
   }
 
   // TARE DELIBERATELY UNTOUCHED. See everOnline_ above.
