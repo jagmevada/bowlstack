@@ -1,6 +1,7 @@
 #include "ui_battery.h"
 
 #include <stdio.h>
+#include <string.h>
 
 namespace ui {
 namespace {
@@ -173,47 +174,97 @@ void buildBatteryPage(lv_obj_t *parent) {
   lv_label_set_text(lblPin_, "pin -- mV");
 }
 
+// GUARD ON WHAT IS DRAWN, NOT ON WHAT IS MEASURED. Same discipline as the
+// weight page, and for the same reason -- see the change-detection note in
+// ui_weight.cpp. LVGL's setters do not compare before acting: every one of them
+// reallocates a label buffer or marks an object dirty whether or not anything
+// changed.
+void setIfChanged(lv_obj_t *o, char *prev, uint32_t len, const char *txt) {
+  if (strncmp(prev, txt, len - 1) == 0) return;
+  snprintf(prev, len, "%s", txt);
+  lv_label_set_text(o, txt);
+}
+
+void colorIfChanged(lv_obj_t *o, uint32_t *prev, bool *have, uint32_t rgb,
+                    lv_style_selector_t part) {
+  if (*have && *prev == rgb) return;
+  *have = true;
+  *prev = rgb;
+  lv_obj_set_style_text_color(o, lv_color_hex(rgb), part);
+}
+
+void bgIfChanged(lv_obj_t *o, uint32_t *prev, bool *have, uint32_t rgb,
+                 lv_style_selector_t part) {
+  if (*have && *prev == rgb) return;
+  *have = true;
+  *prev = rgb;
+  lv_obj_set_style_bg_color(o, lv_color_hex(rgb), part);
+}
+
+char prevVolts_[16] = {0};
+char prevPct_[12] = {0};
+char prevBand_[16] = {0};
+char prevCharge_[16] = {0};
+char prevPin_[48] = {0};
+uint32_t cVolts_ = 0, cBar_ = 0, cChip_ = 0, cCharge_ = 0;
+bool hVolts_ = false, hBar_ = false, hChip_ = false, hCharge_ = false;
+int32_t prevBarVal_ = -1;
+
 void updateBatteryPage(const State &s) {
   if (!lblVolts_) return;
 
-  // Guarded for the same reason ui_screens::update() is: this runs on every
-  // frame the page is open, and every write below either reallocates a label
-  // buffer or marks an object dirty. A voltage that moves once a second was
-  // repainting the panel at whatever rate the loop managed.
-  static State prev;
-  static bool have = false;
-  if (have && prev.batteryMv == s.batteryMv && prev.batteryPinMv == s.batteryPinMv &&
-      prev.batteryPercent == s.batteryPercent && prev.battery == s.battery &&
-      prev.charging == s.charging && prev.chargingKnown == s.chargingKnown &&
-      prev.externalPower == s.externalPower) {
-    return;
-  }
-  prev = s;
-  have = true;
+  // THE WHOLE-STRUCT EARLY-OUT THAT USED TO SIT HERE NEVER FIRED. It compared
+  // raw batteryMv and batteryPinMv, and those are ADC readings -- they wander
+  // by a millivolt or three on every single sample. The console shows it
+  // plainly: pin 1398, 1397, 1399, 1388. So the guard was false almost every
+  // frame, and the page below repainted five labels, a bar and four style
+  // colours at whatever rate the loop managed.
+  //
+  // The comment it carried said "a voltage that moves once a second was
+  // repainting the panel" -- which was the right diagnosis and the wrong
+  // remedy: it guarded the number rather than the picture. 4194 mV and 4195 mV
+  // are a different int and the same four characters on screen.
+  //
+  // Reported from the field as the LED fade stalling badly whenever
+  // Settings > Battery is open, which is exactly what a full-page invalidate
+  // every frame does to the one task that also drives the fade.
+  //
+  // So each widget now guards itself on its own FORMATTED text, and the styles
+  // guard on their own colour. The pin line is the only thing here that really
+  // does change every reading -- it is a raw diagnostic and is meant to -- and
+  // it is now one small label being rewritten instead of the whole page.
 
+  char buf[48];
   if (s.battery == Battery::Unknown || s.batteryMv == 0) {
-    lv_label_set_text(lblVolts_, "no cell");
-    lv_obj_set_style_text_color(lblVolts_, lv_color_hex(C_FAULT), LV_PART_MAIN);
+    setIfChanged(lblVolts_, prevVolts_, sizeof(prevVolts_), "no cell");
+    colorIfChanged(lblVolts_, &cVolts_, &hVolts_, C_FAULT, LV_PART_MAIN);
   } else {
-    lv_label_set_text_fmt(lblVolts_, "%u.%02u V", s.batteryMv / 1000,
-                          (s.batteryMv % 1000) / 10);
-    lv_obj_set_style_text_color(lblVolts_, lv_color_hex(C_TEXT), LV_PART_MAIN);
+    snprintf(buf, sizeof(buf), "%u.%02u V", s.batteryMv / 1000,
+             (s.batteryMv % 1000) / 10);
+    setIfChanged(lblVolts_, prevVolts_, sizeof(prevVolts_), buf);
+    colorIfChanged(lblVolts_, &cVolts_, &hVolts_, C_TEXT, LV_PART_MAIN);
   }
 
   // A percentage only where one was actually derived. -1 means the curve was
   // never evaluated, and "0%" would be a claim that the cell is empty rather
   // than that nothing is known about it.
+  const int32_t barVal = s.batteryPercent < 0 ? 0 : s.batteryPercent;
   if (s.batteryPercent < 0) {
-    lv_label_set_text(lblPct_, "unknown");
-    lv_bar_set_value(bar_, 0, LV_ANIM_OFF);
+    setIfChanged(lblPct_, prevPct_, sizeof(prevPct_), "unknown");
   } else {
-    lv_label_set_text_fmt(lblPct_, "%d %%", s.batteryPercent);
-    lv_bar_set_value(bar_, s.batteryPercent, LV_ANIM_OFF);
+    snprintf(buf, sizeof(buf), "%d %%", s.batteryPercent);
+    setIfChanged(lblPct_, prevPct_, sizeof(prevPct_), buf);
   }
-  lv_obj_set_style_bg_color(bar_, lv_color_hex(bandColor(s.battery)), LV_PART_INDICATOR);
+  // lv_bar_set_value animates and invalidates even when handed the value it
+  // already holds, so it needs a guard of its own.
+  if (barVal != prevBarVal_) {
+    prevBarVal_ = barVal;
+    lv_bar_set_value(bar_, barVal, LV_ANIM_OFF);
+  }
+  bgIfChanged(bar_, &cBar_, &hBar_, bandColor(s.battery), LV_PART_INDICATOR);
 
-  lv_label_set_text(chipBand_, bandName(s.battery));
-  lv_obj_set_style_bg_color(chipBand_, lv_color_hex(bandColor(s.battery)), LV_PART_MAIN);
+  setIfChanged(chipBand_, prevBand_, sizeof(prevBand_), bandName(s.battery));
+  bgIfChanged(chipBand_, &cChip_, &hChip_, bandColor(s.battery), LV_PART_MAIN);
 
   // FOUR STATES, AND THE POINT IS THAT TWO DIFFERENT THINGS ARE KNOWN TO
   // DIFFERENT DEGREES.
@@ -229,28 +280,33 @@ void updateBatteryPage(const State &s) {
   // nothing at all about its power.
   //
   // So: say what is known, and name which question it answers.
+  const char *chargeTxt;
+  uint32_t chargeCol;
   if (s.chargingKnown) {
     if (s.charging) {
-      lv_label_set_text(lblCharge_, "yes");
-      lv_obj_set_style_text_color(lblCharge_, lv_color_hex(C_OK), LV_PART_MAIN);
+      chargeTxt = "yes";
+      chargeCol = C_OK;
     } else {
       // Not charging AND on mains is the terminated case -- the cell is full
       // and the charger has stopped. Worth distinguishing from running down.
-      lv_label_set_text(lblCharge_, s.externalPower ? "no - charged" : "no");
-      lv_obj_set_style_text_color(lblCharge_, lv_color_hex(C_TEXT), LV_PART_MAIN);
+      chargeTxt = s.externalPower ? "no - charged" : "no";
+      chargeCol = C_TEXT;
     }
   } else if (s.externalPower) {
     // Deliberately not "yes". The unit is plugged in, which is all this board
     // can see without the STAT mod; whether the charger is still pushing
     // current is exactly the thing it cannot tell.
-    lv_label_set_text(lblCharge_, "on mains");
-    lv_obj_set_style_text_color(lblCharge_, lv_color_hex(C_OK), LV_PART_MAIN);
+    chargeTxt = "on mains";
+    chargeCol = C_OK;
   } else {
-    lv_label_set_text(lblCharge_, "on battery");
-    lv_obj_set_style_text_color(lblCharge_, lv_color_hex(C_TEXT), LV_PART_MAIN);
+    chargeTxt = "on battery";
+    chargeCol = C_TEXT;
   }
+  setIfChanged(lblCharge_, prevCharge_, sizeof(prevCharge_), chargeTxt);
+  colorIfChanged(lblCharge_, &cCharge_, &hCharge_, chargeCol, LV_PART_MAIN);
 
-  lv_label_set_text_fmt(lblPin_, "pin %u mV  x3.0 divider on GPIO5", s.batteryPinMv);
+  snprintf(buf, sizeof(buf), "pin %u mV  x3.0 divider on GPIO5", s.batteryPinMv);
+  setIfChanged(lblPin_, prevPin_, sizeof(prevPin_), buf);
 }
 
 }  // namespace ui
