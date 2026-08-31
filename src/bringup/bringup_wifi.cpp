@@ -362,18 +362,53 @@ void publishScan() {
   }
   scanFailures_ = 0;
 
+  // THE STRONGEST TEN, ONE ROW PER NAME -- not the first ten the driver happened
+  // to return. The loop here used to stop at `count < WIFI_MAX_NETWORKS` while
+  // walking the scan in driver order, which is channel order and not signal
+  // order. With 16 APs on air and room for 10, six were dropped essentially at
+  // random, and the network somebody actually needed could simply be absent
+  // from the picker with nothing on screen to say so. On a quiet bench every
+  // network fits and the fault is invisible; a canteen with twenty APs is where
+  // it bites, which is exactly where the panel gets used.
+  //
+  // Deduplicated by name as well: a mesh or an extender puts the same SSID on
+  // several radios, and three rows reading the same word are three of the ten
+  // slots spent saying one thing. pickFromScan() already keeps only the
+  // strongest per credential; this is the same rule for the list a person taps.
+  //
+  // Insertion sort with eviction, because n is at most a few dozen and the list
+  // is ten long -- the sort is cheaper than the String allocations above it.
   ui::Network list[ui::WIFI_MAX_NETWORKS];
   uint8_t count = 0;
-  for (int16_t i = 0; i < n && count < ui::WIFI_MAX_NETWORKS; i++) {
+  for (int16_t i = 0; i < n; i++) {
     // Skip hidden SSIDs: an empty row is not something a person can choose,
     // and it would occupy one of the ten slots the list has room for.
     const String ssid = WiFi.SSID(i);
     if (ssid.length() == 0) continue;
+    const int16_t r = (int16_t)WiFi.RSSI(i);
+    const bool sec = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
 
-    snprintf(list[count].ssid, sizeof(list[count].ssid), "%s", ssid.c_str());
-    list[count].rssi = (int16_t)WiFi.RSSI(i);
-    list[count].secured = (WiFi.encryptionType(i) != WIFI_AUTH_OPEN);
-    count++;
+    bool dup = false;
+    for (uint8_t k = 0; k < count; k++) {
+      if (strcmp(list[k].ssid, ssid.c_str()) != 0) continue;
+      dup = true;
+      if (r > list[k].rssi) { list[k].rssi = r; list[k].secured = sec; }
+      break;
+    }
+    if (dup) continue;
+
+    uint8_t pos = count;
+    while (pos > 0 && list[pos - 1].rssi < r) pos--;
+    if (pos >= ui::WIFI_MAX_NETWORKS) continue;  // weaker than everything held
+
+    const uint8_t last = (count < ui::WIFI_MAX_NETWORKS)
+                             ? count
+                             : (uint8_t)(ui::WIFI_MAX_NETWORKS - 1);
+    for (uint8_t k = last; k > pos; k--) list[k] = list[k - 1];
+    snprintf(list[pos].ssid, sizeof(list[pos].ssid), "%s", ssid.c_str());
+    list[pos].rssi = r;
+    list[pos].secured = sec;
+    if (count < ui::WIFI_MAX_NETWORKS) count++;
   }
   ui::wifiSetNetworks(list, count);
 
@@ -528,7 +563,24 @@ void loop(uint32_t nowMs) {
       // wherever the association came from -- including a stack auto-reconnect
       // that this branch never sees.
       joinStartedMs_ = 0;
-    } else if (nowMs - joinStartedMs_ > JOIN_TIMEOUT_MS) {
+    } else if ((int32_t)(nowMs - joinStartedMs_) > (int32_t)JOIN_TIMEOUT_MS) {
+      // SIGNED, AND THAT IS THE WHOLE TYPED-JOIN BUG. joinStartedMs_ can be
+      // LATER than nowMs: loop() is handed millis() sampled by its caller, and
+      // the joinPending_ block right above runs beginJoin() -- which stamps
+      // joinStartedMs_ with a fresh millis() a few milliseconds further on.
+      // Unsigned, nowMs - joinStartedMs_ was then 4294967290 rather than -6,
+      // which comfortably exceeds any timeout, so the panel's join was declared
+      // failed on the same iteration it started and WiFi.disconnect() killed
+      // the association about six milliseconds in. Every time.
+      //
+      // The ranked auto path never hit it because publishScan() calls
+      // beginJoin() BELOW this check, so the check never sees a future stamp --
+      // which is exactly why the field report was "it only connects to the
+      // hardcoded network". Observed, not deduced: "failed after 4294967290 ms
+      // (6: disconnected / still trying)".
+      //
+      // The cast also makes this wrap-safe at 49.7 days, the same way every
+      // other deadline in this file is written.
       // Bounded, and the bound is the point. An unbounded wait would leave the
       // page showing "not connected" with no way to tell a wrong passphrase from
       // a slow one.
