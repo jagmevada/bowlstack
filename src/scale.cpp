@@ -599,6 +599,25 @@ void publish() {
     c.rawCounts = cell_[i].counts();
     c.counts = window_[i].mean(windowTrim());
     c.samples = window_[i].size();
+    // AN ONLINE CELL WITH AN EMPTY WINDOW HAS NO READING, and mean() answers 0
+    // for one. Zero counts is not zero grams -- it is minus the tare, which on
+    // a tared platform is kilograms, with the wrong sign. weightState() takes
+    // no sample count, and -2000 g sits inside WEIGHT_PUBLISH_MIN_G, so the
+    // snapshot went out as a perfectly ordinary weight_state 'ok'.
+    //
+    // The panel never showed it -- the operator is on the settings page and the
+    // snapshot lives about 100 ms -- but the uplink task snapshots on its own
+    // 250 ms clock, so it PATCHed device_status and appended a permanent
+    // weight_samples row saying the vessel weighed minus two kilograms.
+    //
+    // Reachable from two window_[i].clear() sites: Settings > Scale > Average,
+    // and the console self-test. The other two clears are already covered, one
+    // by an Online gate and one by an immediate reseed; these two were the gap.
+    //
+    // Returning abandons the whole snapshot rather than patching this cell,
+    // because published_ then keeps its previous value -- which was true -- and
+    // a total assembled from two live corners and one empty one is not a total.
+    if (c.state == CellState::Online && c.samples == 0) return;
     c.pp = window_[i].pp();
     // Tested on the RAW conversion, not the filtered mean. A trimmed average of
     // saturated samples is still saturated, but it lags -- and the point of this
@@ -822,13 +841,28 @@ void serviceCommands() {
       //
       // Banded against the BUILD DEFAULT rather than absolute numbers, so it
       // travels: an image built for 5 kg cells carries a different default and
-      // the band moves with it. An order of magnitude either way is far wider
-      // than part-to-part spread and still catches every decimal-place slip.
+      // the band moves with it.
+      //
+      // 0.3x TO 3x, NOT 0.1x TO 10x, AND THE OLD BAND CAUGHT NOTHING. It was
+      // exactly one decade wide with strict comparisons, so a 10x slip -- the
+      // one error this guard names, "typing 1750 for a 175 g reference" --
+      // always landed on a boundary rather than outside it, and always passed
+      // in one of its two directions: a factor-of-ten-high slip is admitted
+      // whenever the true sensitivity is at or above the build default, and a
+      // ten-low slip whenever it is at or below. On the very bench assembly the
+      // 106.857 default came from, the 175/1750 case cleared the lower bound by
+      // 0.00001 counts/g.
+      //
+      // A decade was chosen to be "far wider than part-to-part spread", which
+      // it is -- and so is 3x. Real spread between load cells of one type is
+      // tens of percent; the tightest thing this must not reject is a genuinely
+      // different but correctly measured assembly, and 3x clears that with room
+      // to spare while a decimal-place slip no longer fits inside it.
       const float ref = (float)BOWLSTACK_COUNTS_PER_GRAM;
-      if (ref > 0.0f && (derived < ref * 0.1f || derived > ref * 10.0f)) {
+      if (ref > 0.0f && (derived < ref * 0.3f || derived > ref * 3.0f)) {
         r = CalResult::Implausible;
         Serial.printf("scale: %.3f counts/g is outside %.1f..%.1f -- check the mass\n",
-                      derived, ref * 0.1f, ref * 10.0f);
+                      derived, ref * 0.3f, ref * 3.0f);
       }
     }
 
@@ -912,6 +946,20 @@ void serviceLink(uint32_t now) {
   if (online > 0) {
     everOnline_ = true;
     linkLostAnnounced_ = false;
+    // ONE CELL DOWN IS DELIBERATELY NOT RETRIED, and it is a different fault
+    // from the cable being out. The whole lead going dark is a connector
+    // somebody can push back in; a single converter dropping while the other
+    // two answer is wiring, and wiring is not something the firmware should
+    // paper over.
+    //
+    // An automatic retry was written here and then removed on exactly that
+    // reasoning: it would revive an INTERMITTENT cell over and over, and a
+    // corner that keeps coming and going produces plausible weights that are
+    // quietly wrong, which is worse for a scale than a corner that is plainly
+    // dead. As it stands the station degrades honestly -- weight_state
+    // 'cells_partial', weight_g null, "at least, kg" and a red "N cell(s) down"
+    // on the panel -- and stays that way until somebody looks at the harness.
+    // That is the intended behaviour, not a gap.
     return;
   }
 
