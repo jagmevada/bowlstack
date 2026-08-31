@@ -918,6 +918,26 @@ void serviceConsole() {
 void setup() {
   bootStartMs_ = bootPhaseMs_ = millis();
   Serial.begin(115200);
+  // SERIAL MUST NEVER BLOCK THE RENDER LOOP, and by default it does.
+  //
+  // This is the S3's NATIVE USB CDC, not a UART, so Serial is HWCDC -- and
+  // HWCDC.cpp defaults tx_timeout_ms to 100 and passes it to both
+  // xSemaphoreTake(tx_lock, ...) and xRingbufferSend(...). When no host is
+  // draining the port, EVERY WRITE BLOCKS FOR UP TO 100 ms.
+  //
+  // Everything this firmware prints -- the 5 s status block, the WiFi lines,
+  // the scan dump -- is printed from loop(), the same task that runs
+  // lv_timer_handler() and the LED fade. So an unattended device, which is
+  // every deployed device, was spending up to a tenth of a second per printf
+  // inside the render loop: a dozen lines is over a second of frozen UI, a
+  // stalled LED and a swipe that does not take. With a terminal open it all
+  // drains instantly and none of it happens, which is exactly why bench
+  // testing never showed it.
+  //
+  // 0 means "drop it rather than wait". Diagnostics are worth a great deal
+  // less than the panel staying responsive, and when somebody IS watching, the
+  // host drains fast enough that nothing is lost.
+  Serial.setTxTimeoutMs(0);
   // USB-CDC enumerates only when a host opens the port, so the first lines are
   // lost without this. Bounded, not a spin: a unit on battery has no host and
   // must still boot.
