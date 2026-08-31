@@ -8,7 +8,7 @@
 --  WHAT THIS IS FOR
 --  ---------------------------------------------------------------------
 --  Paste the whole file into the Supabase SQL editor and run it ONCE. It
---  does what these six do, in the only order that works:
+--  does what these 8 do, in the only order that works:
 --
 --    1. migrate_bowl_weight.sql    per-bowl weight, and the Master Dashboard view
 --    2. migrate_loadcell.sql       load-cell stations alongside the bowl counters
@@ -17,13 +17,16 @@
 --    5. migrate_weight_samples.sql the analog history a scale appends to
 --    6. migrate_burn_rate.sql      consumption rate, and when a dish runs out
 --    7. migrate_manual_fill.sql    TRIAL HARNESS -- the manual fill estimate
+--    8. migrate_vbus_sense.sql     mains presence, from the VBUS divider
 --
 --  ---------------------------------------------------------------------
 --  IF YOU NEED TO UNDO IT AFTER IT HAS COMMITTED
 --  ---------------------------------------------------------------------
---  Run these three, IN THIS ORDER -- they undo in the reverse of the order
---  applied, because each drops objects the one before it depends on:
+--  Run these 5, IN THIS ORDER -- they undo in the reverse of the
+--  order applied, because each drops objects the one before it depends on:
 --
+--      rollback_vbus_sense.sql
+--      rollback_manual_fill.sql
 --      rollback_burn_rate.sql
 --      rollback_weight_samples.sql
 --      rollback_loadcell.sql
@@ -36,7 +39,7 @@
 --  ---------------------------------------------------------------------
 --  WHY IT IS SAFE TO RUN MID-SERVICE
 --  ---------------------------------------------------------------------
---  ONE TRANSACTION. All six parts and the verification run inside a single
+--  ONE TRANSACTION. All 8 parts and the verification run inside a single
 --  BEGIN. If ANY of it fails -- a missing prerequisite, a constraint, a
 --  verification check -- the whole thing rolls back and your database is
 --  exactly as it was. There is no half-applied state to recover from.
@@ -95,7 +98,7 @@ create temp table _before_counts on commit drop as
          (select count(*) from public.meal_food_mapping)  as meal_food_mapping;
 
 -- #####################################################################
--- ##  PART 1 of 7:  migrate_bowl_weight.sql
+-- ##  PART 1 of 8:  migrate_bowl_weight.sql
 -- ##  per-bowl weight, and the Master Dashboard view
 -- #####################################################################
 
@@ -596,7 +599,7 @@ comment on view public.slot_quantity is
   'excluded, which hides the undeployed backup units.';
 
 -- #####################################################################
--- ##  PART 2 of 7:  migrate_loadcell.sql
+-- ##  PART 2 of 8:  migrate_loadcell.sql
 -- ##  load-cell stations alongside the bowl counters
 -- #####################################################################
 
@@ -1385,7 +1388,7 @@ comment on view public.slot_quantity is
   'part it is showing.';
 
 -- #####################################################################
--- ##  PART 3 of 7:  register_loadcells.sql
+-- ##  PART 3 of 8:  register_loadcells.sql
 -- ##  LDC-001..032 into the devices registry
 -- #####################################################################
 
@@ -1415,7 +1418,7 @@ update public.devices
    and kind is distinct from 'scale';
 
 -- #####################################################################
--- ##  PART 4 of 7:  assign_loadcells.sql
+-- ##  PART 4 of 8:  assign_loadcells.sql
 -- ##  each LDC onto the position of its BWL
 -- #####################################################################
 
@@ -1442,7 +1445,7 @@ update public.devices d
      or d.food_slot is distinct from b.food_slot);
 
 -- #####################################################################
--- ##  PART 5 of 7:  migrate_weight_samples.sql
+-- ##  PART 5 of 8:  migrate_weight_samples.sql
 -- ##  the analog history a scale appends to
 -- #####################################################################
 
@@ -1688,7 +1691,7 @@ grant insert (device_id, boot_id, seq, age_ms, reason,
 grant select on public.weight_samples to authenticated;
 
 -- #####################################################################
--- ##  PART 6 of 7:  migrate_burn_rate.sql
+-- ##  PART 6 of 8:  migrate_burn_rate.sql
 -- ##  consumption rate, and when a dish runs out
 -- #####################################################################
 
@@ -1959,7 +1962,13 @@ grid as (
 -- same last_served_meal() the Master tab uses, so the buffer is valued at the
 -- dish actually on the stations rather than at whatever the clock says.
 wt as (
-  select d.location, d.food_slot, max(m.bowl_weight_g) as bowl_weight_g
+  select d.location, d.food_slot, max(m.bowl_weight_g) as bowl_weight_g,
+         -- WHETHER THIS HALL IS SERVING THIS SLOT AT ALL, which `partial` below
+         -- needs and did not have. bool_or over the left join gives false --
+         -- not NULL -- for a hall with no mapping row, because the all-NULL
+         -- side makes `m.food_name is not null` false, so it is safe to test
+         -- bare without a coalesce.
+         bool_or(m.food_name is not null)      as is_serving
     from public.devices d
    cross join lateral public.last_served_meal(d.timezone) lm
     left join public.meal_food_mapping m
@@ -1972,10 +1981,25 @@ wt as (
 -- point, valued at its hall's per-bowl weight. Trusted counts only -- a
 -- degraded stack's count is a lower bound and a discontiguous one is not a
 -- count, and neither belongs in a figure denominated in kilograms.
+-- KEYED BY HALL AS WELL AS SLOT. location was a filter here and never a key,
+-- but meal_food_mapping is keyed by (location, meal_type, meal_date,
+-- food_slot) -- so slot 3 is a DIFFERENT DISH in each hall, and summing the
+-- three together produced one curve, one burn rate and one runs_out_at for
+-- three unrelated dishes. The number looked entirely reasonable and described
+-- nothing. Adding location to the key gives one series per hall per slot; the
+-- dashboard reports the earliest deadline among them.
 buffer AS (
-  select g.at_ts, d.food_slot,
+  select g.at_ts, d.location, d.food_slot,
          sum(e.stack_count * w.bowl_weight_g)                  as buffer_g,
-         bool_or(w.bowl_weight_g is null and e.stack_count > 0) as partial
+         -- THREE CONDITIONS, NOT TWO, matching slot_quantity. Without the
+         -- third, a hall holding leftover bowls in a slot it is NOT serving
+         -- this meal flagged the whole slot's total as partial -- which is the
+         -- exact wrong answer: those bowls have no per-bowl weight because
+         -- nothing is being served there, not because somebody forgot to type
+         -- one. The flag exists for the case it still catches: a hall that IS
+         -- serving with no kg per bowl entered.
+         bool_or(w.bowl_weight_g is null and e.stack_count > 0
+                 and w.is_serving)                             as partial
     from grid g
     join public.devices d on d.kind = 'stack'
                          and d.location in ('D','M','T')
@@ -1990,13 +2014,13 @@ buffer AS (
       order by ev.recorded_at desc
       limit 1
    ) e
-   group by g.at_ts, d.food_slot
+   group by g.at_ts, d.location, d.food_slot
 ),
 -- COUNTER: the last usable weight each scale had reported at or before each
 -- grid point. weight_state = 'ok' is the whole gate -- an uncalibrated or
 -- partly-dead station has no grams to add.
 counter as (
-  select g.at_ts, d.food_slot,
+  select g.at_ts, d.location, d.food_slot,
          sum(s.weight_g)  as counter_g,
          count(*)         as scales
     from grid g
@@ -2013,9 +2037,10 @@ counter as (
       order by ws.recorded_at desc
       limit 1
    ) s
-   group by g.at_ts, d.food_slot
+   group by g.at_ts, d.location, d.food_slot
 )
 select coalesce(b.at_ts, c.at_ts)                as at_ts,
+       coalesce(b.location, c.location)          as location,
        coalesce(b.food_slot, c.food_slot)        as food_slot,
        b.buffer_g,
        c.counter_g,
@@ -2027,7 +2052,9 @@ select coalesce(b.at_ts, c.at_ts)                as at_ts,
        coalesce(b.partial, false)                as buffer_is_partial,
        coalesce(c.scales, 0)                     as scales
   from buffer b
-  full join counter c on c.at_ts = b.at_ts and c.food_slot = b.food_slot;
+  full join counter c on c.at_ts = b.at_ts
+                    and c.location = b.location
+                    and c.food_slot = b.food_slot;
 
 revoke all on public.slot_stock_series from anon, authenticated, public;
 grant select on public.slot_stock_series to authenticated;
@@ -2058,40 +2085,49 @@ pts as (
 lagged as (
   select p.*, lag(p.total_g) over w as prev_g
     from pts p
-  window w as (partition by p.food_slot order by p.at_ts)
+  -- BY HALL AND SLOT. slot_stock_series is one series per (location,
+  -- food_slot) now, so partitioning on the slot alone would interleave three
+  -- halls' points into one sequence and read every hop between them as a
+  -- kitchen delivery.
+  window w as (partition by p.location, p.food_slot order by p.at_ts)
 ),
 steps as (
   select l.*,
          count(*) filter (where l.total_g - l.prev_g >= (select refill_g from t))
-           over (partition by l.food_slot order by l.at_ts
+           over (partition by l.location, l.food_slot order by l.at_ts
                  rows between unbounded preceding and current row) as segment
     from lagged l
 ),
 seg as (
-  select s.food_slot, s.segment,
+  select s.location, s.food_slot, s.segment,
          min(s.at_ts) as seg_first_at, max(s.at_ts) as seg_last_at,
          (array_agg(s.total_g order by s.at_ts))[1]
            - (array_agg(s.total_g order by s.at_ts desc))[1] as drop_g,
          extract(epoch from max(s.at_ts) - min(s.at_ts))     as seg_s,
          bool_or(s.buffer_is_partial)                        as partial
-    from steps s group by s.food_slot, s.segment having count(*) >= 2
+    from steps s group by s.location, s.food_slot, s.segment having count(*) >= 2
 ),
 agg as (
-  select g.food_slot,
+  select g.location, g.food_slot,
          min(g.seg_first_at)                            as first_at,
          max(g.seg_last_at)                             as last_at,
          sum(greatest(g.drop_g, 0))                     as consumed_g,
          sum(g.seg_s) filter (where g.drop_g > 0)       as consuming_s,
          max(g.seg_first_at) filter (where g.segment > 0) as last_delivery_at,
          bool_or(g.partial)                             as partial
-    from seg g group by g.food_slot
+    from seg g group by g.location, g.food_slot
 )
-select a.food_slot,
+select a.location,
+       a.food_slot,
        -- Read straight from the menu, NOT joined from slot_quantity. A view on
        -- a view cannot be dropped without dropping its dependant, and this
        -- chain existed only to borrow a dish name -- which made slot_quantity
        -- un-replaceable the first time it needed a column removed. Two sibling
        -- views over the same tables, never a stack of them.
+       -- SCOPED TO THIS HALL now that a row IS a hall. It used to aggregate
+       -- every hall's dish for the slot into one array, which was the only
+       -- honest thing to do while the row covered all three -- and was also the
+       -- clearest symptom that the row should not have.
        (select array_agg(distinct m.food_name)
           from public.devices d
          cross join lateral public.last_served_meal(d.timezone) lm
@@ -2099,7 +2135,7 @@ select a.food_slot,
             on m.location = d.location and m.food_slot = d.food_slot
            and m.meal_date = lm.meal_date and m.meal_type = lm.meal_type
          where d.food_slot = a.food_slot
-           and d.location in ('D','M','T')
+           and d.location = a.location
            and m.food_name is not null)                  as dishes,
        (a.last_at - a.first_at)                         as covered,
        a.consumed_g                                     as consumed_g_window,
@@ -2128,20 +2164,40 @@ select a.food_slot,
        -- WILL IT LAST THE MEAL? The question a second production run is
        -- started from. NULL when there is no rate or no window to compare
        -- against -- never a confident "yes".
+       --
+       -- AGAINST THE WINDOW NOW IN PROGRESS, not the last COMPLETED one. This
+       -- compared last_service_window_end(), whose body is
+       -- `max(w_end) where w_end <= at_ts` -- so DURING service it returned the
+       -- close of the PREVIOUS meal, hours in the past, and every runs_out_at
+       -- was later than it. The flag was therefore false throughout the only
+       -- period it is read in, which is a confident "the food will last" during
+       -- lunch on the strength of breakfast having ended.
+       --
+       -- The scalar subquery below is NULL outside every window, so the flag
+       -- goes NULL there rather than false -- which is what the comment above
+       -- already promises and what current_meal_type() does for the same
+       -- reason. The `+ interval '1 day' * 0` that used to sit here was a
+       -- no-op and is gone with it.
        case when a.last_at - a.first_at >= (select min_span from t)
              and coalesce(a.consuming_s,0) > 0 and a.consumed_g > 0
              and n.total_g is not null
             then now() + make_interval(secs =>
                    (n.total_g / (a.consumed_g / a.consuming_s))::double precision)
-                 < public.last_service_window_end('Asia/Kolkata', null)
-                   + interval '1 day' * 0
+                 < (select ((now() at time zone 'Asia/Kolkata')::date + w.ends_at)
+                             at time zone 'Asia/Kolkata'
+                      from public.service_windows w
+                     where w.device_id is null
+                       and (now() at time zone 'Asia/Kolkata')::time
+                             between w.starts_at and w.ends_at
+                     order by w.starts_at limit 1)
        end                                              as short_before_close
   from agg a
   join lateral (
     -- The most recent grid point, which is "now" for this slot.
     select s.buffer_g, s.counter_g, s.total_g
       from public.slot_stock_series s
-     where s.food_slot = a.food_slot and s.total_g is not null
+     where s.location = a.location and s.food_slot = a.food_slot
+       and s.total_g is not null
      order by s.at_ts desc limit 1
   ) n on true
 ;
@@ -2157,7 +2213,7 @@ comment on view public.slot_burn_rate is
   'not value every hall''s buffer, which makes the rate a lower bound.';
 
 -- #####################################################################
--- ##  PART 7 of 7:  migrate_manual_fill.sql
+-- ##  PART 7 of 8:  migrate_manual_fill.sql
 -- ##  TRIAL HARNESS -- the manual fill estimate
 -- #####################################################################
 
@@ -2242,6 +2298,37 @@ create table if not exists public.trial_vessel_capacity (
   updated_at  timestamptz not null default now()
 );
 
+-- updated_at DID NOT ADVANCE ON AN EDIT. The column defaults to now() at
+-- insert and nothing moved it afterwards: the dashboard upserts only
+-- {meal_type, capacity_g}, so PostgREST's DO UPDATE never touched it.
+--
+-- A DEDICATED FUNCTION, not the existing tg_meal_food_mapping_touch(): that one
+-- assigns new.created_at as well, and this table has no such column, so reusing
+-- it would raise on every save. search_path is pinned to '' the same way every
+-- other trigger function here is.
+--
+-- Worth having even though nothing reads the column yet. The capacity is the
+-- denominator of every kilogram figure on the trial card, so "when was this
+-- last changed" is the first question to ask when two people disagree about
+-- what the dashboard said.
+create or replace function public.tg_trial_capacity_touch()
+returns trigger language plpgsql set search_path = '' as $$
+begin
+  new.updated_at := now();
+  return new;
+end $$;
+
+-- LOCKED DOWN LIKE EVERY OTHER TRIGGER FUNCTION HERE. Postgres grants EXECUTE
+-- to PUBLIC on a new function by default, and apply_loadcell.sql's own
+-- verification refuses to commit when it finds one -- which is exactly how this
+-- omission was caught, before it shipped, rather than after.
+revoke all on function public.tg_trial_capacity_touch() from public, anon, authenticated;
+
+drop trigger if exists trial_vessel_capacity_touch on public.trial_vessel_capacity;
+create trigger trial_vessel_capacity_touch
+  before update on public.trial_vessel_capacity
+  for each row execute function public.tg_trial_capacity_touch();
+
 comment on table public.trial_vessel_capacity is
   'TRIAL HARNESS. Full-vessel mass per meal, so a manual percentage can be '
   'rendered in kilograms: 50% of an 18 kg vessel is 9 kg. Separate from '
@@ -2272,7 +2359,14 @@ grant select, insert, update, delete on public.trial_vessel_capacity to authenti
 --
 -- A separate view costs nothing, joins in one line on the dashboard, and is
 -- deleted by the rollback along with everything else.
-create or replace view public.trial_manual_fill as
+-- security_invoker, which schema.sql calls mandatory and which every other view
+-- in this repo carries. Without it a view runs with the OWNER's rights, so RLS
+-- is evaluated as the owner rather than as the caller -- harmless for these
+-- three, which are granted to `authenticated` only and select nothing an
+-- authenticated user cannot already read, and still wrong to leave off: the
+-- next grant added to one of them would quietly bypass a policy.
+create or replace view public.trial_manual_fill
+  with (security_invoker = true) as
 select d.device_id,
        d.location,
        d.food_slot,
@@ -2300,7 +2394,8 @@ grant select on public.trial_manual_fill to authenticated;
 -- analysis can use. Rows with one or the other are excluded rather than
 -- coalesced: a missing manual estimate is not 0%, and pairing a measurement
 -- against an assumption would manufacture agreement.
-create or replace view public.trial_fill_vs_weight as
+create or replace view public.trial_fill_vs_weight
+  with (security_invoker = true) as
 select s.device_id,
        s.recorded_at,
        d.location,
@@ -2316,14 +2411,50 @@ select s.device_id,
        -- an absolute value.
        (s.manual_fill_pct::numeric / 100) * c.capacity_g - s.weight_g
                                                           as error_g,
-       case when s.weight_g > 0
+       -- NULL BELOW A FLOOR, because a percentage of almost nothing is not a
+       -- percentage. A 9 kg discrepancy against a scale reading 4 g is
+       -- +224900%: arithmetically right, and a statement about the denominator
+       -- rather than about anybody's judgement.
+       --
+       -- Two ways to reach it and both are real -- an idle counter with no
+       -- vessel on it, or a full-vessel capacity somebody set wrong. Neither is
+       -- an estimation error, and leaving them in would wreck any mean taken
+       -- over this column: one such row outweighs a thousand honest ones.
+       --
+       -- error_g is still reported for those rows. The kilograms remain true;
+       -- only the ratio stops meaning anything.
+       case when s.weight_g >= 200
             then round((((s.manual_fill_pct::numeric / 100) * c.capacity_g
                          - s.weight_g) / s.weight_g) * 100, 1)
-       end                                                as error_pct
+       end                                                as error_pct,
+       -- So the exclusion is visible rather than looking like missing data, and
+       -- so "how often was the counter idle when an estimate was standing?" is
+       -- itself answerable -- which is a result about how the knob gets used.
+       (s.weight_g < 200)                                 as scale_near_empty
   from public.weight_samples s
   join public.devices d on d.device_id = s.device_id
+  -- THE MEAL OF THE SAMPLE, NOT THE MEAL OF THE QUERY. This joined
+  -- current_meal_type(d.timezone), whose at_ts defaults to now(), so every
+  -- historical row was priced at whatever vessel capacity happens to apply when
+  -- somebody opens the page -- and outside every service window, which is about
+  -- fifteen hours of the day, it matched nothing at all and error_pct came back
+  -- NULL for the entire table.
+  --
+  -- That is the one view this whole trial exists to produce, so it was silently
+  -- answering a different question from the one asked, and answering nothing
+  -- for most of the day.
+  --
+  -- last_served_meal() rather than the two-argument current_meal_type(), and
+  -- the difference matters here: it looks BACKWARD to the most recently started
+  -- window, so a sample taken in the lull after lunch is still attributed to
+  -- lunch instead of dropping out. 36ca30d found 53 of 119 paired rows were
+  -- taken with the counter near empty, which is exactly when an attendant is
+  -- between services -- so the boundary case is the common case. The lateral
+  -- form is the pattern the repo already uses for historical attribution; see
+  -- the rationale at schema.sql:1307.
+  left join lateral public.last_served_meal(d.timezone, s.recorded_at) lm on true
   left join public.trial_vessel_capacity c
-         on c.meal_type = public.current_meal_type(d.timezone)
+         on c.meal_type = lm.meal_type
  where s.manual_fill_pct is not null
    and s.weight_state = 'ok'
    and s.weight_g is not null
@@ -2337,6 +2468,57 @@ comment on view public.trial_fill_vs_weight is
 
 revoke all on public.trial_fill_vs_weight from anon, authenticated, public;
 grant select on public.trial_fill_vs_weight to authenticated;
+
+-- #####################################################################
+-- ##  PART 8 of 8:  migrate_vbus_sense.sql
+-- ##  mains presence, from the VBUS divider
+-- #####################################################################
+
+do $$
+begin
+  if not exists (select 1 from information_schema.columns
+                  where table_schema = 'public' and table_name = 'device_status'
+                    and column_name = 'weight_state') then
+    raise exception
+      'run migrate_loadcell.sql first -- device_status has no weight columns';
+  end if;
+end $$;
+
+alter table public.device_status
+  add column if not exists external_power boolean;
+
+comment on column public.device_status.external_power is
+  'Mains present, from the VBUS divider. NOT `charging`: the charger stops when '
+  'the cell is full and 5 V remains, so this stays true where charging goes '
+  'false. NULL means unreadable -- no divider fitted -- and never "on battery".';
+
+grant update (external_power) on public.device_status to anon;
+
+-- What the dashboard reads. Every device, not only scales: a bowl counter with
+-- the divider fitted would report it too, and one without simply carries NULL.
+-- security_invoker, as schema.sql requires of every view here. It was omitted
+-- when this went in; nothing leaks without it, because the view is granted to
+-- `authenticated` only, but a view running with the owner's rights evaluates
+-- RLS as the owner and the next grant added would quietly bypass a policy.
+create or replace view public.device_power
+  with (security_invoker = true) as
+select d.device_id,
+       d.kind,
+       s.external_power,
+       s.charging,
+       s.battery_mv,
+       s.battery_level,
+       s.updated_at
+  from public.devices d
+  join public.device_status s using (device_id);
+
+comment on view public.device_power is
+  'Power state per device -- mains presence beside charge state, which are '
+  'different facts. Separate from device_overview only because that view is '
+  'defined in three files that must agree; folding this in is a follow-up.';
+
+revoke all on public.device_power from anon, authenticated, public;
+grant select on public.device_power to authenticated;
 
 -- #####################################################################
 -- ##  VERIFICATION -- runs before the commit, and aborts it on failure.

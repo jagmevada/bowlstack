@@ -65,7 +65,12 @@ grant update (external_power) on public.device_status to anon;
 
 -- What the dashboard reads. Every device, not only scales: a bowl counter with
 -- the divider fitted would report it too, and one without simply carries NULL.
-create or replace view public.device_power as
+-- security_invoker, as schema.sql requires of every view here. It was omitted
+-- when this went in; nothing leaks without it, because the view is granted to
+-- `authenticated` only, but a view running with the owner's rights evaluates
+-- RLS as the owner and the next grant added would quietly bypass a policy.
+create or replace view public.device_power
+  with (security_invoker = true) as
 select d.device_id,
        d.kind,
        s.external_power,

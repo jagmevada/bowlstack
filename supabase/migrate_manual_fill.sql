@@ -119,6 +119,37 @@ create table if not exists public.trial_vessel_capacity (
   updated_at  timestamptz not null default now()
 );
 
+-- updated_at DID NOT ADVANCE ON AN EDIT. The column defaults to now() at
+-- insert and nothing moved it afterwards: the dashboard upserts only
+-- {meal_type, capacity_g}, so PostgREST's DO UPDATE never touched it.
+--
+-- A DEDICATED FUNCTION, not the existing tg_meal_food_mapping_touch(): that one
+-- assigns new.created_at as well, and this table has no such column, so reusing
+-- it would raise on every save. search_path is pinned to '' the same way every
+-- other trigger function here is.
+--
+-- Worth having even though nothing reads the column yet. The capacity is the
+-- denominator of every kilogram figure on the trial card, so "when was this
+-- last changed" is the first question to ask when two people disagree about
+-- what the dashboard said.
+create or replace function public.tg_trial_capacity_touch()
+returns trigger language plpgsql set search_path = '' as $$
+begin
+  new.updated_at := now();
+  return new;
+end $$;
+
+-- LOCKED DOWN LIKE EVERY OTHER TRIGGER FUNCTION HERE. Postgres grants EXECUTE
+-- to PUBLIC on a new function by default, and apply_loadcell.sql's own
+-- verification refuses to commit when it finds one -- which is exactly how this
+-- omission was caught, before it shipped, rather than after.
+revoke all on function public.tg_trial_capacity_touch() from public, anon, authenticated;
+
+drop trigger if exists trial_vessel_capacity_touch on public.trial_vessel_capacity;
+create trigger trial_vessel_capacity_touch
+  before update on public.trial_vessel_capacity
+  for each row execute function public.tg_trial_capacity_touch();
+
 comment on table public.trial_vessel_capacity is
   'TRIAL HARNESS. Full-vessel mass per meal, so a manual percentage can be '
   'rendered in kilograms: 50% of an 18 kg vessel is 9 kg. Separate from '
@@ -149,7 +180,14 @@ grant select, insert, update, delete on public.trial_vessel_capacity to authenti
 --
 -- A separate view costs nothing, joins in one line on the dashboard, and is
 -- deleted by the rollback along with everything else.
-create or replace view public.trial_manual_fill as
+-- security_invoker, which schema.sql calls mandatory and which every other view
+-- in this repo carries. Without it a view runs with the OWNER's rights, so RLS
+-- is evaluated as the owner rather than as the caller -- harmless for these
+-- three, which are granted to `authenticated` only and select nothing an
+-- authenticated user cannot already read, and still wrong to leave off: the
+-- next grant added to one of them would quietly bypass a policy.
+create or replace view public.trial_manual_fill
+  with (security_invoker = true) as
 select d.device_id,
        d.location,
        d.food_slot,
@@ -177,7 +215,8 @@ grant select on public.trial_manual_fill to authenticated;
 -- analysis can use. Rows with one or the other are excluded rather than
 -- coalesced: a missing manual estimate is not 0%, and pairing a measurement
 -- against an assumption would manufacture agreement.
-create or replace view public.trial_fill_vs_weight as
+create or replace view public.trial_fill_vs_weight
+  with (security_invoker = true) as
 select s.device_id,
        s.recorded_at,
        d.location,
@@ -215,8 +254,28 @@ select s.device_id,
        (s.weight_g < 200)                                 as scale_near_empty
   from public.weight_samples s
   join public.devices d on d.device_id = s.device_id
+  -- THE MEAL OF THE SAMPLE, NOT THE MEAL OF THE QUERY. This joined
+  -- current_meal_type(d.timezone), whose at_ts defaults to now(), so every
+  -- historical row was priced at whatever vessel capacity happens to apply when
+  -- somebody opens the page -- and outside every service window, which is about
+  -- fifteen hours of the day, it matched nothing at all and error_pct came back
+  -- NULL for the entire table.
+  --
+  -- That is the one view this whole trial exists to produce, so it was silently
+  -- answering a different question from the one asked, and answering nothing
+  -- for most of the day.
+  --
+  -- last_served_meal() rather than the two-argument current_meal_type(), and
+  -- the difference matters here: it looks BACKWARD to the most recently started
+  -- window, so a sample taken in the lull after lunch is still attributed to
+  -- lunch instead of dropping out. 36ca30d found 53 of 119 paired rows were
+  -- taken with the counter near empty, which is exactly when an attendant is
+  -- between services -- so the boundary case is the common case. The lateral
+  -- form is the pattern the repo already uses for historical attribution; see
+  -- the rationale at schema.sql:1307.
+  left join lateral public.last_served_meal(d.timezone, s.recorded_at) lm on true
   left join public.trial_vessel_capacity c
-         on c.meal_type = public.current_meal_type(d.timezone)
+         on c.meal_type = lm.meal_type
  where s.manual_fill_pct is not null
    and s.weight_state = 'ok'
    and s.weight_g is not null

@@ -20,15 +20,45 @@ import { readFileSync, writeFileSync } from 'node:fs';
 const REPO = new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1');
 const SRC = `${REPO}/supabase`;
 
+// [migration, what it does, the rollback that undoes it or null]
+//
+// THE THIRD COLUMN EXISTS BECAUSE THE UNDO LIST WENT STALE. The apply list in
+// the generated header has always been interpolated from this table, but the
+// rollback list beside it was a hand-written literal -- so when
+// migrate_manual_fill.sql was appended here, the undo instructions were not
+// updated and the documented three-step sequence ABORTED at step 2:
+// rollback_weight_samples.sql drops a table that trial_fill_vs_weight still
+// selects from, and Postgres refuses. Two lists, one maintained.
+//
+// Now both are derived from this one table and the undo order is simply the
+// reverse of the apply order, which is also what the header has always claimed
+// it was. A part with no rollback carries null -- migrate_bowl_weight.sql
+// predates the load cells and the bowl counters depend on it, and the two
+// registry steps are inserts into an existing table.
 const PARTS = [
-  ['migrate_bowl_weight.sql', 'per-bowl weight, and the Master Dashboard view'],
-  ['migrate_loadcell.sql', 'load-cell stations alongside the bowl counters'],
-  ['register_loadcells.sql', 'LDC-001..032 into the devices registry'],
-  ['assign_loadcells.sql', 'each LDC onto the position of its BWL'],
-  ['migrate_weight_samples.sql', 'the analog history a scale appends to'],
-  ['migrate_burn_rate.sql', 'consumption rate, and when a dish runs out'],
-  ['migrate_manual_fill.sql', 'TRIAL HARNESS -- the manual fill estimate'],
+  ['migrate_bowl_weight.sql', 'per-bowl weight, and the Master Dashboard view', null],
+  ['migrate_loadcell.sql', 'load-cell stations alongside the bowl counters', 'rollback_loadcell.sql'],
+  ['register_loadcells.sql', 'LDC-001..032 into the devices registry', null],
+  ['assign_loadcells.sql', 'each LDC onto the position of its BWL', null],
+  ['migrate_weight_samples.sql', 'the analog history a scale appends to', 'rollback_weight_samples.sql'],
+  ['migrate_burn_rate.sql', 'consumption rate, and when a dish runs out', 'rollback_burn_rate.sql'],
+  ['migrate_manual_fill.sql', 'TRIAL HARNESS -- the manual fill estimate', 'rollback_manual_fill.sql'],
+  // MAINS PRESENCE, AND IT WAS MISSING FROM THIS LIST ENTIRELY. The firmware
+  // puts external_power in EVERY device_status PATCH (scale_telemetry.cpp:479),
+  // so a database built from this file without the column answers 400 and the
+  // scale goes SILENT -- no weight, no state, no battery -- while its own panel
+  // looks perfectly normal. It was invisible because the live database had the
+  // column applied by hand. A second site would have found it the hard way.
+  //
+  // After migrate_loadcell.sql, necessarily: migrate_vbus_sense.sql raises
+  // unless device_status.weight_state already exists.
+  ['migrate_vbus_sense.sql', 'mains presence, from the VBUS divider', 'rollback_vbus_sense.sql'],
 ];
+
+// Reverse of the apply order, skipping the parts that have no rollback. This
+// also puts rollback_vbus_sense.sql ahead of rollback_loadcell.sql, which it
+// must be: public.device_power reads devices.kind.
+const ROLLBACKS = PARTS.map(([, , r]) => r).filter(Boolean).reverse();
 
 // The last two were missing until an adversarial pass ran this file into an
 // empty database as `anon` and found that public.weight_samples did not exist.
@@ -90,19 +120,17 @@ const out = `-- ================================================================
 --  WHAT THIS IS FOR
 --  ---------------------------------------------------------------------
 --  Paste the whole file into the Supabase SQL editor and run it ONCE. It
---  does what these six do, in the only order that works:
+--  does what these ${PARTS.length} do, in the only order that works:
 --
 ${PARTS.map(([f, w], i) => `--    ${i + 1}. ${f.padEnd(26)} ${w}`).join('\n')}
 --
 --  ---------------------------------------------------------------------
 --  IF YOU NEED TO UNDO IT AFTER IT HAS COMMITTED
 --  ---------------------------------------------------------------------
---  Run these three, IN THIS ORDER -- they undo in the reverse of the order
---  applied, because each drops objects the one before it depends on:
+--  Run these ${ROLLBACKS.length}, IN THIS ORDER -- they undo in the reverse of the
+--  order applied, because each drops objects the one before it depends on:
 --
---      rollback_burn_rate.sql
---      rollback_weight_samples.sql
---      rollback_loadcell.sql
+${ROLLBACKS.map((f) => `--      ${f}`).join('\n')}
 --
 --  Taking them out of order fails on a dependency rather than doing
 --  damage, so a mistake here is loud. Note that migrate_bowl_weight.sql
@@ -112,7 +140,7 @@ ${PARTS.map(([f, w], i) => `--    ${i + 1}. ${f.padEnd(26)} ${w}`).join('\n')}
 --  ---------------------------------------------------------------------
 --  WHY IT IS SAFE TO RUN MID-SERVICE
 --  ---------------------------------------------------------------------
---  ONE TRANSACTION. All six parts and the verification run inside a single
+--  ONE TRANSACTION. All ${PARTS.length} parts and the verification run inside a single
 --  BEGIN. If ANY of it fails -- a missing prerequisite, a constraint, a
 --  verification check -- the whole thing rolls back and your database is
 --  exactly as it was. There is no half-applied state to recover from.

@@ -47,6 +47,25 @@ with present as (
     (select count(*) from information_schema.columns
       where table_schema='public' and table_name='slot_quantity'
         and column_name='measured_weight_g')                        > 0 as c_measured,
+    -- THE FOUR THIS FILE USED TO STOP SHORT OF. It is named by CLAUDE.md,
+    -- docs/supabase.md and schema.sql as the authority on what a database has,
+    -- and it checked six steps out of ten -- so it reported a COMPLETE database
+    -- that answers 400 to every scale PATCH. The last two matter most: the
+    -- firmware puts manual_fill_pct and external_power in bodies it sends
+    -- unconditionally, and a missing column there is not a degraded feature,
+    -- it is the whole device going silent.
+    --
+    -- No gating needed, unlike the `scales` CTE below: information_schema
+    -- returns zero rows for an absent table rather than raising, and
+    -- to_regclass returns NULL rather than erroring on an unknown name.
+    to_regclass('public.weight_samples')          is not null as t_samples,
+    to_regclass('public.slot_burn_rate')          is not null as t_burn,
+    (select count(*) from information_schema.columns
+      where table_schema='public' and table_name='device_status'
+        and column_name='manual_fill_pct')                          > 0 as c_fill,
+    (select count(*) from information_schema.columns
+      where table_schema='public' and table_name='device_status'
+        and column_name='external_power')                           > 0 as c_extpwr,
     -- Registration.
     (select count(*) from public.devices where device_id like 'BWL-%') as n_stacks
 ),
@@ -91,7 +110,25 @@ select item as step, name as run_this, status, note from (
              when (select n_scales from scales) > 0 then 'PARTIAL'
              else 'not run' end,
         coalesce('LDC-001..032: ' || (select n_scales from scales)::text
-                 || ' registered', 'needs devices.kind first'))
+                 || ' registered', 'needs devices.kind first')),
+    (7, 'migrate_weight_samples.sql',
+        case when (select t_samples from present) then 'installed'
+             else 'MISSING' end,
+        'weight_samples -- the analog history a scale appends to'),
+    (8, 'migrate_burn_rate.sql',
+        case when (select t_burn from present) then 'installed'
+             else 'MISSING' end,
+        'slot_stock_series + slot_burn_rate -- when a dish runs out'),
+    (9, 'migrate_manual_fill.sql',
+        case when (select c_fill from present) then 'installed'
+             else 'MISSING' end,
+        'device_status.manual_fill_pct -- FIRMWARE PATCHES THIS COLUMN; '
+        'absent means 400 on every post and the scale goes silent'),
+    (10, 'migrate_vbus_sense.sql',
+        case when (select c_extpwr from present) then 'installed'
+             else 'MISSING' end,
+        'device_status.external_power -- FIRMWARE PATCHES THIS COLUMN; '
+        'absent means 400 on every post and the scale goes silent')
 ) as t(item, name, status, note)
 order by item;
 
@@ -104,7 +141,14 @@ order by item;
 --    2. migrate_loadcell.sql        <- refuses unless 1 has run
 --    3. register_loadcells.sql      <- refuses unless 2 has run (needs kind)
 --    4. assign_loadcells.sql        <- mirrors each LDC onto its BWL
---    5. smoke_test.sql              <- 32 assertions; expect ALL PASS
+--    5. migrate_weight_samples.sql  <- the history a scale appends to
+--    6. migrate_burn_rate.sql       <- reads weight_samples, so after 5
+--    7. migrate_manual_fill.sql     <- the trial's manual estimate
+--    8. migrate_vbus_sense.sql      <- mains presence; refuses unless 2 has run
+--    9. smoke_test.sql              <- 32 assertions; expect ALL PASS
+--
+--  Steps 5-8 are what apply_loadcell.sql fuses together with 1-4, so running
+--  that one file instead is the shorter route and the one the docs point at.
 --
 --  weekly_menu_and_offline.sql, if it has never been run, goes AFTER 2 --
 --  it carries its own copies of two views whose bodies now read devices.kind,

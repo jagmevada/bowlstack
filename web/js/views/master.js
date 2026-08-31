@@ -62,7 +62,27 @@ export function renderMaster(state) {
   // Keyed by slot so a card can find its own rate without a second loop, and
   // absent entirely on a database without migrate_burn_rate.sql -- in which
   // case every card simply says nothing about consumption.
-  const burn = new Map((state.burn || []).map(b => [Number(b.food_slot), b]));
+  //
+  // ONE ROW PER HALL PER SLOT NOW, so this cannot be a plain Map(...) over the
+  // list any more -- that kept whichever hall happened to come last. slot 3 is
+  // a different dish in each hall, and the view used to sum all three into a
+  // single curve and a single runs_out_at; keying it by (location, food_slot)
+  // is what fixed that, and the cost is that the card has to choose.
+  //
+  // IT CHOOSES THE EARLIEST DEADLINE, because the question the card answers is
+  // "does this need a second production run", and the hall that empties first
+  // is the one that decides. A row with no runs_out_at loses to one that has
+  // it; if none has one, the first is kept so g_per_hour and is_partial still
+  // render.
+  const burn = new Map();
+  for (const b of (state.burn || [])) {
+    const k = Number(b.food_slot);
+    const prev = burn.get(k);
+    if (!prev) { burn.set(k, b); continue; }
+    if (b.runs_out_at == null) continue;
+    if (prev.runs_out_at == null ||
+        new Date(b.runs_out_at) < new Date(prev.runs_out_at)) burn.set(k, b);
+  }
   // Grouped once here rather than filtered per card: the series is one row per
   // slot per five minutes, so filtering inside the loop is quadratic over a
   // list that grows with both the fleet and the window.
@@ -378,7 +398,11 @@ function burnLine(rate, tz, series) {
   const bits = [];
   if (outAt && minsLeft != null && minsLeft >= 0) {
     bits.push(h('span', { class: 'mburn-out' },
-      `Empty about ${fmtClock(rate.runs_out_at, tz)}`));
+      // The hall is named because the deadline is now ONE hall's, not the
+      // slot's: without it "Empty about 19:30" on a slot served in three halls
+      // reads as a claim about all three.
+      `Empty about ${fmtClock(rate.runs_out_at, tz)}`
+        + (rate.location ? `, ${LOCATION_NAMES[rate.location] || rate.location}` : '')));
     bits.push(h('span', { class: 'dim' }, humanLeft(minsLeft)));
   } else {
     // A rate with no projection means the stock is not falling. Say that

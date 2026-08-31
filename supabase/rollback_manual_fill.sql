@@ -21,6 +21,9 @@ drop view if exists public.trial_manual_fill;
 
 drop table if exists public.trial_vessel_capacity;
 
+-- The trigger went with the table; its function did not.
+drop function if exists public.tg_trial_capacity_touch();
+
 -- The grants go with the columns; naming them anyway so a partially applied
 -- migration rolls back as cleanly as a complete one.
 revoke update (manual_fill_pct, manual_fill_age_s)
