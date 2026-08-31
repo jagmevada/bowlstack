@@ -32,6 +32,7 @@
 // never been touched never joined anything at all -- so every load-cell station
 // was, in practice, an offline device with a WiFi page on it.
 
+#include <string.h>
 #include <Arduino.h>
 #include <Preferences.h>
 #include <WiFi.h>
@@ -228,8 +229,23 @@ void beginJoin(const char *ssid, const char *pass, bool isAuto) {
     WiFi.scanDelete();
     scanRunning_ = false;
   }
-  snprintf(joinSsid_, sizeof(joinSsid_), "%s", ssid ? ssid : "");
-  snprintf(joinPass_, sizeof(joinPass_), "%s", pass ? pass : "");
+  // STAGED THROUGH LOCALS, BECAUSE ONE CALLER HANDS US OUR OWN BUFFERS. The
+  // panel's join arrives as joinPending_ and loop() passes joinSsid_/joinPass_
+  // straight back in, so copying the arguments directly into those same buffers
+  // is snprintf with its source and destination the same object -- undefined
+  // behaviour, and undefined on the ONE path somebody is standing there
+  // watching. The auto path could never hit it: its pointers come from
+  // credentialAt(), which returns secret.h literals or credSsid_/credPass_.
+  //
+  // That asymmetry is the whole reason it survived. The ranked auto-join is
+  // exercised every boot and was always well-formed; the typed join is used
+  // once per site and was not.
+  char s[sizeof(joinSsid_)];
+  char p[sizeof(joinPass_)];
+  snprintf(s, sizeof(s), "%s", ssid ? ssid : "");
+  snprintf(p, sizeof(p), "%s", pass ? pass : "");
+  memcpy(joinSsid_, s, sizeof(joinSsid_));
+  memcpy(joinPass_, p, sizeof(joinPass_));
   joinIsAuto_ = isAuto;
   WiFi.begin(joinSsid_, joinPass_);
   joinStartedMs_ = millis();
