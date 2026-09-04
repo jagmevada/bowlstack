@@ -103,6 +103,12 @@ void withScale(State &s, float aG, float bG, float cG, bool calibrated, bool tar
                uint8_t online) {
   s.scale.calibrated = calibrated;
   s.scale.tared = tared;
+  // WITHOUT THIS THE PREVIEW RENDERS THE OLD BEHAVIOUR. The weight page now
+  // warns on `!tared && !platformZeroed`; left false on the desktop that
+  // degenerates to `!tared`, so the simulator kept showing the red chip the
+  // device no longer shows -- the exact sim/device divergence CLAUDE.md forbids.
+  // A fixture with cells answering is a commissioned platform.
+  s.scale.platformZeroed = (aG != 0.0f || bG != 0.0f || cG != 0.0f) || tared;
   s.scale.online = online;
 
   const float g[CELLS] = {aG, bG, cG};

@@ -250,10 +250,22 @@ const char *weightState(const scale::Snapshot &s) {
   // the dashboard can see the cells are alive.
   if (!s.calibrated) return ST_UNCALIBRATED;
 
-  // Calibrated but not zeroed: the figure is right about CHANGE and wrong about
-  // the absolute, because it still includes the platform. That is not a weight
-  // of the food, which is what the column means.
-  if (!s.tared) return ST_UNTARED;
+  // Calibrated but with NO ZERO OF ANY KIND: the figure is right about CHANGE
+  // and wrong about the absolute, because it still includes the platform. That
+  // is not a weight of the food, which is what the column means.
+  //
+  // TWO KINDS OF ZERO, AND ONLY ONE OF THEM IS THIS SESSION'S. platformZero is
+  // commissioned once per unit and restored from NVS at every boot; tare is a
+  // session trim, deliberately forgotten at power-off. This tested `tared`
+  // alone -- fine while a power-up auto-tare always ran, and wrong the moment
+  // that was compiled out: every unit then booted "untared", which nulls
+  // weight_g through the database's own (weight_state='ok') = (weight_g is not
+  // null) constraint, so the dashboard lost the mass entirely on a station that
+  // was measuring perfectly well against its commissioned zero.
+  //
+  // A unit with a platform zero is referenced. Say untared only when neither
+  // zero exists.
+  if (!s.tared && !s.platformZeroed) return ST_UNTARED;
 
   // OUTSIDE WHAT THE COLUMN WILL ACCEPT, which on this hardware means the
   // calibration factor is wrong by orders of magnitude rather than that the
@@ -265,7 +277,11 @@ const char *weightState(const scale::Snapshot &s) {
   // that looks like food. And sending it unclamped is worse than either: the
   // CHECK rejects it, PostgREST answers 400, and the station stops reporting
   // even the state that would have explained the fault.
-  const float g = s.totalGrams;
+  // THE NET, because the net is what goes in the column and the column has a
+  // CHECK on it. Testing the gross let an out-of-band net through to PostgREST,
+  // which answers 400 -- and a rejected PATCH takes the whole row with it,
+  // including the state that would have explained the reading.
+  const float g = s.totalGrams - s.vesselOffsetG;
   if (!(g >= (float)config::WEIGHT_PUBLISH_MIN_G &&
         g <= (float)config::WEIGHT_PUBLISH_MAX_G)) {
     // Written as !(in range) rather than (out of range) so a NaN -- which
@@ -436,6 +452,9 @@ bool patchStatus(const scale::Snapshot &s, uint32_t uptimeSec, uint16_t batteryM
 
   // --- the load-cell columns ---
   o["weight_state"] = state;
+  // NET OF THE VESSEL, matching the panel exactly. The offset is subtracted
+  // here rather than inside scale.cpp so that taring and the per-cell shares
+  // keep working on the real mass; see the note beside s.vesselOffsetG.
   if (haveWeight) o["weight_g"] = weightG;
   else o["weight_g"] = nullptr;
 
@@ -589,7 +608,30 @@ void loop(const scale::Snapshot &s, uint32_t uptimeSec, uint16_t batteryMv,
   // Sampling is local and costs nothing. The network gates POSTING, below.
   const char *state = weightState(s);
   const bool haveWeight = (state == ST_OK);
-  const int32_t weightG = haveWeight ? (int32_t)lroundf(s.totalGrams) : 0;
+  // NET OF THE EMPTY VESSEL, exactly as the panel shows it. One number reaches
+  // the operator and the dashboard, or they argue about which is right.
+  //
+  // Subtracted here rather than inside scale.cpp because the same snapshot
+  // feeds the per-cell share arithmetic, whose denominator must match the
+  // per-cell grams beside it, and the tare, which has to zero the REAL platform
+  // or this offset would be applied twice.
+  //
+  // NOT CLAMPED AT ZERO, and the schema is why. weight_g's CHECK allows -5000
+  // deliberately: "a tared platform legitimately reads a few grams below zero,
+  // and removing something that was on the platform at tare time is a real
+  // thing to do". Clamping buys nothing there and destroys the signal.
+  //
+  // It also manufactures the one reading this dashboard must never invent. With
+  // a 3.5 kg offset on a 2.5 kg vessel holding 800 g, the net is -200 g; clamped
+  // that becomes 0 g with state 'ok', which says the counter is EMPTY. Staff get
+  // sent to refill a slot that has food, and slot_burn_rate prices the remainder
+  // at nothing. Unclamped, -200 g is visibly impossible and names its own cause.
+  //
+  // Anything genuinely out of band is caught by the plausibility rails above --
+  // which now test the net, so it reports over_range with weight_g null rather
+  // than a fabricated zero.
+  const int32_t weightG =
+      haveWeight ? (int32_t)lroundf(s.totalGrams - s.vesselOffsetG) : 0;
 
   // --- is there news? ------------------------------------------------------
   // Deliberately NOT "has anything changed". The weight changes on every

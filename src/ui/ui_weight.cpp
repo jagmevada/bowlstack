@@ -50,6 +50,10 @@ const uint32_t C_KEY = 0x21262D;
 const uint32_t C_PRESENT = 0x1F6FEB;
 
 lv_obj_t *lblCaption;
+// The vessel offset in force, shown at the left end of the caption row. Its own
+// change guard: it moves only when somebody cycles the setting.
+lv_obj_t *lblOffset_ = nullptr;
+char prevOffset_[12] = {0};
 lv_obj_t *lblTotal;
 
 // --- the per-cell breakdown ------------------------------------------------
@@ -311,6 +315,29 @@ void buildWeight(lv_obj_t *parent) {
   lv_obj_set_style_text_align(lblCaption, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
   lv_label_set_long_mode(lblCaption, LV_LABEL_LONG_CLIP);
   lv_label_set_text(lblCaption, "total");
+
+  // THE OFFSET IN FORCE, at the left end of the caption's row. A figure that is
+  // being subtracted from the big number below has to be visible beside it --
+  // otherwise a station reading 8.0 kg is indistinguishable from one reading
+  // 10.5 kg with a 2.5 kg vessel taken off, and the operator has no way to tell
+  // which they are looking at.
+  //
+  // IGNORE_LAYOUT and positioned rather than added to the flex column, because
+  // the caption is a full-width centred label and this has to sit beside it
+  // without moving it. (0,0) is the top-left of the page's CONTENT box, which
+  // is exactly where the caption's own row starts.
+  //
+  // 14 px and muted: it is a standing condition, not a reading. Blank when the
+  // offset is off, so the ordinary case carries no extra ink at all.
+  lblOffset_ = lv_label_create(scr);
+  lv_obj_add_flag(lblOffset_, LV_OBJ_FLAG_IGNORE_LAYOUT);
+  lv_obj_set_style_text_font(lblOffset_, &lv_font_montserrat_14, LV_PART_MAIN);
+  lv_obj_set_style_text_color(lblOffset_, lv_color_hex(C_MUTED), LV_PART_MAIN);
+  lv_obj_set_pos(lblOffset_, 0, 1);
+  lv_obj_set_width(lblOffset_, 74);
+  lv_obj_set_style_text_align(lblOffset_, LV_TEXT_ALIGN_LEFT, LV_PART_MAIN);
+  lv_label_set_long_mode(lblOffset_, LV_LABEL_LONG_CLIP);
+  lv_label_set_text(lblOffset_, "");
 
   // The number ALONE, and it used to share this row with a "kg" on the same
   // baseline -- which read better, and cost 30 of the 224 px the page has.
@@ -665,7 +692,13 @@ void updateWeight(const State &st) {
     setTotalColor(C_MUTED);
     setIfChanged(lblCaption, prevCaption_, sizeof(prevCaption_), "total");
   } else {
-    if (s.calibrated) formatKg(buf, sizeof(buf), s.totalGrams, s.decimals);
+    // NET OF THE EMPTY VESSEL, when that is switched on. Subtracted here and
+    // in the uplink rather than in scale.cpp, because the same snapshot feeds
+    // the per-cell share arithmetic -- whose denominator must match the
+    // per-cell grams beside it -- and the tare, which has to zero the REAL
+    // platform or the offset lands twice.
+    if (s.calibrated)
+      formatKg(buf, sizeof(buf), s.totalGrams - s.vesselOffsetG, s.decimals);
     else snprintf(buf, sizeof(buf), "%ld", (long)s.totalCounts);
     setIfChanged(lblTotal, prevTotal_, sizeof(prevTotal_), buf);
     setTotalColor(s.overRange ? C_CELL_FAULT : C_TEXT);
@@ -684,6 +717,16 @@ void updateWeight(const State &st) {
                      : (partial ? "at least, uncalibrated cts"
                                 : "total, uncalibrated cts");
     setIfChanged(lblCaption, prevCaption_, sizeof(prevCaption_), cap);
+
+    // Only when it is actually being applied -- and only when calibrated, since
+    // an uncalibrated station is showing counts and a kilogram offset means
+    // nothing against them.
+    char off[12];
+    if (s.calibrated && s.vesselOffsetG > 0.0f)
+      snprintf(off, sizeof(off), "-%.1f kg", s.vesselOffsetG / 1000.0f);
+    else
+      off[0] = ' ';
+    setIfChanged(lblOffset_, prevOffset_, sizeof(prevOffset_), off);
   }
 
   // --- the flag ------------------------------------------------------------
@@ -722,10 +765,17 @@ void updateWeight(const State &st) {
       flag = down;
     }
     flagColor = C_FAULT;
-  } else if (!s.tared) {
+  } else if (!s.tared && !s.platformZeroed) {
     // The automatic power-up tare normally clears this within a few seconds of
     // boot. Seeing it persist means the platform never held still long enough,
     // which is worth knowing before trusting the number above it.
+    // ONLY WHEN THERE IS NO ZERO AT ALL. This fired on `!s.tared` alone, and
+    // since the power-up auto-tare was compiled out that is every boot -- so a
+    // correctly-reading station wore a red warning permanently, and the same
+    // condition nulled weight_g upstream and emptied the dashboard.
+    //
+    // platformZero is a commissioned zero restored from NVS; a session tare is
+    // a refinement on top of it. Warn when neither exists.
     flag = "not tared";
   }
   if (strncmp(prevFlag_, flag, sizeof(prevFlag_) - 1) != 0) {

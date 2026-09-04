@@ -215,6 +215,11 @@ bool toggleShowCells();
 // Off       compiled out with -DBOWLSTACK_AUTOTARE=0
 enum class AutoTare : uint8_t { Waiting, Observing, Done, GaveUp, Off };
 
+// The empty vessel's mass, subtracted from the DISPLAYED and REPORTED figure
+// only. Cycles off -> 2.0 -> 2.5 -> 3.0 -> 3.5 kg; persisted to NVS.
+float vesselOffsetG();
+float cycleVesselOffset();
+
 AutoTare autoTareState();
 
 // A short line fit for the dashboard.
@@ -283,6 +288,17 @@ struct Snapshot {
   // than leaving a device that quietly failed to zero itself looking identical
   // to one that succeeded.
   AutoTare autoTare;
+
+  // EVERY ONLINE CELL HAS A COMMISSIONED PLATFORM ZERO, restored from NVS at
+  // boot. Distinct from `tared`, which is this SESSION's trim and is forgotten
+  // at power-off by design. A unit with a platform zero and no session tare
+  // still knows what an empty platform reads -- it is referenced, not adrift.
+  bool platformZeroed;
+
+  // The mass of the empty serving vessel, subtracted from what is DISPLAYED and
+  // REPORTED. 0 means the feature is off. Never applied to taring or to the
+  // per-cell figures -- see the note where it is used.
+  float vesselOffsetG;
   bool overRange;  // at least one cell is saturated -- the total is not a weight
 
   // Increments on every publish. Lets a reader tell a fresh snapshot from a

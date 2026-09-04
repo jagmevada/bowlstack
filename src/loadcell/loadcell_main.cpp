@@ -465,6 +465,8 @@ void publishScale(uint32_t nowMs) {
   ui::State s = ui::demoLatest(nowMs);
   s.scale.calibrated = sn.calibrated;
   s.scale.tared = sn.tared;
+  s.scale.platformZeroed = sn.platformZeroed;
+  s.scale.vesselOffsetG = sn.vesselOffsetG;
   s.scale.online = sn.online;
   s.scale.totalGrams = sn.totalGrams;
   s.scale.overRange = sn.overRange;
@@ -598,6 +600,10 @@ void onRestoreDefault() {
   ui::calibSetMass(0.0f);  // re-prefilled from the snapshot on the next entry
 }
 
+
+void onCycleVessel() {
+  Serial.printf("ui: vessel offset -> %.1f kg\n", scale::cycleVesselOffset() / 1000.0f);
+}
 
 void onCycleAvg() {
   Serial.printf("ui: averaging -> %u samples\n", scale::cycleWindow());
@@ -1080,6 +1086,7 @@ void setup() {
   ui::pagesOnScaleTare(onTare);
   ui::pagesOnScaleClearCal(onClearCal);
   ui::pagesOnScaleCycleAvg(onCycleAvg);
+  ui::pagesOnScaleCycleVessel(onCycleVessel);
   ui::pagesOnScaleCyclePrecision(onCyclePrecision);
   ui::pagesOnScaleToggleCells(onToggleCells);
   ui::pagesOnScaleRestore(onRestoreDefault);

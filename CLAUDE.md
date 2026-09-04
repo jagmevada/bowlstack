@@ -176,6 +176,60 @@ C string. Reserve scripting for genuinely mechanical bulk edits.
 
 ---
 
+## Every change gets a regression pass. No exceptions for "small" ones.
+
+**A request names a symptom. Your job is the whole chain it sits in.** Before
+calling a change done, trace what depends on the thing you touched — forwards to
+what reads it, and outwards to the panel, the uplink, the database and the
+dashboard. Then say plainly what you checked.
+
+This rule exists because of a one-line change that read as trivial.
+
+> *"remove auto tare at start up"* → `-DBOWLSTACK_AUTOTARE=0`. Done in one line,
+> flashed, reported as complete. But the chain was:
+>
+> ```
+> no auto-tare  ->  tared = false        (session tare never taken)
+>               ->  weight_state 'untared'
+>               ->  weight_g NULL        (the schema's own CHECK enforces it)
+>               ->  the dashboard shows no mass at all
+> ```
+>
+> Three hops from a build flag to a blank dashboard mid-service, and a red
+> warning on a station that was measuring perfectly well. None of it was hard to
+> see; nobody looked.
+
+**What a regression pass actually is.** Not ceremony — four questions:
+
+1. **Who reads what I changed?** `grep` the symbol. Follow it to every consumer,
+   including SQL views and web code. A firmware field usually has three or four.
+2. **Does it cross a task boundary?** The UI is `loop()`; the scale task
+   preempts it. Anything written from a menu handler that the scale task also
+   touches must be queued, not applied — see `wantWindow_`, and the comment
+   above it explaining that a shared `Preferences` handle corrupts rather than
+   merely races.
+3. **Does the simulator still render what the device does?** Two `ui::State`
+   fields added and not set in `ui_demo.cpp` means the preview shows the OLD
+   behaviour and the divergence is invisible until it is flashed.
+4. **What does the number mean now?** If a displayed figure changes, check the
+   thing that is derived from it — a share denominator, a burn rate, a
+   plausibility rail. A total that is now net of something breaks anything that
+   assumed it was gross.
+
+**Spawn a reviewer for anything beyond a comment fix.** An `Agent` given the
+diff and told to hunt regressions has repeatedly found what the author missed —
+including, on the vessel-offset change, an NVS write from the wrong task, a
+zero-clamp that would have reported a counter holding food as EMPTY, and a menu
+hint that lied after Clear calibration. All three would have shipped.
+
+**Report what you verified and what you did not.** "Builds on all five, panel
+checked, cell path NOT verified because the load cells are off the unit" is
+worth more than a confident summary. Several hours went into chasing a stall
+that turned out to be a damaged charger IC, because a plausible software story
+was offered where "I have not measured this" was the honest answer.
+
+---
+
 ## Conventions this codebase already holds to
 
 These are established in the existing firmware and the UI follows them; they are

@@ -73,6 +73,7 @@ uint8_t depth_ = 0;
 void (*onTare_)(void) = nullptr;
 void (*onClearCal_)(void) = nullptr;
 void (*onCycleAvg_)(void) = nullptr;
+void (*onCycleVessel_)(void) = nullptr;
 void (*onCyclePrecision_)(void) = nullptr;
 void (*onRestore_)(void) = nullptr;
 void (*onPlatformZero_)(void) = nullptr;
@@ -107,6 +108,7 @@ enum : uint8_t {
   ROW_SCALE_CLEAR,
   ROW_SCALE_AVERAGE,
   ROW_SCALE_CELLS,
+  ROW_SCALE_VESSEL,
   ROW_SCALE_RESTORE,
 };
 
@@ -140,6 +142,7 @@ void doTare() {
 }
 void doClearCal() { if (onClearCal_) onClearCal_(); }
 void doCycleAvg() { if (onCycleAvg_) onCycleAvg_(); }
+void doCycleVessel() { if (onCycleVessel_) onCycleVessel_(); }
 void doCyclePrecision() { if (onCyclePrecision_) onCyclePrecision_(); }
 void doRestore() { if (onRestore_) onRestore_(); }
 void doPlatformZero() { if (onPlatformZero_) onPlatformZero_(); }
@@ -498,6 +501,15 @@ void buildPages() {
   // from its next power cycle showing kilograms again. With a deliberate route
   // to the built-in figure, clearing can mean cleared and this row is the
   // undo.
+  // THE EMPTY VESSEL'S OWN MASS, taken off what the panel shows and what the
+  // uplink sends -- and off NEITHER the tare nor the per-cell figures, which
+  // must stay on the real platform load. Ten vessels averaged about 2.5 kg.
+  //
+  // A cycling row, like Average and Precision above: the values worth having
+  // are few and known, and a keypad for a number chosen from four options is
+  // four gestures where one will do. Off is in the cycle, so the row is both
+  // the enable and the value.
+  menuAddRow(scaleMenu_, "Vessel offset", nullptr, doCycleVessel);
   menuAddRow(scaleMenu_, "Restore default", nullptr, doRestore);
 
   // CONTAINERS ONLY. Each page's contents are built the first time it is
@@ -561,6 +573,7 @@ void pagesOnCycleDefaultPage(void (*cb)(void)) { onCycleDefaultPage_ = cb; }
 void pagesOnScaleTare(void (*cb)(void)) { onTare_ = cb; }
 void pagesOnScaleClearCal(void (*cb)(void)) { onClearCal_ = cb; }
 void pagesOnScaleCycleAvg(void (*cb)(void)) { onCycleAvg_ = cb; }
+void pagesOnScaleCycleVessel(void (*cb)(void)) { onCycleVessel_ = cb; }
 void pagesOnScaleCyclePrecision(void (*cb)(void)) { onCyclePrecision_ = cb; }
 void pagesOnScaleRestore(void (*cb)(void)) { onRestore_ = cb; }
 void pagesOnScalePlatformZero(void (*cb)(void)) { onPlatformZero_ = cb; }
@@ -635,6 +648,10 @@ void pagesTick(uint32_t nowMs) {
     static char avg[8];
     snprintf(avg, sizeof(avg), "%u", s.scale.window);
     menuSetHint(scaleMenu_, ROW_SCALE_AVERAGE, avg);
+    static char vessel[12];
+    if (s.scale.vesselOffsetG <= 0.0f) snprintf(vessel, sizeof(vessel), "off");
+    else snprintf(vessel, sizeof(vessel), "%.1f kg", s.scale.vesselOffsetG / 1000.0f);
+    menuSetHint(scaleMenu_, ROW_SCALE_VESSEL, vessel);
   }
 
   wifiTick();

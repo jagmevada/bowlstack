@@ -97,6 +97,12 @@ const char *KEY_CPG = "cpg";
 // third cell existed keeps the constants it was set up with. C simply has no
 // stored zero yet, which loadPersisted() already handles correctly.
 const char *KEY_OFF_FMT = "off%c";
+// The empty vessel's own mass. Ten were weighed and averaged about 2.5 kg, so
+// the cycle below offers that and its neighbours rather than a free number: a
+// tap-to-cycle row is the idiom this menu already uses for Average, Precision
+// and Default page, and it needs no keypad.
+const char *KEY_VESSEL = "vesg";
+float vesselOffsetG_ = 0.0f;
 const char *KEY_TARED_FMT = "tar%c";
 
 // NVS keys are capped at 15 characters; these are four.
@@ -393,6 +399,9 @@ volatile uint8_t wantDecimals_ = 0;  // 0 = no change pending
 // rather than a flag: 0 has to mean "nothing pending", and a plain bool has no
 // spare state for that. 1 = turn off, 2 = turn on.
 volatile uint8_t wantShowCells_ = 0;
+// 0 = nothing pending; otherwise the vessel offset in grams, +1 so that a
+// pending "off" is distinguishable from "no request". See cycleVesselOffset().
+volatile uint16_t wantVessel_ = 0;
 
 Preferences prefs_;
 
@@ -489,6 +498,8 @@ void loadPersisted() {
   prefs_.begin(NVS_NS, false);
   for (uint8_t i = 0; i < CELLS; i++)
     platformZero_[i] = prefs_.getInt(cellKey(key, sizeof(key), KEY_OFF_FMT, i), 0);
+  // Not per cell -- one vessel offset for the platform.
+  vesselOffsetG_ = prefs_.getFloat(KEY_VESSEL, 0.0f);
   // The build-time default is the fallback, so a freshly flashed board reads
   // kilograms straight away instead of counts. NVS still wins: a unit that has
   // been calibrated against its own mass keeps that figure across reflashes,
@@ -641,7 +652,30 @@ void publish() {
       c.grams = 0.0f;
     }
   }
+  // REAL MASS, ALWAYS. The vessel offset is carried alongside rather than
+  // baked in here, because three things read this figure and only two of them
+  // want it net: the panel and the uplink do, the per-cell share arithmetic
+  // does NOT (its denominator must match the per-cell grams beside it), and
+  // taring must not either -- a tare has to zero the REAL platform or the
+  // offset would be applied twice.
   s.totalGrams = s.calibrated ? (float)sumNet / countsPerGram_ : 0.0f;
+  // NOT GATED ON calibrated. Both consumers that apply it are already inside
+  // their own calibrated check, and the one place this actually reaches is the
+  // menu HINT -- which, gated, read "off" after Clear calibration while NVS
+  // still held 2500. The next tap would then read the real value and jump to
+  // 3000, so the operator asks for 2.0 kg and silently gets 3.0.
+  s.vesselOffsetG = vesselOffsetG_;
+
+  // A COMMISSIONED ZERO IS A ZERO. Every online cell carries a platformZero
+  // restored from NVS, so the reading is referenced to an empty platform even
+  // with no session tare -- which is the normal state now that the power-up
+  // auto-tare is compiled out.
+  // FROM THE FLAG, NOT FROM THE VALUE. allCellsZeroed() reads the per-cell
+  // record that vouches for each platform zero; testing platformZero != 0
+  // instead would re-introduce exactly the inference loadPersisted() refuses --
+  // "a platform that happened to tare at 0 counts would come back from a reboot
+  // claiming it had never been tared".
+  s.platformZeroed = s.zeroed;
   s.seq = published_.seq + 1;
 
   if (xSemaphoreTake(mutex_, portMAX_DELAY) != pdTRUE) return;
@@ -651,6 +685,15 @@ void publish() {
 }
 
 void serviceCommands() {
+  if (wantVessel_) {
+    vesselOffsetG_ = (float)(wantVessel_ - 1);
+    wantVessel_ = 0;
+    prefs_.begin(NVS_NS, false);
+    prefs_.putFloat(KEY_VESSEL, vesselOffsetG_);
+    prefs_.end();
+    Serial.printf("scale: vessel offset -> %.1f kg\n", vesselOffsetG_ / 1000.0f);
+  }
+
   if (wantWindow_) {
     const uint8_t n = wantWindow_;
     wantWindow_ = 0;
@@ -1423,6 +1466,37 @@ void tare() { wantTare_ = true; }
 void setPlatformZero() { wantPlatformZero_ = true; }
 
 void requestSelfTest() { wantSelfTest_ = true; }
+
+float vesselOffsetG() { return vesselOffsetG_; }
+
+// off -> 2.0 -> 2.5 -> 3.0 -> 3.5 -> off. Persisted immediately: this is a
+// property of the crockery, not of the session, and re-entering it after every
+// power cycle is exactly the kind of chore that gets skipped.
+float cycleVesselOffset() {
+  // QUEUED, NOT APPLIED, and this is the whole reason the flag exists. Writing
+  // NVS here would write it from the UI task while the scale task is using the
+  // same Preferences object -- see the note above wantWindow_: not reentrant,
+  // not guarded, and the failure is a CORRUPT NAMESPACE rather than a wrong
+  // reading. A unit that forgets its calibration factor and its platform zeros
+  // reports weight_state 'untared' and sends no mass at all, which is exactly
+  // the blackout the platformZeroed change was made to end.
+  //
+  // The scale task runs at priority 3 on the same core as loop()'s priority 1,
+  // so it preempts mid-write; this is a real race, not a theoretical one.
+  //
+  // Reads the PENDING value if one is queued, so two quick taps step twice
+  // rather than both stepping off the same starting point -- cycleWindow()'s
+  // reasoning, and the same shape.
+  const float from = wantVessel_ ? (float)(wantVessel_ - 1) : vesselOffsetG_;
+  float next;
+  if (from <= 0.0f) next = 2000.0f;
+  else if (from < 2400.0f) next = 2500.0f;
+  else if (from < 2900.0f) next = 3000.0f;
+  else if (from < 3400.0f) next = 3500.0f;
+  else next = 0.0f;
+  wantVessel_ = (uint16_t)next + 1;  // +1 so a pending 0 is not "no request"
+  return next;
+}
 
 AutoTare autoTareState() { return autoTare_; }
 

@@ -55,6 +55,11 @@ void pagesOnScaleClearCal(void (*cb)(void));
 // flipping between two of them with a mass on the platform than by reflashing.
 void pagesOnScaleCycleAvg(void (*cb)(void));
 
+// TRIAL/FIELD. Cycles the empty-vessel offset: off, 2.0, 2.5, 3.0, 3.5 kg. A
+// cycling row rather than a keypad, matching Average and Precision -- ten
+// vessels averaged 2.5 kg, so the useful values are few and known.
+void pagesOnScaleCycleVessel(void (*cb)(void));
+
 // Steps the dashboard reading between 0.0, 0.00 and 0.000 kg and wraps.
 //
 // DISPLAY ONLY, and deliberately so: it changes how the total is printed, never

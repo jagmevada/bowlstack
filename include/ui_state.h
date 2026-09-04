@@ -101,6 +101,11 @@ struct ScaleView {
   bool calibrated;
   bool zeroed;   // every online cell has a stored platform zero
   bool tared;    // every online cell has a tare for this session
+  // Every online cell has its commissioned platform zero from NVS. A unit can
+  // be platformZeroed and not tared, which is the ordinary state at boot.
+  bool platformZeroed;
+  // Empty-vessel mass to subtract from what is shown and sent. 0 = off.
+  float vesselOffsetG;
   bool overRange;  // at least one cell saturated -- the total is not a weight
 
   // Carried so the Device page can state them rather than the reader having to
