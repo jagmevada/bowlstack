@@ -1472,7 +1472,7 @@ float vesselOffsetG() { return vesselOffsetG_; }
 // off -> 2.0 -> 2.5 -> 3.0 -> 3.5 -> off. Persisted immediately: this is a
 // property of the crockery, not of the session, and re-entering it after every
 // power cycle is exactly the kind of chore that gets skipped.
-float cycleVesselOffset() {
+float setVesselOffset(float grams) {
   // QUEUED, NOT APPLIED, and this is the whole reason the flag exists. Writing
   // NVS here would write it from the UI task while the scale task is using the
   // same Preferences object -- see the note above wantWindow_: not reentrant,
@@ -1484,18 +1484,12 @@ float cycleVesselOffset() {
   // The scale task runs at priority 3 on the same core as loop()'s priority 1,
   // so it preempts mid-write; this is a real race, not a theoretical one.
   //
-  // Reads the PENDING value if one is queued, so two quick taps step twice
-  // rather than both stepping off the same starting point -- cycleWindow()'s
-  // reasoning, and the same shape.
-  const float from = wantVessel_ ? (float)(wantVessel_ - 1) : vesselOffsetG_;
-  float next;
-  if (from <= 0.0f) next = 2000.0f;
-  else if (from < 2400.0f) next = 2500.0f;
-  else if (from < 2900.0f) next = 3000.0f;
-  else if (from < 3400.0f) next = 3500.0f;
-  else next = 0.0f;
-  wantVessel_ = (uint16_t)next + 1;  // +1 so a pending 0 is not "no request"
-  return next;
+  // Bounded at 65 kg by the uint16 that carries it, which is far above any
+  // serving vessel and far below anything three 20 kg cells could hold anyway.
+  if (grams < 0.0f) grams = 0.0f;
+  if (grams > 60000.0f) grams = 60000.0f;
+  wantVessel_ = (uint16_t)(grams + 0.5f) + 1;  // +1 so a pending 0 is a request
+  return grams;
 }
 
 AutoTare autoTareState() { return autoTare_; }

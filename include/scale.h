@@ -218,7 +218,8 @@ enum class AutoTare : uint8_t { Waiting, Observing, Done, GaveUp, Off };
 // The empty vessel's mass, subtracted from the DISPLAYED and REPORTED figure
 // only. Cycles off -> 2.0 -> 2.5 -> 3.0 -> 3.5 kg; persisted to NVS.
 float vesselOffsetG();
-float cycleVesselOffset();
+// Zero switches it off. Queued and written on the scale task, never here.
+float setVesselOffset(float grams);
 
 AutoTare autoTareState();
 

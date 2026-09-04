@@ -238,8 +238,19 @@ lv_obj_t *addNetworkRow(lv_obj_t *parent, uint8_t idx) {
   // It also fits two more networks on screen, which is the point.
   lv_obj_set_style_text_font(name, &lv_font_montserrat_16, LV_PART_MAIN);
   lv_obj_set_style_text_color(name, lv_color_hex(C_TEXT), LV_PART_MAIN);
+  // LONG_DOT NEEDS BOTH DIMENSIONS FIXED, and only the width was. A label whose
+  // height is LV_SIZE_CONTENT grows to fit whatever it holds, so the text
+  // always "fits" and DOT never truncates -- a long SSID simply wrapped onto a
+  // second line. The row is 30 px with 5 px padding, so the content box is 20:
+  // two 18 px lines centred in 20 px means BOTH are clipped, top and bottom,
+  // and the network is unreadable and unpickable.
+  //
+  // Pinning the height to one line is what arms the ellipsis: now "a-very-long-
+  // network-name" renders as "a-very-long-ne..." on one line, which is what a
+  // person needs to recognise it from.
   lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
   lv_obj_set_width(name, 155);
+  lv_obj_set_height(name, 18);  // lv_font_montserrat_16's line_height
   lv_label_set_text(name, nets_[idx].ssid);
 
   lv_obj_t *meta = lv_label_create(row);

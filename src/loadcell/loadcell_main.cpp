@@ -601,8 +601,9 @@ void onRestoreDefault() {
 }
 
 
-void onCycleVessel() {
-  Serial.printf("ui: vessel offset -> %.1f kg\n", scale::cycleVesselOffset() / 1000.0f);
+void onVesselApply(float grams) {
+  Serial.printf("ui: vessel offset -> %.2f kg\n", grams / 1000.0f);
+  scale::setVesselOffset(grams);
 }
 
 void onCycleAvg() {
@@ -1086,7 +1087,7 @@ void setup() {
   ui::pagesOnScaleTare(onTare);
   ui::pagesOnScaleClearCal(onClearCal);
   ui::pagesOnScaleCycleAvg(onCycleAvg);
-  ui::pagesOnScaleCycleVessel(onCycleVessel);
+  ui::pagesOnVesselApply(onVesselApply);
   ui::pagesOnScaleCyclePrecision(onCyclePrecision);
   ui::pagesOnScaleToggleCells(onToggleCells);
   ui::pagesOnScaleRestore(onRestoreDefault);

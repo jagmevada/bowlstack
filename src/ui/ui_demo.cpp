@@ -322,6 +322,12 @@ const Network MOCK_NETS[] = {
     {"Kitchen-2G", -47, true},   {"Mandir_Guest", -61, true},
     {"BSNL-AP-04", -72, true},   {"Seva-Office", -78, true},
     {"OpenServe", -83, false},
+    // LONG ON PURPOSE. Every mock here fitted the row, so the preview could not
+    // show what a real venue's SSID does to it -- and a label that wrapped to
+    // two lines in a 30 px chip, clipping both, shipped because of that. A
+    // fixture that only contains the easy case is a fixture that agrees with
+    // you. 32 characters is the maximum an SSID can be.
+    {"Dadabhagwan-Foundation-Guest-2G", -66, true},
 };
 
 }  // namespace

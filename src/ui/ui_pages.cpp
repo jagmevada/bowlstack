@@ -6,6 +6,7 @@
 #include "ui_battery.h"
 #include "ui_demo.h"
 #include "ui_calib.h"
+#include "ui_vessel.h"
 #include "ui_device.h"
 #include "ui_menu.h"
 #include "ui_perf.h"
@@ -58,6 +59,7 @@ lv_obj_t *detailWifi_ = nullptr;
 lv_obj_t *detailBatt_ = nullptr;
 lv_obj_t *detailScale_ = nullptr;
 lv_obj_t *detailCalib_ = nullptr;
+lv_obj_t *detailVessel_ = nullptr;
 lv_obj_t *detailSensor_ = nullptr;
 lv_obj_t *detailDevice_ = nullptr;
 
@@ -73,7 +75,6 @@ uint8_t depth_ = 0;
 void (*onTare_)(void) = nullptr;
 void (*onClearCal_)(void) = nullptr;
 void (*onCycleAvg_)(void) = nullptr;
-void (*onCycleVessel_)(void) = nullptr;
 void (*onCyclePrecision_)(void) = nullptr;
 void (*onRestore_)(void) = nullptr;
 void (*onPlatformZero_)(void) = nullptr;
@@ -82,6 +83,8 @@ void (*onToggleCells_)(void) = nullptr;
 // The last mass the snapshot carried, cached so showOnly() can re-prefill the
 // keypad without a State to hand. pagesTick() keeps it current.
 float lastCalMassG_ = 0.0f;
+// Mirrors lastCalMassG_: showOnly() prefills the keypad from it on every entry.
+float lastVesselG_ = 0.0f;
 
 lv_obj_t *settingsMenu_ = nullptr;
 lv_obj_t *scaleMenu_ = nullptr;
@@ -142,7 +145,6 @@ void doTare() {
 }
 void doClearCal() { if (onClearCal_) onClearCal_(); }
 void doCycleAvg() { if (onCycleAvg_) onCycleAvg_(); }
-void doCycleVessel() { if (onCycleVessel_) onCycleVessel_(); }
 void doCyclePrecision() { if (onCyclePrecision_) onCyclePrecision_(); }
 void doRestore() { if (onRestore_) onRestore_(); }
 void doPlatformZero() { if (onPlatformZero_) onPlatformZero_(); }
@@ -186,8 +188,11 @@ void goToDefault() {
 
 void showOnly(lv_obj_t *which) {
   lv_obj_t *all[] = {detailSettings_, detailWifi_,   detailBatt_,   detailScale_,
-                     detailCalib_,    detailSensor_, detailDevice_};
-  for (uint8_t i = 0; i < 7; i++) {
+                     detailCalib_,    detailSensor_, detailDevice_, detailVessel_};
+  // sizeof rather than a literal. This count was hand-written and had to be
+  // edited in step with the array beside it; a page added without touching it
+  // would simply never be hidden again.
+  for (uint8_t i = 0; i < sizeof(all) / sizeof(all[0]); i++) {
     if (!all[i]) continue;
     if (all[i] == which) lv_obj_remove_flag(all[i], LV_OBJ_FLAG_HIDDEN);
     else lv_obj_add_flag(all[i], LV_OBJ_FLAG_HIDDEN);
@@ -205,6 +210,9 @@ void showOnly(lv_obj_t *which) {
   // the idle timer take the screen home -- and the next person to open the page
   // finds "17550" sitting there looking like a deliberate value.
   if (which == detailCalib_) calibSetMass(lastCalMassG_);
+  // Same reasoning as the line above: prefilled on every entry, so the page
+  // always opens showing what the unit currently has.
+  if (which == detailVessel_) vesselSetOffset(lastVesselG_);
 }
 
 void closeAll() {
@@ -236,14 +244,18 @@ void closeAll() {
 // first time somebody taps WiFi. That is the right place for it. A deliberate
 // tap on a settings row can afford a second; a boot cannot, and the person
 // paying at boot is usually not the person who wanted the page.
-bool built_[7] = {false, false, false, false, false, false, false};
+bool built_[8] = {false, false, false, false, false, false, false, false};
 
 // Forward declared: every page's close handler is back(), and back() is defined
 // below because it is part of the navigation rather than of construction.
 void back();
 
 void ensureBuilt(lv_obj_t *page) {
-  if (page == detailCalib_ && !built_[4]) {
+  if (page == detailVessel_ && !built_[7]) {
+    built_[7] = true;
+    buildVesselPage(detailVessel_);
+    vesselOnClose(back);
+  } else if (page == detailCalib_ && !built_[4]) {
     built_[4] = true;
     buildCalibPage(detailCalib_);
     calibOnClose(back);
@@ -292,6 +304,7 @@ void openWifi() { push(detailWifi_); }
 void openBattery() { push(detailBatt_); }
 void openScale() { push(detailScale_); }
 void openCalib() { push(detailCalib_); }
+void openVessel() { push(detailVessel_); }
 void openSensor() { push(detailSensor_); }
 void openDevice() { push(detailDevice_); }
 
@@ -509,12 +522,13 @@ void buildPages() {
   // are few and known, and a keypad for a number chosen from four options is
   // four gestures where one will do. Off is in the cycle, so the row is both
   // the enable and the value.
-  menuAddRow(scaleMenu_, "Vessel offset", nullptr, doCycleVessel);
+  menuAddRow(scaleMenu_, "Vessel offset", nullptr, openVessel);
   menuAddRow(scaleMenu_, "Restore default", nullptr, doRestore);
 
   // CONTAINERS ONLY. Each page's contents are built the first time it is
   // opened -- see ensureBuilt() above for the measurements that moved them.
   detailCalib_ = makeDetail(scr);
+  detailVessel_ = makeDetail(scr);
   detailWifi_ = makeDetail(scr);
   detailBatt_ = makeDetail(scr);
   detailSensor_ = makeDetail(scr);
@@ -573,7 +587,7 @@ void pagesOnCycleDefaultPage(void (*cb)(void)) { onCycleDefaultPage_ = cb; }
 void pagesOnScaleTare(void (*cb)(void)) { onTare_ = cb; }
 void pagesOnScaleClearCal(void (*cb)(void)) { onClearCal_ = cb; }
 void pagesOnScaleCycleAvg(void (*cb)(void)) { onCycleAvg_ = cb; }
-void pagesOnScaleCycleVessel(void (*cb)(void)) { onCycleVessel_ = cb; }
+void pagesOnVesselApply(void (*cb)(float)) { vesselOnApply(cb); }
 void pagesOnScaleCyclePrecision(void (*cb)(void)) { onCyclePrecision_ = cb; }
 void pagesOnScaleRestore(void (*cb)(void)) { onRestore_ = cb; }
 void pagesOnScalePlatformZero(void (*cb)(void)) { onPlatformZero_ = cb; }
@@ -632,6 +646,7 @@ void pagesTick(uint32_t nowMs) {
     // opened rather than one frame later.
     menuSetHint(scaleMenu_, ROW_SCALE_CELLS, s.scale.showCells ? "shown" : "hidden");
   }
+  lastVesselG_ = s.scale.vesselOffsetG;
   if (scaleMenu_) {
     // The Average row shows the value it will change, which is what makes a
     // tap-to-cycle row usable at all -- otherwise you are guessing where in the
@@ -651,6 +666,8 @@ void pagesTick(uint32_t nowMs) {
     static char vessel[12];
     if (s.scale.vesselOffsetG <= 0.0f) snprintf(vessel, sizeof(vessel), "off");
     else snprintf(vessel, sizeof(vessel), "%.1f kg", s.scale.vesselOffsetG / 1000.0f);
+    // "off" and "0.0 kg" are the same state; the row says the word because a
+    // person scanning the menu is looking for whether it is on, not for a zero.
     menuSetHint(scaleMenu_, ROW_SCALE_VESSEL, vessel);
   }
 
@@ -685,7 +702,8 @@ void pagesTick(uint32_t nowMs) {
   // pages are the only two that ask somebody to type a long string one tap at a
   // time; everything else is read or pressed. See IDLE_ENTRY_MS.
   const bool typing = (depth_ > 0) && (stack_[depth_ - 1] == detailWifi_ ||
-                                       stack_[depth_ - 1] == detailCalib_);
+                                       stack_[depth_ - 1] == detailCalib_ ||
+                                       stack_[depth_ - 1] == detailVessel_);
   if (lv_display_get_inactive_time(NULL) > (typing ? IDLE_ENTRY_MS : IDLE_HOME_MS)) {
     // Compared against the SAME tile pagesGoHome() will move to. Fixing only
     // the action would leave this guard permanently false once parked on the
