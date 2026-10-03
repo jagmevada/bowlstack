@@ -525,9 +525,13 @@ begin
            and m.meal_type = v_meal;
       end if;
 
+      -- bowl_weight_g rides along, as in schema.sql. This copy once lacked it,
+      -- and since this file runs after migrate_bowl_weight.sql it silently
+      -- reverted the template apply to dropping the kg per bowl.
       insert into public.meal_food_mapping
-             (location, meal_type, meal_date, food_slot, food_name)
-      select t.location, t.meal_type, v_date, t.food_slot, t.food_name
+             (location, meal_type, meal_date, food_slot, food_name, bowl_weight_g)
+      select t.location, t.meal_type, v_date, t.food_slot, t.food_name,
+             t.bowl_weight_g
         from public.meal_menu_template t
        where t.location = p_location
          and t.weekday  = extract(dow from v_date)::smallint
