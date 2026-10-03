@@ -2,7 +2,7 @@
 // Bowlstack :: load-cell station -- Waveshare ESP32-S3-Touch-LCD-2,
 //              3x NAU7802 behind a TCA9548A
 //
-// Firmware: V1.14 261003
+// Firmware: V1.15 261003
 //
 // Also carries the 200 kg buffer-stock cell on its own bus (IO21/IO16) -- see
 // buffer_bank.h. It is a separate instrument: nothing below sums it into the
@@ -966,6 +966,13 @@ void serviceConsole() {
         Serial.println("\n> clear calibration");
         scale::clearCalibration();
         break;
+      // The way back from 'x' without the panel: Clear stores an explicit 0.0, which
+      // then outranks the build default on every boot, so a reflash alone cannot.
+      case 'r':
+      case 'R':
+        Serial.printf("\n> restore the built-in %.3f counts/g\n", scale::defaultCountsPerGram());
+        onRestoreDefault();
+        break;
       case 'i':
       case 'I':
         inputs::dumpState();
@@ -1017,6 +1024,8 @@ void serviceConsole() {
             "         dead converter -- both look like a cell that reads wrong.\n"
             "         Pauses measurement for ~15 s at 10 SPS.\n"
             "  x      clear the calibration and go back to counts\n"
+            "  r      restore the built-in factor (= Settings > Scale > Restore\n"
+            "         default); zeros are left alone\n"
             "  i      dump the panel controls: raw pin levels, encoder\n"
             "         position, decoder health, charge and VBUS state\n"
             "  l      status LED: auto -> forced on -> forced off -> auto.\n"
