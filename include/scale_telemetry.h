@@ -38,6 +38,7 @@
 #include <stdint.h>
 
 #include "battery_soc.h"
+#include "buffer_bank.h"
 #include "scale.h"
 
 namespace scale_telemetry {
@@ -59,6 +60,13 @@ void begin();
 // same rule every other consumer of scale::snapshot() follows.
 void loop(const scale::Snapshot &s, uint32_t uptimeSec, uint16_t batteryMv,
           battery::Level batteryLevel);
+
+// The buffer platforms this board hosts (BWL-001..003): each FITTED slot is its own
+// device upstream -- its own device_status row and weight_samples series -- on the
+// counter's wire and cadence. weight_g is FOOD; gross_g, bowls and bowls_confirmed
+// ride beside it; all four are NULL unless the state is ok. Same task as loop(),
+// called right after it.
+void loopBuffers(const bufbank::Snapshot &b, uint32_t uptimeSec);
 
 // --- diagnostics ------------------------------------------------------------
 uint32_t bootId();

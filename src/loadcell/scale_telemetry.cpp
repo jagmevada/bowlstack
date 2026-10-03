@@ -606,6 +606,205 @@ void patchHub(uint32_t uptimeSec, uint16_t batteryMv, battery::Level batteryLeve
   }
 }
 
+// --- THE BUFFER PLATFORMS (BWL-001..003) -------------------------------------------
+// Each fitted slot of the buffer bank is its own device upstream, on the counter's
+// wire and its cadence: 20 s heartbeat, a 250 g move or any state/bowl change jumps
+// the queue, a 120 s history tick, 5 s floor. A channel of its own rather than the
+// counter's code generalised, so the counter's JSON -- which every view already
+// reads -- cannot change by accident.
+//
+// ponytail: 16 queued samples per platform, half the counter's 32 (~32 min offline
+// at the periodic rate). Raise it if a buffer's curve shows WiFi holes.
+const uint8_t BUF_QUEUE_LEN = 16;
+
+// What a platform says, compared BY VALUE -- WState is an enum, so the pointer-
+// identity trap the counter's state constants guard against does not arise.
+struct BufView {
+  lscale::WState st;
+  bool kg;              // state ok: food, gross and bowls are all known
+  int32_t foodG, grossG;
+  uint8_t bowls;
+  bool confirmed;
+};
+
+struct BufSample {
+  uint32_t atMs, seq;
+  const char *reason;
+  BufView v;
+  bool online;
+  int32_t net;
+  float cpg;            // 0 = uncalibrated -> null
+};
+
+struct BufChan {
+  BufSample q[BUF_QUEUE_LEN];
+  uint8_t head, count;
+  uint32_t nextSeq;
+  bool everEnq;
+  BufView enq;          // last RECORDED (history), as lastEnqWeightG_ is for the counter
+  uint32_t enqMs, nextSampleMs;
+  bool reported;
+  BufView rep;          // last POSTED (current state)
+  uint32_t nextStatusMs, lastTryMs;
+  bool everTried, holding;
+  uint32_t holdUntilMs;
+  uint32_t posts;
+};
+BufChan bch_[bufbank::SLOTS] = {};
+
+BufView bufView(const lscale::Reading &r) {
+  BufView v = {};
+  v.st = r.state;
+  v.kg = r.state == lscale::WState::Ok && r.kgKnown;
+  // The database's own rails (migrate_buffer.sql), re-checked here as the counter
+  // does: a figure a CHECK refuses fails the whole PATCH with a 400, and the state
+  // that would have explained it goes with it. Written as !(in range) so a NaN
+  // lands here too.
+  if (v.kg && !(r.foodG >= -5000.0f && r.foodG <= 250000.0f &&
+                r.grossG >= -5000.0f && r.grossG <= 260000.0f && r.bowls <= 8)) {
+    v.st = lscale::WState::OverRange;
+    v.kg = false;
+  }
+  if (v.kg) {
+    v.foodG = (int32_t)lroundf(r.foodG);
+    v.grossG = (int32_t)lroundf(r.grossG);
+    v.bowls = r.bowls;
+    v.confirmed = r.bowlsConfirmed;
+  }
+  return v;
+}
+
+bool bufDiffers(const BufView &a, const BufView &b) {
+  return a.st != b.st || a.kg != b.kg ||
+         (a.kg && (a.bowls != b.bowls || a.confirmed != b.confirmed));
+}
+
+bool bufMoved(const BufView &a, const BufView &b) {
+  return a.kg && b.kg && labs((long)a.foodG - (long)b.foodG) >= WEIGHT_EVENT_G;
+}
+
+void bufHold(BufChan &c, uint32_t now, uint32_t ms) {
+  c.holding = true;
+  c.holdUntilMs = now + ms;
+}
+
+void bufEnqueue(BufChan &c, const lscale::Reading &r, const BufView &v,
+                const char *reason, uint32_t now, const char *uid) {
+  if (c.count == BUF_QUEUE_LEN) {
+    // Oldest out, its seq never sent: the server sees the gap (see enqueue()).
+    Serial.printf("scale-uplink: %s history full, dropping seq %lu\n", uid,
+                  (unsigned long)c.q[c.head].seq);
+    c.head = (uint8_t)((c.head + 1) % BUF_QUEUE_LEN);
+    c.count--;
+  }
+  BufSample &e = c.q[(c.head + c.count) % BUF_QUEUE_LEN];
+  e.atMs = now;
+  e.seq = c.nextSeq++;
+  e.reason = reason;
+  e.v = v;
+  e.online = r.link == lscale::Link::Online;
+  e.net = r.counts - (r.zeroed ? r.zero : 0);
+  e.cpg = r.calibrated ? r.cpg : 0.0f;
+  c.count++;
+}
+
+// The kg columns of one row, shared by the PATCH and every history sample so the
+// two can never disagree on what NULL means.
+void bufWeightFields(JsonObject o, const BufView &v, bool online, int32_t net, float cpg) {
+  o["weight_state"] = lscale::wstateToken(v.st);
+  if (v.kg) {
+    o["weight_g"] = v.foodG;          // FOOD, always (owner: "dashboard always food")
+    o["gross_g"] = v.grossG;
+    o["bowls"] = v.bowls;
+    o["bowls_confirmed"] = v.confirmed;
+  } else {
+    o["weight_g"] = nullptr;
+    o["gross_g"] = nullptr;
+    o["bowls"] = nullptr;
+    o["bowls_confirmed"] = nullptr;
+  }
+  o["cells_online"] = online ? 1 : 0;   // one cell per platform
+  if (online) o["net_counts"] = net;
+  else o["net_counts"] = nullptr;
+  if (cpg > 0.0f) o["counts_per_gram"] = cpg;
+  else o["counts_per_gram"] = nullptr;
+}
+
+// Same outcomes as flushSamples(): stored or duplicate -> clear; unregistered ->
+// keep and hold off; missing table or malformed -> drop; anything else -> retry.
+void bufFlush(BufChan &c, const char *uid, uint32_t now) {
+  JsonDocument doc;
+  JsonArray arr = doc.to<JsonArray>();
+  for (uint8_t i = 0; i < c.count; i++) {
+    const BufSample &e = c.q[(c.head + i) % BUF_QUEUE_LEN];
+    JsonObject o = arr.add<JsonObject>();
+    o["device_id"] = uid;
+    o["boot_id"] = bootId_;
+    o["seq"] = e.seq;
+    uint32_t age = now - e.atMs;
+    if (age > AGE_MAX_MS) age = AGE_MAX_MS;
+    o["age_ms"] = age;
+    o["reason"] = e.reason;
+    bufWeightFields(o, e.v, e.online, e.net, e.cpg);
+    o["firmware"] = BOWLSTACK_FW_VERSION;
+  }
+  String body;
+  serializeJson(doc, body);
+  const uplink::Result r =
+      uplink::request("POST", "/rest/v1/weight_samples", nullptr, "return=minimal", body);
+  if (r.ok() || strcmp(r.pgCode, "23505") == 0) {
+    c.head = 0;
+    c.count = 0;
+    return;
+  }
+  if (strcmp(r.pgCode, "23503") == 0) {
+    Serial.printf("scale-uplink: %s not registered in `devices`\n", uid);
+    bufHold(c, now, UNPROVISIONED_RETRY_MS);
+    return;
+  }
+  if (r.code >= 400 && r.code < 500 && r.code != 401 && r.code != 403) {
+    Serial.printf("scale-uplink: %s history batch refused (%d %s), dropped\n", uid,
+                  r.code, r.pgCode);
+    c.head = 0;
+    c.count = 0;
+  }
+}
+
+bool bufPatch(const char *uid, const bufbank::SlotSnapshot &s, const BufView &v,
+              uint32_t uptimeSec) {
+  JsonDocument doc;
+  JsonObject o = doc.to<JsonObject>();
+  o["boot_id"] = bootId_;
+  o["uptime_s"] = uptimeSec;
+  o["firmware"] = BOWLSTACK_FW_VERSION;
+  o["mac"] = mac_;
+  const bool online = s.r.link == lscale::Link::Online;
+  bufWeightFields(o, v, online, s.r.counts - (s.r.zeroed ? s.r.zero : 0),
+                  s.r.calibrated ? s.r.cpg : 0.0f);
+  // No power on a platform -- it is the hub's (patchHub()); explicit nulls so a
+  // value left from the ToF era cannot linger. No trial knob either: it is the
+  // counter's.
+  o["battery_mv"] = nullptr;
+  o["battery_level"] = nullptr;
+  o["charging"] = nullptr;
+  o["external_power"] = nullptr;
+  o["manual_fill_pct"] = nullptr;
+  o["manual_fill_age_s"] = nullptr;
+  // Node health: the converter answers behind its mux channel. supply_mv,
+  // checksum_errors and no_load_g stay unsent -- not measured on this I2C platform.
+  o["responding"] = s.r.link != lscale::Link::Offline;
+
+  String body;
+  serializeJson(doc, body);
+  const String query = String("device_id=eq.") + uid;
+  const uplink::Result r = uplink::request("PATCH", "/rest/v1/device_status", query.c_str(),
+                                           "return=minimal,count=exact", body);
+  if (r.ok() && !r.matchedZeroRows) return true;
+  Serial.printf("scale-uplink: %s not updated (%d %s%s)\n", uid, r.code, r.pgCode,
+                r.matchedZeroRows ? ", no row -- registered?" : "");
+  return false;
+}
+
 }  // namespace
 
 void begin() {
@@ -794,6 +993,58 @@ void loop(const scale::Snapshot &s, uint32_t uptimeSec, uint16_t batteryMv,
     backoffUntilMs_ = now + RETRY_PERIOD_MS;
     backoffActive_ = true;
     lastOk_ = false;
+  }
+}
+
+void loopBuffers(const bufbank::Snapshot &b, uint32_t uptimeSec) {
+  // Nothing until the bank has published once: a zero-initialised slot would go out
+  // as no_cells -- a claim about the hardware, not "has not spoken yet".
+  if (b.seq == 0) return;
+  const uint32_t now = millis();
+
+  for (uint8_t i = 0; i < bufbank::SLOTS; i++) {
+    const bufbank::SlotSnapshot &s = b.slot[i];
+    // Never post a platform that is not there: an unfitted slot's row stays
+    // "awaiting deployment" rather than reading as a dead cell.
+    if (!s.cfg.enabled || !s.fitted || !s.cfg.uid[0]) continue;
+    BufChan &c = bch_[i];
+    const char *uid = s.cfg.uid;
+    const BufView v = bufView(s.r);
+
+    // History first, and whether or not there is a link -- see loop().
+    const bool changed = c.everEnq && bufDiffers(v, c.enq);
+    const bool moved = c.everEnq && bufMoved(v, c.enq) &&
+                       (uint32_t)(now - c.enqMs) >= MIN_SAMPLE_GAP_MS;
+    const bool periodic = c.everEnq && (int32_t)(now - c.nextSampleMs) >= 0;
+    if (!c.everEnq || changed || moved || periodic) {
+      bufEnqueue(c, s.r, v, !c.everEnq ? "boot" : (changed || moved) ? "change" : "periodic",
+                 now, uid);
+      c.everEnq = true;
+      c.enq = v;
+      c.enqMs = now;
+      c.nextSampleMs = now + SAMPLE_PERIOD_MS;
+    }
+
+    if (!uplink::connected()) continue;
+    if (c.holding && (int32_t)(now - c.holdUntilMs) < 0) continue;
+    c.holding = false;
+    const bool news = !c.reported || bufDiffers(v, c.rep) || bufMoved(v, c.rep);
+    const bool due = (int32_t)(now - c.nextStatusMs) >= 0;
+    if (!news && !due && c.count == 0) continue;
+    if (c.everTried && (uint32_t)(now - c.lastTryMs) < POST_MIN_INTERVAL_MS) continue;
+    c.everTried = true;
+    c.lastTryMs = now;
+
+    if (c.count > 0) bufFlush(c, uid, now);
+    if (c.holding) continue;   // unregistered: the PATCH would only say so again
+    if (bufPatch(uid, s, v, uptimeSec)) {
+      if (c.posts++ == 0) Serial.printf("scale-uplink: %s (%s) reporting\n", uid, s.cfg.label);
+      c.reported = true;
+      c.rep = v;
+      c.nextStatusMs = now + STATUS_PERIOD_MS;
+    } else {
+      bufHold(c, now, RETRY_PERIOD_MS);
+    }
   }
 }
 

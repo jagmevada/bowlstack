@@ -2,7 +2,7 @@
 // Bowlstack :: load-cell station -- Waveshare ESP32-S3-Touch-LCD-2,
 //              3x NAU7802 behind a TCA9548A
 //
-// Firmware: V1.25 261004
+// Firmware: V1.26 261004
 //
 // Also carries the 200 kg buffer-stock cell on its own bus (IO21/IO16) -- see
 // buffer_bank.h. It is a separate instrument: nothing below sums it into the
@@ -245,6 +245,9 @@ void uplinkTaskFn(void *) {
                             (uint16_t)(p & 0xFFFF),
                             (battery::Level)((p >> 16) & 0xFF));
     }
+    // The buffer platforms, independent of the counter being ready: B1 reports
+    // even on a board whose counter cells are unplugged.
+    scale_telemetry::loopBuffers(bufbank::snapshot(), millis() / 1000);
     // Four times a second. scale_telemetry::loop() does its own rate limiting,
     // so this only bounds how promptly a change is NOTICED -- and the 5 s post
     // floor means anything faster would just be waking to decide not to send.
