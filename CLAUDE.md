@@ -30,12 +30,15 @@ NAU7802 bridge converters under one platform instead of four VL53L0X up a pipe.
 > the direction that costs somebody an afternoon with a scope. What is true at
 > HEAD: GPIO47/48 carries the touch chip and the IMU, GPIO11/12 is the cell
 > trunk and needs its pull-ups from the mux breakout, and GPIO21/16 — the SCCB
-> pair with R4/R5 fitted — carries the **200 kg buffer-stock module**: its own
-> NAU7802 behind its own TCA9548A at 0x70, bit-banged (both hardware ports are
-> spent), SDA on P1-7 and SCL on P1-4. It is a separate instrument from the
-> counter — `src/loadcell/buffer_scale.cpp`, console keys `z`/`g`/`k`, nothing
-> summed into the counter's weight. `include/board_waveshare_s3.h` section 10 is
-> the authority. There is no panel page or upload for it yet.
+> pair with R4/R5 fitted — carries the **buffer-stock bus**: its own TCA9548A at
+> 0x70 with up to three 200 kg buffer platforms (B1..B3, one NAU7802 per mux
+> channel), bit-banged (both hardware ports are spent), SDA on P1-7 and SCL on
+> P1-4. Each buffer platform is its own unit (BWL-001..003) and a separate
+> instrument from the counter — `src/loadcell/buffer_bank.cpp` over the
+> Arduino-free core `src/loadcell/load_scale.cpp` (host tests:
+> `bash tools/host_test/run.sh`); console `:buf` (and `z`/`g`/`k` for B1).
+> `include/board_waveshare_s3.h` section 10 is the authority. Upload and the
+> per-platform dashboard are in progress — see the resume section of todo.md.
 
 The ToF branch is `touch-ui` and is untouched; the discrete ToF product is
 `main`. `src/bringup/bringup_display.cpp` and `bringup_sensors.cpp` were removed

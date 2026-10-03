@@ -89,6 +89,22 @@ class Nau7802 {
   // reads plausibly and wrongly.
   bool calibrateAfe();
 
+  // Reads back every register begin() configured and checks it holds what was
+  // written: powered up and ready, internal LDO at 3.0 V, gain 128, the configured
+  // rate, chopper off, PGA LDO mode, PGA cap, converting. Returns false with a
+  // short reason in `why`.
+  //
+  // WHY IT EXISTS: begin() configures with read-modify-writes. On a bus that has
+  // just come out of a mid-transaction reset, a READ can return garbage (the 200 kg
+  // buffer cell was seen reading its revision register as 0x00), and a
+  // read-modify-write built on a garbage read writes garbage back -- a converter
+  // that "came up" with the wrong gain. Checking the result is the only way to
+  // know. Additive: the counter's cells do not call it.
+  bool verifyConfig(char *why, unsigned whyLen);
+
+  // One register read, for bus-reliability tests. Same path as every other read.
+  bool readRegister(uint8_t reg, uint8_t *value);
+
   // --- boot diagnostics ------------------------------------------------------
   // BLOCKING, and called once from setup() before the scale task exists.
   //

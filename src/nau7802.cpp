@@ -340,6 +340,37 @@ bool Nau7802::calibrateAfe() {
   return true;
 }
 
+bool Nau7802::readRegister(uint8_t reg, uint8_t *value) { return read(reg, value, 1); }
+
+bool Nau7802::verifyConfig(char *why, unsigned whyLen) {
+  uint8_t pu = 0, c1 = 0, c2 = 0, adc = 0, pga = 0, pwr = 0;
+  if (!read(REG_PU_CTRL, &pu, 1) || !read(REG_CTRL1, &c1, 1) || !read(REG_CTRL2, &c2, 1) ||
+      !read(REG_ADC, &adc, 1) || !read(REG_PGA, &pga, 1) || !read(REG_POWER, &pwr, 1)) {
+    snprintf(why, whyLen, "read-back failed");
+    return false;
+  }
+  const uint8_t puWant = (uint8_t)((1u << PU_PUD) | (1u << PU_PUA) | (1u << PU_PUR) |
+                                   (1u << PU_CS) | (1u << PU_AVDDS));
+  const uint8_t c1Want = (uint8_t)((LDO_3V0 << 3) | GAIN_128);
+  if ((pu & puWant) != puWant) {
+    snprintf(why, whyLen, "PU_CTRL %02X lacks %02X", pu, (uint8_t)(puWant & ~pu));
+  } else if ((c1 & 0x3F) != c1Want) {
+    snprintf(why, whyLen, "CTRL1 %02X, want %02X (LDO/gain)", c1, c1Want);
+  } else if (((c2 >> 4) & 0x07) != RATE_BITS) {
+    snprintf(why, whyLen, "CTRL2 %02X: rate bits wrong", c2);
+  } else if ((adc & 0x30) != 0x30) {
+    snprintf(why, whyLen, "ADC %02X: chopper not off", adc);
+  } else if (!((pga >> PGA_LDOMODE) & 1)) {
+    snprintf(why, whyLen, "PGA %02X: LDO mode off", pga);
+  } else if (!((pwr >> PWR_PGA_CAP_EN) & 1)) {
+    snprintf(why, whyLen, "POWER %02X: PGA cap off", pwr);
+  } else {
+    snprintf(why, whyLen, "ok");
+    return true;
+  }
+  return false;
+}
+
 bool Nau7802::sampleStats(uint8_t n, int32_t *mean, int32_t *pp, uint32_t timeoutMs) {
   int64_t acc = 0;
   int32_t lo = 0, hi = 0;

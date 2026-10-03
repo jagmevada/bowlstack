@@ -2,10 +2,10 @@
 // Bowlstack :: load-cell station -- Waveshare ESP32-S3-Touch-LCD-2,
 //              3x NAU7802 behind a TCA9548A
 //
-// Firmware: V1.10 261003
+// Firmware: V1.11 261003
 //
 // Also carries the 200 kg buffer-stock cell on its own bus (IO21/IO16) -- see
-// buffer_scale.h. It is a separate instrument: nothing below sums it into the
+// buffer_bank.h. It is a separate instrument: nothing below sums it into the
 // counter's weight.
 //
 // Same board and the same UI as the touch-ui branch; a different measurement
@@ -60,7 +60,7 @@
 #include "logo128.h"
 #include "splash_font.h"
 #include "scale.h"
-#include "buffer_scale.h"
+#include "buffer_bank.h"
 #include <Preferences.h>
 
 #include "inputs.h"
@@ -489,16 +489,22 @@ void publishScale(uint32_t nowMs) {
   // buffer module is fitted and reads 123.5 kg -- and an inherited claim about
   // hardware is exactly what the ToF block further down warns about. On a unit
   // with no module `fitted` is false and the line is not drawn.
+  //
+  // Fed from the bank's FIRST slot (B1) until the dashboard draws one row per
+  // platform; grams is FOOD -- gross minus the bowls' dry mass.
   {
-    const bufscale::Snapshot bs = bufscale::snapshot();
+    const bufbank::Snapshot bk = bufbank::snapshot();
+    const bufbank::SlotSnapshot &b1 = bk.slot[0];
     ui::ScaleView::BufferView &b = s.scale.buffer;
-    b.fitted = bs.fitted;
-    b.state = toUiCell(bs.state);
-    b.kgKnown = bs.kgKnown;
-    b.grams = bs.grams;
+    b.fitted = b1.fitted;
+    b.state = b1.r.link == lscale::Link::Online
+                  ? ui::Cell::Online
+                  : (b1.r.link == lscale::Link::Warming ? ui::Cell::Warming : ui::Cell::Offline);
+    b.kgKnown = b1.r.kgKnown;
+    b.grams = b1.r.foodG;
     // Net of the stored zero when there is one, as the counter shows its own.
-    b.counts = bs.zeroed ? bs.counts - bs.zero : bs.counts;
-    b.overRange = bs.overRange;
+    b.counts = b1.r.zeroed ? b1.r.counts - b1.r.zero : b1.r.counts;
+    b.overRange = b1.r.overRange;
   }
 
   int32_t totalCounts = 0;
@@ -846,6 +852,10 @@ void serviceInputs(uint32_t nowMs) {
 void serviceConsole() {
   while (Serial.available()) {
     const int c = Serial.read();
+    // A ':' opens a buffer-bank command line (":buf 2 cal 20.0"), and while one is
+    // open EVERY byte belongs to it -- otherwise the '2' in that line would tare
+    // cell B. Nothing is consumed here unless a line is open or this byte opens one.
+    if (bufbank::consoleFeed(c)) continue;
     switch (c) {
       case 't':
       case 'T':
@@ -937,12 +947,12 @@ void serviceConsole() {
             "  which the total -- being a sum -- cannot show you. On three cells\n"
             "  that is also how you find the corner the platform is not sitting\n"
             "  on, which is the fault three cells were fitted to remove.\n");
-        bufscale::printHelp();
+        bufbank::printHelp();
         break;
       default:
-        // The buffer cell's own keys (b / g / k). Anything else is still ignored:
+        // The buffer bank's own keys (z / g / k, for B1). Anything else is still ignored:
         // consoleKey() returns false for a byte that is not one of its own.
-        bufscale::consoleKey(c);
+        bufbank::consoleKey(c);
         break;  // newlines and stray bytes from a terminal are not errors
     }
   }
@@ -1047,8 +1057,8 @@ void setup() {
   // The 200 kg buffer cell, on its own bus and its own task. AFTER the counter's
   // cells so a fault here cannot delay them, and a no-op on a unit with no module
   // fitted. It shares no register, mutex or NVS key with scale.cpp.
-  bufscale::begin();
-  bootMark("buffer cell");
+  bufbank::begin();
+  bootMark("buffer bank");
 
   // --- lvgl ---------------------------------------------------------------
   Serial.println("\n--- lvgl ---");
@@ -1422,7 +1432,7 @@ void loop() {
     // The 200 kg buffer cell, directly under the counter's total and kept out of
     // it: it is a different instrument and is never part of that sum. Prints
     // nothing on a unit with no module fitted.
-    bufscale::printStatus();
+    bufbank::printStatus();
     // THE UPLINK LINE. A station that weighs perfectly and publishes nothing
     // looks, from the panel, exactly like one doing both -- and the dashboard
     // is the only place the difference shows, which is precisely where nobody
