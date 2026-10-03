@@ -34,9 +34,9 @@ A/B/C cell rows leave the main page (Diagnose keeps them).
 | 2c | on-glass use by the owner (V1.14–V1.19, below); B1 linearity test; real bowl test with real bowls; known-mass span calibration | mostly done — **known mass and real-bowl test outstanding** |
 | 3 | Supabase `migrate_buffer.sql` / `rollback_buffer.sql` (kind `buffer`, 250 kg rail, kind guards, views, `weight_samples` columns) | **APPLIED LIVE 2026-10-04** (dry run first; installed fingerprint == tested). Live had missed 3fecb53's burn views — `restore_live_burn_views_20261004.sql` restores them exactly after a rollback |
 | 4 | upload: per-device channel refactor of `scale_telemetry` (counter JSON must stay byte-identical); buffer channel sends FOOD as weight_g always (owner: "dashboard always food"), plus gross_g / bowls / bowls_confirmed, NULL unless ok | **next after the cut-over** — until then BWL-001 is blank on the dashboard |
-| 5 | `cutover_buffers.sql` / rollback: re-kind **every** BWL-001..032 to `buffer`, NULL their stack_* | written; owner runs after the web push, with every stack writer of BWL ids stopped |
-| 6 | web front end, version 1.42 (kg for buffers, works before and after the migration) | written; smoke 387/387; **ask before pushing — a push deploys** |
-| 7 | `tools/fleet_sim.py` to kg for BWL-004..024 (001..003 are the panel's), whole-bowl steps | written; dry-run audit passes; start only after the cut-over |
+| 5 | `cutover_buffers.sql` / rollback: re-kind **every** BWL-001..032 to `buffer`, NULL their stack_* | **RUN LIVE 2026-10-04**: 32 BWL now `buffer`, 0 stacks left, BWL updated_at untouched |
+| 6 | web front end, version 1.42 (kg for buffers, works before and after the migration) | **LIVE 2026-10-04** (pushed 179d094..e0db892, Pages deploy ok, site serves 1.42) |
+| 7 | `tools/fleet_sim.py` to kg for BWL-004..024 (001..003 are the panel's), whole-bowl steps | **RUNNING** since the cut-over (`--live --always`, 21 buffers fresh, 0 errors) — on the owner's PC, stops with that session |
 | 8–9 | docs; remove dormant bowl code | |
 
 **Done on the bench, 2026-10-03 evening (V1.14–V1.19, `3ca63ba`..`295cbe0`, not pushed):**
