@@ -57,6 +57,10 @@ struct Slot {
   lscale::Persisted saved;  // what NVS holds, so only changes are written
   char lastResult[48] = {0};
   uint32_t resultSeq = 0;
+  // Read AFTER the configuration is verified. Nau7802::revision() is whatever the
+  // first read of a bring-up returned, and on a bus just out of a reset that read is
+  // the one that can be garbage (it was seen as 0x00).
+  uint8_t revision = 0xFF;
 };
 
 Slot slots_[SLOTS];
@@ -269,8 +273,9 @@ bool bringUp(Slot &s) {
     } else if (!s.cell.begin()) {
       snprintf(why, sizeof(why), "begin() failed");
     } else if (s.cell.verifyConfig(why, sizeof(why))) {
-      Serial.printf("  %s: up on attempt %u, config verified, rev 0x%02X\n", s.name, a,
-                    s.cell.revision());
+      uint8_t rev = 0xFF;
+      if (s.cell.readRegister(0x1F, &rev)) s.revision = rev;
+      Serial.printf("  %s: up on attempt %u, config verified, rev 0x%02X\n", s.name, a, s.revision);
       return true;
     }
     Serial.printf("  %s: bring-up attempt %u of %u failed (%s)\n", s.name, a, BRINGUP_ATTEMPTS, why);
@@ -393,7 +398,7 @@ void publish() {
     o.fitted = s.fitted;
     if (s.fitted) {
       o.r = s.core.reading();
-      o.revision = s.cell.revision();
+      o.revision = s.revision;
       o.sps = s.cell.sps();
     }
     memcpy(o.lastResult, s.lastResult, sizeof(o.lastResult));

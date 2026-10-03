@@ -197,7 +197,14 @@ void BowlTracker::resetEmpty() {
 void BowlTracker::set(uint8_t bowls) {
   bowls_ = bowls > cfg_.maxBowls ? cfg_.maxBowls : bowls;
   confirmed_ = true;
-  // The reference is kept: an operator correcting the count has not moved anything.
+  // THE REFERENCE IS KEPT -- an operator correcting the count has not moved anything,
+  // so the next settled level is not a load or an unload -- BUT THE RUN RESTARTS, so
+  // that level is judged again within stableMs. Without it a count typed with the
+  // platform already still was never checked against the shelf: "2 bowls" on an
+  // empty platform read food -4.96 kg indefinitely on the bench, because that run had
+  // been judged before the command and nothing moved to start a new one. Now the
+  // empty rule overrules it, and an impossible count is flagged unconfirmed.
+  running_ = false;
 }
 
 BowlChange BowlTracker::update(uint32_t nowMs, float g) {

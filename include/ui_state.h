@@ -133,21 +133,56 @@ struct ScaleView {
   bool showCells;
 
   uint8_t online;
+};
 
-  // The 200 kg buffer-stock cell. A SEPARATE INSTRUMENT: it is never part of
-  // totalGrams, totalCounts or any share above, and the counter's calibration,
-  // tare and decimals setting do not apply to it. `fitted` is false on every unit
-  // without a module, and the dashboard then draws nothing for it at all.
-  struct BufferView {
-    bool fitted;
-    Cell state;
-    // Kilograms are known only with a stored zero AND a factor, and not saturated.
-    // Zero is a real weight (an empty shelf), so it cannot stand in for unknown.
-    bool kgKnown;
-    float grams;
-    int32_t counts;  // net of the zero when one is stored; what is shown until kgKnown
-    bool overRange;
-  } buffer;
+// --- the weighing platforms ---------------------------------------------------
+// EVERY PLATFORM IS ITS OWN UNIT -- the counter (C1, LDC-001) and up to three
+// buffer platforms (B1..B3, BWL-001..003) -- even though one board hosts them all.
+// The dashboard draws one row per platform and a TOTAL that is the sum of them.
+//
+// This is the seam for that, and it carries no driver types: the firmware fills it
+// from scale.h and buffer_bank.h, the simulator from the shared fixture.
+static const uint8_t PLATFORMS = 4;  // rows on the dashboard: the counter + 3 buffers
+static const uint8_t BUFFERS = 3;    // buffer platforms the Buffers page can show
+
+enum class PlatformRole : uint8_t { Counter, Buffer };
+
+struct PlatformRow {
+  bool present;          // configured AND fitted: drawn. Absent rows are not drawn at all.
+  PlatformRole role;
+  char label[4];         // "C1", "B1".. -- the short form the panel uses
+  Cell state;
+  // Kilograms exist only when kgKnown. Zero is a real weight -- an empty shelf -- so
+  // it can never stand in for unknown.
+  bool kgKnown;
+  // The figure is a LOWER BOUND or rests on an UNCONFIRMED bowl count: real, worth
+  // adding in, but the total it joins must say "at least".
+  bool partial;
+  float grams;           // FOOD: buffer = gross - 2.5 kg per bowl; counter = net of the vessel
+  uint8_t bowls;         // buffer only
+  bool bowlsConfirmed;
+  bool overRange;
+  char why[12];          // why there is no weight, or why it is partial: "offline", "uncal"..
+};
+
+// One buffer platform as the Buffers page sees it: everything needed to zero,
+// calibrate and correct it, and the outcome of the last thing asked of it.
+struct BufferInfo {
+  bool fitted;
+  char label[4];
+  char uid[12];
+  Cell state;
+  bool kgKnown;
+  float foodG;
+  float grossG;
+  uint8_t bowls;
+  bool bowlsConfirmed;
+  bool zeroed;
+  bool calibrated;
+  float cpg;
+  char why[12];
+  char lastResult[48];
+  uint32_t resultSeq;    // moves every time a command's outcome lands
 };
 
 struct State {
@@ -285,6 +320,12 @@ struct State {
   // asks for it to be cycled.
   uint8_t defaultPage;
   uint32_t fillAgeSec;       // how stale it is, for the screen to say so
+
+  // --- the platforms (see PlatformRow above) --------------------------------
+  // Row 0 is the counter, rows 1..3 the buffers in slot order. Appended at the end
+  // so nothing above moves.
+  PlatformRow platforms[PLATFORMS];
+  BufferInfo buffers[BUFFERS];
 };
 
 // A sensible zero value: everything unknown, nothing claimed. Used as the

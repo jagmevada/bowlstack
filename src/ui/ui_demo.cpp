@@ -1,5 +1,9 @@
 #include "ui_demo.h"
 
+#include <stdio.h>
+#include <string.h>
+
+#include "ui_platforms.h"
 #include "ui_screens.h"
 #include "ui_wifi.h"
 
@@ -175,16 +179,55 @@ void withScale(State &s, float aG, float bG, float cG, bool calibrated, bool tar
   // overlaps.
   s.scale.showCells = false;
 
-  // THE 200 kg BUFFER CELL, fitted and calibrated, so the preview draws the row the
-  // field unit draws. The same fixture feeds every scenario below, which is the
-  // point: the buffer row has to be seen in BOTH dashboard layouts (cells hidden
-  // and shown) or the combination nobody looked at is the one that overlaps.
-  s.scale.buffer.fitted = true;
-  s.scale.buffer.state = Cell::Online;
-  s.scale.buffer.kgKnown = true;
-  s.scale.buffer.grams = 123456.0f;  // 123.5 kg: three digits before the point, the widest it gets
-  s.scale.buffer.counts = 0;
-  s.scale.buffer.overRange = false;
+  // THE COUNTER AS A PLATFORM ROW, through the SAME function the firmware uses, so
+  // the preview's C1 cannot disagree with the device's about the same scale state.
+  platformFromCounter(s.scale, "C1", s.platforms[0]);
+}
+
+// One buffer platform, written into BOTH the dashboard row and the Buffers page's
+// view of it, so the two can never describe different shelves. `why` is the short
+// reason the firmware would give in the same state.
+void withBuffer(State &s, uint8_t i, bool present, Cell st, bool kgKnown, float foodG,
+                uint8_t bowls, bool confirmed, const char *why) {
+  PlatformRow &r = s.platforms[1 + i];
+  BufferInfo &b = s.buffers[i];
+  memset(&r, 0, sizeof(r));
+  memset(&b, 0, sizeof(b));
+  r.present = present;
+  r.role = PlatformRole::Buffer;
+  snprintf(r.label, sizeof(r.label), "B%u", (unsigned)(i + 1));
+  r.state = st;
+  r.kgKnown = kgKnown;
+  r.grams = foodG;
+  r.bowls = bowls;
+  r.bowlsConfirmed = confirmed;
+  r.partial = kgKnown && !confirmed;
+  snprintf(r.why, sizeof(r.why), "%s", why);
+
+  b.fitted = present;
+  snprintf(b.label, sizeof(b.label), "%s", r.label);
+  snprintf(b.uid, sizeof(b.uid), "BWL-%03u", (unsigned)(i + 1));
+  b.state = st;
+  b.kgKnown = kgKnown;
+  b.foodG = foodG;
+  b.grossG = foodG + 2500.0f * bowls;
+  b.bowls = bowls;
+  b.bowlsConfirmed = confirmed;
+  // An uncalibrated platform is the one fixture state with no factor; every other
+  // fitted one is shown commissioned, as a working unit is.
+  b.zeroed = present;
+  b.calibrated = present && strcmp(why, "uncal") != 0;
+  b.cpg = b.calibrated ? 22.143f : 0.0f;
+  snprintf(b.why, sizeof(b.why), "%s", why);
+}
+
+// THE ORDINARY BUFFER AREA: three platforms, all reading, different heights of
+// stack. Three digits before the point on B1 because that is the widest a buffer
+// row gets, and a fixture that only holds short numbers agrees with every layout.
+void withBuffers(State &s) {
+  withBuffer(s, 0, true, Cell::Online, true, 112400.0f, 4, true, "");
+  withBuffer(s, 1, true, Cell::Online, true, 61000.0f, 2, true, "");
+  withBuffer(s, 2, true, Cell::Online, true, 23400.0f, 1, true, "");
 }
 
 State sEmpty() {
@@ -193,6 +236,9 @@ State sEmpty() {
   // gram or two with temperature within minutes of a tare, and a screen that
   // shows a perfect 0 forever is showing a constant rather than a measurement.
   withScale(s, 1.0f, -2.0f, 0.5f, true, true, CELLS);
+  // An empty buffer area too: every shelf zeroed and bare, each count confirmed by
+  // the empty platform itself.
+  for (uint8_t i = 0; i < BUFFERS; i++) withBuffer(s, i, true, Cell::Online, true, 0.0f, 0, true, "");
   return s;
 }
 
@@ -209,12 +255,14 @@ State sTwo() {
   // CELLS SHOWN on the scenario whose whole point is an uneven split, which is
   // the state somebody turns the setting on to look at.
   s.scale.showCells = true;
+  withBuffers(s);
   return s;
 }
 
 State sFull() {
   State s = stacked(4);
   withScale(s, 2610.0f, 3105.0f, 2706.0f, true, true, CELLS);
+  withBuffers(s);
   return s;
 }
 
@@ -241,6 +289,10 @@ State sDegraded() {
   // live figures is the layout most likely to be wrong and the one that says
   // most: it is where a reader sees which corner went.
   s.scale.showCells = true;
+  // AND A BUFFER PLATFORM GONE, so the total is a lower bound for two reasons at
+  // once and the chip has to pick the worse one ("B3 offline +1").
+  withBuffers(s);
+  withBuffer(s, 2, true, Cell::Offline, false, 0.0f, 1, false, "offline");
   return s;
 }
 
@@ -256,6 +308,9 @@ State sDiscontiguous() {
   // there is no gram figure and the page shows counts. This is the state every
   // unit is in the first time it boots.
   withScale(s, 388.0f, 495.0f, 352.0f, false, false, CELLS);
+  // A buffer platform that has never been calibrated either: converting, no factor.
+  withBuffers(s);
+  withBuffer(s, 1, true, Cell::Online, false, 0.0f, 2, false, "uncal");
   return s;
 }
 
@@ -268,6 +323,7 @@ State sNoCell() {
   // nothing is known about it, which is a different statement entirely.
   s.batteryPercent = -1;
   withScale(s, 1180.0f, 1402.0f, 1194.0f, true, true, CELLS);
+  withBuffers(s);
   return s;
 }
 
@@ -285,6 +341,11 @@ State sCritical() {
   // console says so explicitly rather than leaving three dead cells to be read
   // as three faults. Dashes, not zero.
   withScale(s, 0.0f, 0.0f, 0.0f, false, false, 0);
+  // Only TWO buffer platforms fitted on this unit, and neither answering: the
+  // three-row layout, and a total with nothing in it at all ("--", not 0.0).
+  withBuffer(s, 0, true, Cell::Offline, false, 0.0f, 0, false, "offline");
+  withBuffer(s, 1, true, Cell::Offline, false, 0.0f, 0, false, "offline");
+  withBuffer(s, 2, false, Cell::Offline, false, 0.0f, 0, false, "");
   return s;
 }
 
@@ -295,6 +356,10 @@ State sWeakSignal() {
   // they include the platform. A number that is right about the change and
   // wrong about the absolute, which is worth being told.
   withScale(s, 760.0f, 913.0f, 765.0f, true, false, CELLS);
+  // A power cycle with bowls on the shelf: the count is remembered but not yet
+  // confirmed, so B1's food rests on it and the total says "at least".
+  withBuffers(s);
+  withBuffer(s, 0, true, Cell::Online, true, 112400.0f, 4, false, "bowls?");
   return s;
 }
 
@@ -307,6 +372,7 @@ State sCharging() {
   s.chargingKnown = true;
   s.charging = true;
   withScale(s, 6210.0f, 7015.0f, 6735.0f, true, true, CELLS);
+  withBuffers(s);
   return s;
 }
 

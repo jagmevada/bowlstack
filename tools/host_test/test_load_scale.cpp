@@ -272,6 +272,33 @@ static void inconsistentCount() {
   CHECK(g.count(BowlEvent::Inconsistent) == 1, "one Inconsistent event (got %d)", g.count(BowlEvent::Inconsistent));
 }
 
+static void operatorCorrectionIsRechecked() {
+  section("bowls: an operator's count is re-checked against the shelf without the load moving");
+  // Found on the bench: "bowls 2" typed with the platform still and empty left food
+  // reading -4.96 kg indefinitely, because the stable run had already been judged
+  // and nothing moved to start a new one.
+  Rig g;
+  g.commission();
+  g.s.setBowls(2);
+  g.run(7000);
+  const Reading r = g.r();
+  CHECK(r.bowls == 0 && r.bowlsConfirmed, "an empty shelf overrules '2 bowls' (got %u, %d)", r.bowls,
+        r.bowlsConfirmed);
+  CHECK(std::fabs(r.foodG) < 100, "food back near 0 (got %.0f g)", r.foodG);
+  // And with load on it, a count heavier than the shelf is flagged, not kept as true.
+  Rig h;
+  h.commission();
+  h.gross = 4000;
+  h.run(8000);
+  h.events.clear();
+  h.s.setBowls(3);
+  h.run(7000);
+  CHECK(h.r().bowls == 3 && !h.r().bowlsConfirmed, "3 bowls on 4 kg is flagged unconfirmed (got %u, %d)",
+        h.r().bowls, h.r().bowlsConfirmed);
+  CHECK(h.count(BowlEvent::Loaded) == 0 && h.count(BowlEvent::Unloaded) == 0,
+        "no phantom load/unload from the correction");
+}
+
 static void clampAtMax() {
   section("bowls: a fifth bowl is refused, not invented");
   Rig g;
@@ -420,6 +447,7 @@ int main() {
   restoreAndEmptyReset();
   restoreLoadedThenEvent();
   inconsistentCount();
+  operatorCorrectionIsRechecked();
   clampAtMax();
   counterRole();
   stateLadder();

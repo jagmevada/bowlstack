@@ -2,8 +2,10 @@
 
 #include <lvgl.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "ui_battery.h"
+#include "ui_bufcal.h"
 #include "ui_demo.h"
 #include "ui_calib.h"
 #include "ui_vessel.h"
@@ -62,12 +64,17 @@ lv_obj_t *detailCalib_ = nullptr;
 lv_obj_t *detailVessel_ = nullptr;
 lv_obj_t *detailSensor_ = nullptr;
 lv_obj_t *detailDevice_ = nullptr;
+// Settings > Buffers: the list, one page per buffer platform, and the kg keypad.
+lv_obj_t *detailBuffers_ = nullptr;
+lv_obj_t *detailBuf_[BUFFERS] = {nullptr, nullptr, nullptr};
+lv_obj_t *detailBufCal_ = nullptr;
 
-// Depth 3 covers menu > Settings > WiFi, the deepest the tree goes; 4 leaves a
-// slot spare. A stack rather than a single "previous" pointer, so Back stays
-// unambiguous once a page can be reached from more than one place -- which
-// Battery already could be, the moment anything else links to it.
-lv_obj_t *stack_[4] = {nullptr, nullptr, nullptr, nullptr};
+// The deepest route is Settings > Buffers > B1 > Calibrate, FOUR overlays; the
+// stack holds six so there is still a slot spare, which is what this comment said
+// of the old depth of three. A stack rather than a single "previous" pointer, so
+// Back stays unambiguous once a page can be reached from more than one place.
+const uint8_t STACK_MAX = 6;
+lv_obj_t *stack_[STACK_MAX] = {nullptr, nullptr, nullptr, nullptr, nullptr, nullptr};
 uint8_t depth_ = 0;
 
 // Installed by the firmware; absent in the desktop preview, where there are no
@@ -75,10 +82,14 @@ uint8_t depth_ = 0;
 void (*onTare_)(void) = nullptr;
 void (*onClearCal_)(void) = nullptr;
 void (*onCycleAvg_)(void) = nullptr;
-void (*onCyclePrecision_)(void) = nullptr;
 void (*onRestore_)(void) = nullptr;
 void (*onPlatformZero_)(void) = nullptr;
-void (*onToggleCells_)(void) = nullptr;
+// The buffer platforms' commands, by slot. Installed by the firmware; null in the
+// preview, where there is nothing to zero, so the rows are inert there.
+void (*onBufZero_)(uint8_t) = nullptr;
+void (*onBufCal_)(uint8_t, float) = nullptr;
+void (*onBufBowls_)(uint8_t, int8_t) = nullptr;
+void (*onBufClear_)(uint8_t) = nullptr;
 
 // The last mass the snapshot carried, cached so showOnly() can re-prefill the
 // keypad without a State to hand. pagesTick() keeps it current.
@@ -88,6 +99,12 @@ float lastVesselG_ = 0.0f;
 
 lv_obj_t *settingsMenu_ = nullptr;
 lv_obj_t *scaleMenu_ = nullptr;
+lv_obj_t *buffersMenu_ = nullptr;
+lv_obj_t *bufMenu_[BUFFERS] = {nullptr, nullptr, nullptr};
+// The labels the buffer pages were last shown under, for the keypad's title, and the
+// platform the keypad is calibrating.
+char bufLabel_[BUFFERS][4] = {"B1", "B2", "B3"};
+uint8_t calSlot_ = 0;
 
 // ROW POSITIONS, NAMED. menuSetHint() addresses rows by index, and inserting
 // "Set platform zero" at position 1 silently moved the calibration mass onto it
@@ -96,12 +113,19 @@ lv_obj_t *scaleMenu_ = nullptr;
 // positions next to the rows themselves does not make that impossible, but it
 // puts the two things a reader has to keep in step within a screen of each
 // other.
+//
+// TWO ROWS LEFT AND ONE ARRIVED with the per-platform dashboard. Precision and
+// "Cells on home" both configured the old dashboard -- its decimal places and its
+// A/B/C rows -- and that page now draws neither (one decimal, platform rows), so a
+// row that changed nothing visible was removed rather than left lying. Buffers is
+// new, between Scale and Diagnose. Every index below them moved, which is exactly
+// the change the paragraph above is about.
 enum : uint8_t {
   ROW_SET_WIFI = 0,
   ROW_SET_BATTERY,
   ROW_SET_SCALE,
+  ROW_SET_BUFFERS,
   ROW_SET_DIAGNOSE,
-  ROW_SET_PRECISION,
   ROW_SET_DEFAULT_PAGE,  // TRIAL HARNESS
 };
 enum : uint8_t {
@@ -110,9 +134,21 @@ enum : uint8_t {
   ROW_SCALE_CALIBRATE,
   ROW_SCALE_CLEAR,
   ROW_SCALE_AVERAGE,
-  ROW_SCALE_CELLS,
   ROW_SCALE_VESSEL,
   ROW_SCALE_RESTORE,
+};
+// One buffer platform's page. The first three rows are readouts (no handler, so
+// inert); the last is the outcome of whatever was last asked of the platform.
+enum : uint8_t {
+  ROW_BUF_ID = 0,
+  ROW_BUF_READING,
+  ROW_BUF_BOWLS,
+  ROW_BUF_BOWLS_UP,
+  ROW_BUF_BOWLS_DOWN,
+  ROW_BUF_ZERO,
+  ROW_BUF_CALIBRATE,
+  ROW_BUF_CLEAR,
+  ROW_BUF_LAST,
 };
 
 // TARE, THEN OUT TO THE WEIGHT PAGE. The navigation is the confirmation.
@@ -145,10 +181,45 @@ void doTare() {
 }
 void doClearCal() { if (onClearCal_) onClearCal_(); }
 void doCycleAvg() { if (onCycleAvg_) onCycleAvg_(); }
-void doCyclePrecision() { if (onCyclePrecision_) onCyclePrecision_(); }
 void doRestore() { if (onRestore_) onRestore_(); }
 void doPlatformZero() { if (onPlatformZero_) onPlatformZero_(); }
-void doToggleCells() { if (onToggleCells_) onToggleCells_(); }
+
+// --- buffer platform actions -----------------------------------------------------
+// ZERO AND CLEAR TAKE TWO TAPS. Both are stored, and a stray one is not visible as
+// a mistake: a zero taken with stock on the shelf makes every later reading short by
+// that stock, and a cleared factor turns the platform's kilograms off. The first tap
+// arms the row (its hint says "tap again") and a second within ARM_MS commits; the
+// counter's Tare got the same protection by being moved three taps deep.
+const uint32_t ARM_MS = 3000;
+uint32_t armZeroUntil_[BUFFERS] = {0, 0, 0};
+uint32_t armClearUntil_[BUFFERS] = {0, 0, 0};
+bool armed(uint32_t until) { return until && (int32_t)(until - lv_tick_get()) > 0; }
+
+void bufZero(uint8_t i) {
+  if (armed(armZeroUntil_[i])) {
+    armZeroUntil_[i] = 0;
+    if (onBufZero_) onBufZero_(i);
+  } else {
+    armZeroUntil_[i] = lv_tick_get() + ARM_MS;
+  }
+}
+void bufClear(uint8_t i) {
+  if (armed(armClearUntil_[i])) {
+    armClearUntil_[i] = 0;
+    if (onBufClear_) onBufClear_(i);
+  } else {
+    armClearUntil_[i] = lv_tick_get() + ARM_MS;
+  }
+}
+void bufBowls(uint8_t i, int8_t d) {
+  if (onBufBowls_) onBufBowls_(i, d);
+}
+
+// Menu rows take a plain function pointer, so each slot gets its own trampolines.
+template <uint8_t I> void bufZeroT() { bufZero(I); }
+template <uint8_t I> void bufClearT() { bufClear(I); }
+template <uint8_t I> void bufUpT() { bufBowls(I, +1); }
+template <uint8_t I> void bufDownT() { bufBowls(I, -1); }
 
 // --- the two navigation buttons -------------------------------------------
 // Forward declared because both live on pages built further down, and both do
@@ -187,8 +258,10 @@ void goToDefault() {
 }
 
 void showOnly(lv_obj_t *which) {
-  lv_obj_t *all[] = {detailSettings_, detailWifi_,   detailBatt_,   detailScale_,
-                     detailCalib_,    detailSensor_, detailDevice_, detailVessel_};
+  lv_obj_t *all[] = {detailSettings_, detailWifi_,   detailBatt_,     detailScale_,
+                     detailCalib_,    detailSensor_, detailDevice_,   detailVessel_,
+                     detailBuffers_,  detailBuf_[0], detailBuf_[1],   detailBuf_[2],
+                     detailBufCal_};
   // sizeof rather than a literal. This count was hand-written and had to be
   // edited in step with the array beside it; a page added without touching it
   // would simply never be hidden again.
@@ -213,6 +286,9 @@ void showOnly(lv_obj_t *which) {
   // Same reasoning as the line above: prefilled on every entry, so the page
   // always opens showing what the unit currently has.
   if (which == detailVessel_) vesselSetOffset(lastVesselG_);
+  // And the buffer keypad is told WHICH platform it calibrates, and emptied, on
+  // every entry: a half-typed mass for B1 must never be applied to B2.
+  if (which == detailBufCal_) bufCalOpenFor(calSlot_, bufLabel_[calSlot_]);
 }
 
 void closeAll() {
@@ -244,14 +320,21 @@ void closeAll() {
 // first time somebody taps WiFi. That is the right place for it. A deliberate
 // tap on a settings row can afford a second; a boot cannot, and the person
 // paying at boot is usually not the person who wanted the page.
-bool built_[8] = {false, false, false, false, false, false, false, false};
+bool built_[9] = {false, false, false, false, false, false, false, false, false};
 
 // Forward declared: every page's close handler is back(), and back() is defined
 // below because it is part of the navigation rather than of construction.
 void back();
 
 void ensureBuilt(lv_obj_t *page) {
-  if (page == detailVessel_ && !built_[7]) {
+  if (page == detailBufCal_ && !built_[8]) {
+    built_[8] = true;
+    buildBufCalPage(detailBufCal_);
+    bufCalOnClose(back);
+    bufCalOnApply([](uint8_t slot, float grams) {
+      if (onBufCal_) onBufCal_(slot, grams);
+    });
+  } else if (page == detailVessel_ && !built_[7]) {
     built_[7] = true;
     buildVesselPage(detailVessel_);
     vesselOnClose(back);
@@ -285,7 +368,7 @@ void push(lv_obj_t *page) {
   // BEFORE showOnly(), because showOnly() reaches into the calibration page to
   // re-prefill the keypad and there has to be a keypad to reach into.
   ensureBuilt(page);
-  if (depth_ < 4) stack_[depth_++] = page;
+  if (depth_ < STACK_MAX) stack_[depth_++] = page;
   showOnly(page);
 }
 
@@ -307,6 +390,12 @@ void openCalib() { push(detailCalib_); }
 void openVessel() { push(detailVessel_); }
 void openSensor() { push(detailSensor_); }
 void openDevice() { push(detailDevice_); }
+void openBuffers() { push(detailBuffers_); }
+template <uint8_t I> void openBufT() { push(detailBuf_[I]); }
+template <uint8_t I> void openBufCalT() {
+  calSlot_ = I;
+  push(detailBufCal_);
+}
 
 // Every overlay is the same shape: pinned below the status bar and taken out of
 // the screen's flex flow. Without IGNORE_LAYOUT it is a flex ITEM placed after
@@ -450,24 +539,19 @@ void buildPages() {
   menuAddRow(settingsMenu_, "WiFi", nullptr, openWifi);
   menuAddRow(settingsMenu_, "Battery", nullptr, openBattery);
   menuAddRow(settingsMenu_, "Scale", nullptr, openScale);
+  // THE BUFFER PLATFORMS, beside the counter's Scale page rather than inside it:
+  // they are separate instruments with their own zero, factor and bowl count, and a
+  // Scale page that mixed the two would have a Tare that taring did not mean.
+  menuAddRow(settingsMenu_, "Buffers", nullptr, openBuffers);
   // DIAGNOSE LIVES HERE NOW, not at the top level. It carries the per-cell
   // breakdown that used to sit on the dashboard -- each cell's share, its zero,
   // its tare, its raw conversions and its rate. All of it is real information
   // and none of it belongs on a screen read at a glance by somebody carrying a
   // bowl; it is read deliberately, by somebody who came looking for it.
   menuAddRow(settingsMenu_, "Diagnose", nullptr, openDevice);
-  // PRECISION SITS HERE, BESIDE THE PAGE THAT IGNORES IT. Diagnose always shows
-  // three decimals -- it is the page you open when you distrust the number, and
-  // rounding the evidence to match the dashboard would be the wrong favour. So
-  // this row changes the DASHBOARD's last digit only, and its neighbour is the
-  // place to go when you want the unrounded figure back.
-  //
-  // A cycling row for the same reason Average is one: three ordered values, and
-  // the way you choose between them is to flip with a mass on the platform and
-  // watch which one holds still. The hint shows the format itself rather than
-  // the digit count, because "0.00 kg" answers the question the row asks and
-  // "2" needs translating first.
-  menuAddRow(settingsMenu_, "Precision", nullptr, doCyclePrecision);
+  // NO PRECISION ROW ANY MORE. It set the dashboard's decimal places, and the
+  // dashboard now shows every platform to one decimal so a column of figures can be
+  // compared at a glance (see ui_weight.cpp). Diagnose still shows every place.
   // TRIAL HARNESS. Which page the device returns to when left alone and which
   // one it opens on after a power cycle.
   menuAddRow(settingsMenu_, "Default page", nullptr, doCycleDefaultPage);
@@ -500,14 +584,8 @@ void buildPages() {
   // better -- which a tap-to-advance row does in one gesture and a sub-page
   // does in four. The current value is the hint on the right.
   menuAddRow(scaleMenu_, "Average", nullptr, doCycleAvg);
-  // A TOGGLE, in the same tap-to-change shape as Average and Precision above
-  // it: the hint on the right says which way it is set, so the row states the
-  // current value rather than only the action.
-  //
-  // It sits under Scale rather than under a Display heading because there is no
-  // Display heading and inventing one for a single row would be a menu built
-  // around a taxonomy instead of around what people do.
-  menuAddRow(scaleMenu_, "Cells on home", nullptr, doToggleCells);
+  // NO "CELLS ON HOME" ROW ANY MORE: the dashboard no longer draws the counter's
+  // A/B/C rows at all (they are on Diagnose), so the toggle had nothing to toggle.
   // THE WAY BACK. Without it, "Clear calibration" could not be allowed to stick
   // -- clearing had to leave the NVS key absent so a reflash with a corrected
   // default could take effect, which meant a unit cleared on purpose came back
@@ -525,6 +603,39 @@ void buildPages() {
   menuAddRow(scaleMenu_, "Vessel offset", nullptr, openVessel);
   menuAddRow(scaleMenu_, "Restore default", nullptr, doRestore);
 
+  // --- Settings > Buffers -----------------------------------------------------
+  // A list of the platforms, then one page each. Rows rather than a bespoke screen
+  // for the reason the Scale page gives: adding a setting is adding a row. Per-slot
+  // pages rather than one page with a selector, because a selector that is easy to
+  // leave on the wrong platform is how B1 gets zeroed with B2's stock on it.
+  detailBuffers_ = makeDetail(scr);
+  buffersMenu_ = menuCreate(detailBuffers_, "Buffers", back);
+  menuAddRow(buffersMenu_, "B1", nullptr, openBufT<0>);
+  menuAddRow(buffersMenu_, "B2", nullptr, openBufT<1>);
+  menuAddRow(buffersMenu_, "B3", nullptr, openBufT<2>);
+
+  static void (*const ZERO[BUFFERS])(void) = {bufZeroT<0>, bufZeroT<1>, bufZeroT<2>};
+  static void (*const CLEAR[BUFFERS])(void) = {bufClearT<0>, bufClearT<1>, bufClearT<2>};
+  static void (*const UP[BUFFERS])(void) = {bufUpT<0>, bufUpT<1>, bufUpT<2>};
+  static void (*const DOWN[BUFFERS])(void) = {bufDownT<0>, bufDownT<1>, bufDownT<2>};
+  static void (*const CAL[BUFFERS])(void) = {openBufCalT<0>, openBufCalT<1>, openBufCalT<2>};
+  static const char *const TITLE[BUFFERS] = {"Buffer B1", "Buffer B2", "Buffer B3"};
+  for (uint8_t i = 0; i < BUFFERS; i++) {
+    detailBuf_[i] = makeDetail(scr);
+    bufMenu_[i] = menuCreate(detailBuf_[i], TITLE[i], back);
+    // Order: what it is and what it reads, then the everyday correction, then the
+    // commissioning actions, then the outcome. Indices are the ROW_BUF_* above.
+    menuAddRow(bufMenu_[i], "Platform", nullptr, nullptr);
+    menuAddRow(bufMenu_[i], "Reading", nullptr, nullptr);
+    menuAddRow(bufMenu_[i], "Bowls", nullptr, nullptr);
+    menuAddRow(bufMenu_[i], "Bowls +1", nullptr, UP[i]);
+    menuAddRow(bufMenu_[i], "Bowls -1", nullptr, DOWN[i]);
+    menuAddRow(bufMenu_[i], "Zero (empty)", nullptr, ZERO[i]);
+    menuAddRow(bufMenu_[i], "Calibrate", nullptr, CAL[i]);
+    menuAddRow(bufMenu_[i], "Clear cal", nullptr, CLEAR[i]);
+    menuAddRow(bufMenu_[i], "Last", nullptr, nullptr);
+  }
+
   // CONTAINERS ONLY. Each page's contents are built the first time it is
   // opened -- see ensureBuilt() above for the measurements that moved them.
   detailCalib_ = makeDetail(scr);
@@ -533,6 +644,7 @@ void buildPages() {
   detailBatt_ = makeDetail(scr);
   detailSensor_ = makeDetail(scr);
   detailDevice_ = makeDetail(scr);
+  detailBufCal_ = makeDetail(scr);
 
   // Start on the weight view -- what someone walking up to the station wants to
   // see. The menu is one swipe away.
@@ -588,10 +700,31 @@ void pagesOnScaleTare(void (*cb)(void)) { onTare_ = cb; }
 void pagesOnScaleClearCal(void (*cb)(void)) { onClearCal_ = cb; }
 void pagesOnScaleCycleAvg(void (*cb)(void)) { onCycleAvg_ = cb; }
 void pagesOnVesselApply(void (*cb)(float)) { vesselOnApply(cb); }
-void pagesOnScaleCyclePrecision(void (*cb)(void)) { onCyclePrecision_ = cb; }
 void pagesOnScaleRestore(void (*cb)(void)) { onRestore_ = cb; }
 void pagesOnScalePlatformZero(void (*cb)(void)) { onPlatformZero_ = cb; }
-void pagesOnScaleToggleCells(void (*cb)(void)) { onToggleCells_ = cb; }
+void pagesOnBufferZero(void (*cb)(uint8_t)) { onBufZero_ = cb; }
+void pagesOnBufferCalibrate(void (*cb)(uint8_t, float)) { onBufCal_ = cb; }
+void pagesOnBufferBowls(void (*cb)(uint8_t, int8_t)) { onBufBowls_ = cb; }
+void pagesOnBufferClear(void (*cb)(uint8_t)) { onBufClear_ = cb; }
+
+void pagesPreviewOpen(const char *name) {
+  if (!name) return;
+  closeAll();
+  if (!strcmp(name, "settings")) push(detailSettings_);
+  else if (!strcmp(name, "scale")) { push(detailSettings_); push(detailScale_); }
+  else if (!strcmp(name, "buffers")) { push(detailSettings_); push(detailBuffers_); }
+  else if (!strncmp(name, "buf", 3) && name[3] >= '1' && name[3] <= '3' && name[4] == 0) {
+    push(detailSettings_);
+    push(detailBuffers_);
+    push(detailBuf_[name[3] - '1']);
+  } else if (!strcmp(name, "bufcal")) {
+    calSlot_ = 0;
+    push(detailSettings_);
+    push(detailBuffers_);
+    push(detailBuf_[0]);
+    push(detailBufCal_);
+  } else if (!strcmp(name, "diagnose")) { push(detailSettings_); push(detailDevice_); }
+}
 
 void pagesTick(uint32_t nowMs) {
   // --- data: always, for every page, visible or not ------------------------
@@ -630,21 +763,56 @@ void pagesTick(uint32_t nowMs) {
     // The Scale row carries the one fact that decides what the whole dashboard
     // can say: with no calibration there are no grams anywhere in the product.
     menuSetHint(settingsMenu_, ROW_SET_SCALE, s.scale.calibrated ? "" : "uncal");
-    // Built from the setting rather than a lookup table, so a fourth choice
-    // could never be added to scale.h and leave this row describing the third.
-    static char prec[12];
-    const uint8_t d = s.scale.decimals ? s.scale.decimals : 3;
-    snprintf(prec, sizeof(prec), "0.%0*d kg", (int)d, 0);
-    menuSetHint(settingsMenu_, ROW_SET_DEFAULT_PAGE,
-              s.defaultPage == 1 ? "Knob" : "Weight");
-  menuSetHint(settingsMenu_, ROW_SET_PRECISION, prec);
+    // How many buffer platforms answered -- the first thing to know before opening
+    // the page, and "none" says so on a unit with no buffer bus at all.
+    static char fitted[12];
+    uint8_t nf = 0;
+    for (uint8_t i = 0; i < BUFFERS; i++) nf += s.buffers[i].fitted ? 1 : 0;
+    if (nf == 0) snprintf(fitted, sizeof(fitted), "none");
+    else snprintf(fitted, sizeof(fitted), "%u fitted", nf);
+    menuSetHint(settingsMenu_, ROW_SET_BUFFERS, fitted);
+    menuSetHint(settingsMenu_, ROW_SET_DEFAULT_PAGE, s.defaultPage == 1 ? "Knob" : "Weight");
   }
-  if (scaleMenu_) {
-    // The Scale menu's own rows, updated whenever it exists rather than only
-    // while it is on screen -- menuSetHint compares before writing, so a hidden
-    // page costs one string compare a frame and is correct the instant it is
-    // opened rather than one frame later.
-    menuSetHint(scaleMenu_, ROW_SCALE_CELLS, s.scale.showCells ? "shown" : "hidden");
+
+  // --- the buffer pages' hints -------------------------------------------------
+  // Written whenever the pages exist, visible or not -- menuSetHint compares before
+  // writing, so a hidden page costs string compares and is right the instant it
+  // opens.
+  for (uint8_t i = 0; i < BUFFERS; i++) {
+    const BufferInfo &b = s.buffers[i];
+    if (b.fitted && b.label[0]) snprintf(bufLabel_[i], sizeof(bufLabel_[i]), "%s", b.label);
+    char reading[24];
+    if (!b.fitted) snprintf(reading, sizeof(reading), "not fitted");
+    else if (b.kgKnown)
+      snprintf(reading, sizeof(reading), "%.1f kg", b.foodG / 1000.0f);
+    else
+      snprintf(reading, sizeof(reading), "%s", b.why[0] ? b.why : "--");
+    if (buffersMenu_) {
+      char h[40];
+      if (b.fitted && b.kgKnown)
+        snprintf(h, sizeof(h), "%s  %u bw%s", reading, b.bowls, b.bowlsConfirmed ? "" : "?");
+      else
+        snprintf(h, sizeof(h), "%s", reading);
+      menuSetHint(buffersMenu_, i, h);
+    }
+    lv_obj_t *m = bufMenu_[i];
+    if (!m) continue;
+    menuSetHint(m, ROW_BUF_ID, b.fitted ? b.uid : "not fitted");
+    menuSetHint(m, ROW_BUF_READING, reading);
+    char bw[16];
+    snprintf(bw, sizeof(bw), "%u%s", b.bowls, b.bowlsConfirmed ? "" : " (unconf.)");
+    menuSetHint(m, ROW_BUF_BOWLS, b.fitted ? bw : "");
+    menuSetHint(m, ROW_BUF_ZERO, armed(armZeroUntil_[i]) ? "tap again" : (b.zeroed ? "stored" : "not set"));
+    char cal[16];
+    if (b.calibrated) snprintf(cal, sizeof(cal), "%.2f c/g", b.cpg);
+    else snprintf(cal, sizeof(cal), "not set");
+    menuSetHint(m, ROW_BUF_CALIBRATE, b.fitted ? cal : "");
+    menuSetHint(m, ROW_BUF_CLEAR, armed(armClearUntil_[i]) ? "tap again" : "");
+    // The outcome of the last command, cut to what a row can hold. The full sentence
+    // is on the console; this is enough to say whether it worked.
+    char last[20];
+    snprintf(last, sizeof(last), "%.19s", b.lastResult);
+    menuSetHint(m, ROW_BUF_LAST, last);
   }
   lastVesselG_ = s.scale.vesselOffsetG;
   if (scaleMenu_) {
@@ -703,7 +871,8 @@ void pagesTick(uint32_t nowMs) {
   // time; everything else is read or pressed. See IDLE_ENTRY_MS.
   const bool typing = (depth_ > 0) && (stack_[depth_ - 1] == detailWifi_ ||
                                        stack_[depth_ - 1] == detailCalib_ ||
-                                       stack_[depth_ - 1] == detailVessel_);
+                                       stack_[depth_ - 1] == detailVessel_ ||
+                                       stack_[depth_ - 1] == detailBufCal_);
   if (lv_display_get_inactive_time(NULL) > (typing ? IDLE_ENTRY_MS : IDLE_HOME_MS)) {
     // Compared against the SAME tile pagesGoHome() will move to. Fixing only
     // the action would leave this guard permanently false once parked on the

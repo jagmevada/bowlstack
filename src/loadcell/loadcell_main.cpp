@@ -2,7 +2,7 @@
 // Bowlstack :: load-cell station -- Waveshare ESP32-S3-Touch-LCD-2,
 //              3x NAU7802 behind a TCA9548A
 //
-// Firmware: V1.11 261003
+// Firmware: V1.13 261003
 //
 // Also carries the 200 kg buffer-stock cell on its own bus (IO21/IO16) -- see
 // buffer_bank.h. It is a separate instrument: nothing below sums it into the
@@ -61,6 +61,8 @@
 #include "splash_font.h"
 #include "scale.h"
 #include "buffer_bank.h"
+#include "ui_platforms.h"
+#include <string.h>
 #include <Preferences.h>
 
 #include "inputs.h"
@@ -84,6 +86,11 @@ namespace {
 // checked -- at compile time, rather than as a cell that renders as a missing
 // row on a panel nobody is looking at.
 static_assert(scale::CELLS == ui::CELLS, "scale::CELLS and ui::CELLS must match");
+// The same discipline for the buffer slots: the bank's table and the UI's rows are
+// declared in two headers that may not include each other, so a mismatch is caught
+// here rather than as a platform quietly missing from the dashboard.
+static_assert(bufbank::SLOTS == ui::BUFFERS, "bufbank::SLOTS and ui::BUFFERS must match");
+static_assert(ui::PLATFORMS == 1 + ui::BUFFERS, "the dashboard is the counter plus every buffer");
 
 // How long to wait for a USB host to open the CDC port before giving up and
 // booting anyway. Every millisecond of it is splash time -- nothing is on the
@@ -484,29 +491,6 @@ void publishScale(uint32_t nowMs) {
   s.scale.zeroed = sn.zeroed;
   s.scale.calMassG = sn.calMassG;
 
-  // The 200 kg buffer cell, for the dashboard line under the total. EVERY field is
-  // set, because `s` started life as a copy of the demo fixture -- which now says a
-  // buffer module is fitted and reads 123.5 kg -- and an inherited claim about
-  // hardware is exactly what the ToF block further down warns about. On a unit
-  // with no module `fitted` is false and the line is not drawn.
-  //
-  // Fed from the bank's FIRST slot (B1) until the dashboard draws one row per
-  // platform; grams is FOOD -- gross minus the bowls' dry mass.
-  {
-    const bufbank::Snapshot bk = bufbank::snapshot();
-    const bufbank::SlotSnapshot &b1 = bk.slot[0];
-    ui::ScaleView::BufferView &b = s.scale.buffer;
-    b.fitted = b1.fitted;
-    b.state = b1.r.link == lscale::Link::Online
-                  ? ui::Cell::Online
-                  : (b1.r.link == lscale::Link::Warming ? ui::Cell::Warming : ui::Cell::Offline);
-    b.kgKnown = b1.r.kgKnown;
-    b.grams = b1.r.foodG;
-    // Net of the stored zero when there is one, as the counter shows its own.
-    b.counts = b1.r.zeroed ? b1.r.counts - b1.r.zero : b1.r.counts;
-    b.overRange = b1.r.overRange;
-  }
-
   int32_t totalCounts = 0;
   for (uint8_t i = 0; i < ui::CELLS; i++) {
     ui::CellView &c = s.scale.cell[i];
@@ -529,6 +513,69 @@ void publishScale(uint32_t nowMs) {
     if (c.state == ui::Cell::Online) totalCounts += c.counts;
   }
   s.scale.totalCounts = totalCounts;
+
+  // --- THE PLATFORMS ------------------------------------------------------------
+  // The counter as row 0 through the SAME function the simulator's fixture uses
+  // (ui_platforms.cpp), so the preview's C1 cannot disagree with this one; and each
+  // buffer slot as rows 1..3. AFTER the cell loop above, because the counter's row
+  // reads the cells' states.
+  //
+  // EVERY FIELD OF EVERY ROW IS WRITTEN: `s` started life as a copy of the demo
+  // fixture, which says three buffer platforms are fitted and loaded -- an inherited
+  // claim about hardware is exactly what the ToF block below warns about.
+  ui::platformFromCounter(s.scale, "C1", s.platforms[0]);
+  {
+    const bufbank::Snapshot bk = bufbank::snapshot();
+    for (uint8_t i = 0; i < ui::BUFFERS; i++) {
+      const bufbank::SlotSnapshot &b = bk.slot[i];
+      const lscale::Reading &r = b.r;
+      const ui::Cell cell = r.link == lscale::Link::Online
+                                ? ui::Cell::Online
+                                : (r.link == lscale::Link::Warming ? ui::Cell::Warming : ui::Cell::Offline);
+      // The short reason, in the panel's words, in the core's ladder order.
+      const char *why = "";
+      if (r.link == lscale::Link::Offline) why = "offline";
+      else if (r.state == lscale::WState::Settling) why = "settling";
+      else if (r.state == lscale::WState::OverRange) why = "OVER";
+      else if (r.state == lscale::WState::Uncalibrated) why = "uncal";
+      else if (r.state == lscale::WState::Untared) why = "no zero";
+      else if (r.kgKnown && !r.bowlsConfirmed) why = "bowls?";
+
+      ui::PlatformRow &row = s.platforms[1 + i];
+      memset(&row, 0, sizeof(row));
+      row.present = b.fitted;
+      row.role = ui::PlatformRole::Buffer;
+      snprintf(row.label, sizeof(row.label), "%.3s", b.cfg.label);
+      row.state = cell;
+      row.kgKnown = r.kgKnown;
+      row.grams = r.foodG;
+      row.bowls = r.bowls;
+      row.bowlsConfirmed = r.bowlsConfirmed;
+      // Food that rests on an unconfirmed bowl count is real but uncertain by 2.5 kg
+      // a bowl, so the total it joins says "at least".
+      row.partial = r.kgKnown && !r.bowlsConfirmed;
+      row.overRange = r.state == lscale::WState::OverRange;
+      snprintf(row.why, sizeof(row.why), "%s", why);
+
+      ui::BufferInfo &info = s.buffers[i];
+      memset(&info, 0, sizeof(info));
+      info.fitted = b.fitted;
+      snprintf(info.label, sizeof(info.label), "%.3s", b.cfg.label);
+      snprintf(info.uid, sizeof(info.uid), "%.11s", b.cfg.uid);
+      info.state = cell;
+      info.kgKnown = r.kgKnown;
+      info.foodG = r.foodG;
+      info.grossG = r.grossG;
+      info.bowls = r.bowls;
+      info.bowlsConfirmed = r.bowlsConfirmed;
+      info.zeroed = r.zeroed;
+      info.calibrated = r.calibrated;
+      info.cpg = r.cpg;
+      snprintf(info.why, sizeof(info.why), "%s", why);
+      snprintf(info.lastResult, sizeof(info.lastResult), "%.47s", b.lastResult);
+      info.resultSeq = b.resultSeq;
+    }
+  }
 
   s.deviceId = BOWLSTACK_DEVICE_ID;
   s.firmware = BOWLSTACK_FW_VERSION;
@@ -640,12 +687,35 @@ void onCycleAvg() {
   Serial.printf("ui: averaging -> %u samples\n", scale::cycleWindow());
 }
 
-void onCyclePrecision() {
-  Serial.printf("ui: reading -> %u decimals\n", scale::cycleDecimals());
+// --- Settings > Buffers -------------------------------------------------------------
+// Each only QUEUES work for the buffer bank's task (zero and factor are written to
+// NVS there and nowhere else); the outcome comes back on the next snapshot as that
+// slot's lastResult, which the platform's page shows.
+void onBufZero(uint8_t slot) {
+  Serial.printf("ui: buffer %u -> zero\n", slot + 1);
+  bufbank::zero(slot);
 }
 
-void onToggleCells() {
-  Serial.printf("ui: cells on home -> %s\n", scale::toggleShowCells() ? "shown" : "hidden");
+void onBufCalibrate(uint8_t slot, float grams) {
+  Serial.printf("ui: buffer %u -> calibrate against %.2f kg\n", slot + 1, grams / 1000.0f);
+  bufbank::calibrate(slot, grams);
+}
+
+void onBufClear(uint8_t slot) {
+  Serial.printf("ui: buffer %u -> clear calibration\n", slot + 1);
+  bufbank::clearCalibration(slot);
+}
+
+// +1 / -1 FROM THE COUNT THE BANK HOLDS NOW, clamped to the stack's 0..4, and the
+// result is a confirmed count: an operator correcting it is the confirmation.
+void onBufBowls(uint8_t slot, int8_t delta) {
+  if (slot >= bufbank::SLOTS) return;
+  const bufbank::Snapshot bk = bufbank::snapshot();
+  int n = (int)bk.slot[slot].r.bowls + delta;
+  if (n < 0) n = 0;
+  if (n > 4) n = 4;
+  Serial.printf("ui: buffer %u -> bowls %d\n", slot + 1, n);
+  bufbank::setBowls(slot, (uint8_t)n);
 }
 
 // TRIAL HARNESS: which page the device settles on. Persisted here rather than
@@ -1132,9 +1202,11 @@ void setup() {
   ui::pagesOnScaleClearCal(onClearCal);
   ui::pagesOnScaleCycleAvg(onCycleAvg);
   ui::pagesOnVesselApply(onVesselApply);
-  ui::pagesOnScaleCyclePrecision(onCyclePrecision);
-  ui::pagesOnScaleToggleCells(onToggleCells);
   ui::pagesOnScaleRestore(onRestoreDefault);
+  ui::pagesOnBufferZero(onBufZero);
+  ui::pagesOnBufferCalibrate(onBufCalibrate);
+  ui::pagesOnBufferBowls(onBufBowls);
+  ui::pagesOnBufferClear(onBufClear);
   ui::pagesOnScalePlatformZero(onPlatformZero);
   ui::calibOnApply(onCalibApply);
   // Opens pre-filled with whatever this unit was last calibrated against, which

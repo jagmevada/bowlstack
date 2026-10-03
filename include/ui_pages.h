@@ -64,19 +64,8 @@ void pagesOnScaleCycleAvg(void (*cb)(void));
 // to 250 g of error into every reading the trial exists to measure.
 void pagesOnVesselApply(void (*cb)(float grams));
 
-// Steps the dashboard reading between 0.0, 0.00 and 0.000 kg and wraps.
-//
-// DISPLAY ONLY, and deliberately so: it changes how the total is printed, never
-// what was measured. The Diagnose page keeps three decimals whatever this says,
-// so nobody can lose a figure by leaving this on one place.
-//
-// It is a setting because the right answer belongs to the assembly rather than
-// to the converter. At ~104 counts/g a still platform wanders half a gram to a
-// gram and a half, so the third decimal of a kilogram is at or below this
-// hardware's own noise -- a digit that never settles, which reads as a broken
-// scale rather than a precise one. Two places clear it; one throws away
-// resolution the cells have. Which to want is a judgement about the job.
-void pagesOnScaleCyclePrecision(void (*cb)(void));
+// (pagesOnScaleCyclePrecision is gone: the dashboard shows every platform to one
+// decimal, so the Precision row had nothing left to change. See ui_pages.cpp.)
 
 // Loads the factor the firmware was built with and persists it as this unit's
 // own. It is what lets "Clear calibration" mean cleared: without a deliberate
@@ -90,11 +79,26 @@ void pagesOnScaleRestore(void (*cb)(void));
 // volatile and belongs to the next measurement rather than to the assembly.
 void pagesOnScalePlatformZero(void (*cb)(void));
 
-// Settings > Scale > "Cells on home": shows or hides the per-cell breakdown
-// under the dashboard total. Like every other row here it is INERT in the
-// desktop preview, where nothing installs a handler -- the preview exercises
-// both layouts through the fixtures instead.
-void pagesOnScaleToggleCells(void (*cb)(void));
+// (pagesOnScaleToggleCells is gone with the A/B/C rows it showed; the per-cell
+// breakdown lives on Settings > Diagnose.)
+
+// --- Settings > Buffers ---------------------------------------------------------
+// One handler per command, each told WHICH buffer platform (slot 0..2 = B1..B3).
+// INERT in the desktop preview, where nothing installs them. All four only queue
+// work for the firmware's buffer task; the outcome comes back as
+// State::buffers[slot].lastResult and is shown on that platform's page.
+//
+// Zero and Clear take two taps on the panel (the first arms the row) because both
+// are stored and a stray one is invisible as a mistake. See ui_pages.cpp.
+void pagesOnBufferZero(void (*cb)(uint8_t slot));
+void pagesOnBufferCalibrate(void (*cb)(uint8_t slot, float grams));
+void pagesOnBufferBowls(void (*cb)(uint8_t slot, int8_t delta));
+void pagesOnBufferClear(void (*cb)(uint8_t slot));
+
+// PREVIEW ONLY: opens an overlay by name ("settings", "scale", "buffers", "buf1".."buf3",
+// "bufcal", "diagnose") so the simulator can screenshot it. Nothing on the device
+// calls it.
+void pagesPreviewOpen(const char *name);
 
 // TRIAL HARNESS. Cycles which page the device settles on -- weight or knob.
 // The UI does not persist it: src/ui/ has no NVS and no business having one, so

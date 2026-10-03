@@ -37,7 +37,39 @@
 #include "ui_screens.h"
 #include "ui_wifi.h"
 
+// --- screenshots -----------------------------------------------------------------
+// BOWLSTACK_SIM_SHOT=<file.bmp> writes the window to a BMP once
+// BOWLSTACK_SIM_SHOT_MS (default 1500) have passed, then exits. It exists so a layout
+// can be CHECKED by looking at it -- by a reviewer, or by an agent with no window to
+// look at -- rather than argued about from pixel arithmetic. The demo cycles a
+// scenario every 3 s, so the delay picks the scenario: 1500 is the first, 4500 the
+// second, and so on.
+//
+// THE SOFTWARE RENDERER, ONLY WHEN SHOOTING. Reading pixels back after a present is
+// undefined on an accelerated renderer (the back buffer may already be discarded);
+// the software one keeps them. An ordinary run is left on whatever SDL picks.
+static void saveShot(lv_display_t *disp, const char *path) {
+  SDL_Renderer *r = (SDL_Renderer *)lv_sdl_window_get_renderer(disp);
+  SDL_Surface *s = SDL_CreateRGBSurfaceWithFormat(0, ui::SCREEN_W, ui::SCREEN_H, 32,
+                                                  SDL_PIXELFORMAT_ARGB8888);
+  if (!r || !s) {
+    printf("shot: no renderer or surface\n");
+    return;
+  }
+  if (SDL_RenderReadPixels(r, nullptr, SDL_PIXELFORMAT_ARGB8888, s->pixels, s->pitch) != 0 ||
+      SDL_SaveBMP(s, path) != 0)
+    printf("shot: FAILED: %s\n", SDL_GetError());
+  else
+    printf("shot: wrote %s\n", path);
+  SDL_FreeSurface(s);
+}
+
 int main(int, char **) {
+  const char *shotPath = getenv("BOWLSTACK_SIM_SHOT");
+  const char *shotMsEnv = getenv("BOWLSTACK_SIM_SHOT_MS");
+  const uint32_t shotAt = shotMsEnv ? (uint32_t)atoi(shotMsEnv) : 1500u;
+  if (shotPath) SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");
+
   lv_init();
 
   // SDL_GetTicks rather than anything of our own: LVGL 9 takes its tick source
@@ -71,6 +103,10 @@ int main(int, char **) {
   // rather than in the fixtures.
   ui::scopeSetBuffer(malloc(ui::SCOPE_BUF_BYTES));
   ui::buildPages();
+  // BOWLSTACK_SIM_PAGE=buffers|buf1|bufcal|settings|scale|diagnose opens that overlay
+  // at start, so a screenshot (above) can be taken of a page that is several taps
+  // deep without a mouse.
+  if (const char *page = getenv("BOWLSTACK_SIM_PAGE")) ui::pagesPreviewOpen(page);
 
   printf("Bowlstack UI preview\n");
   printf("  window   %d x %d, zoom 1 (one SDL pixel = one panel pixel)\n", ui::SCREEN_W,
@@ -105,6 +141,12 @@ int main(int, char **) {
       ui::perfFormat(perf, sizeof(perf));
       printf("%s\n", perf);
       fflush(stdout);
+    }
+
+    if (shotPath && SDL_GetTicks() >= shotAt) {
+      lv_refr_now(disp);  // the frame on screen is the frame written
+      saveShot(disp, shotPath);
+      running = false;
     }
 
     SDL_Event e;
