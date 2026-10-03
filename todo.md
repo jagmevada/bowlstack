@@ -32,11 +32,11 @@ A/B/C cell rows leave the main page (Diagnose keeps them).
 | 2a | buffer bank (`src/loadcell/buffer_bank.cpp`, replaces `buffer_scale.*`): B1..B3 from a config table (`:buf` console), bus clear + verified bring-up, B1 calibration imported — V1.11, `0e3a152` | done; 1000/1000 reads, 5/5 resets up (one on attempt 2 — post-reset fault contained, cause not found) |
 | 2b | panel: total = counter + buffers, rows `C1`/`B1..B3`, A/B/C off the main page; Settings › Buffers (zero / calibrate / bowls); sim screenshots (`BOWLSTACK_SIM_SHOT`) — V1.13, `b01a82e` | done; bowls-on-empty bug found on bench and fixed |
 | 2c | on-glass use by the owner (V1.14–V1.19, below); B1 linearity test; real bowl test with real bowls; known-mass span calibration | mostly done — **known mass and real-bowl test outstanding** |
-| 3 | Supabase `migrate_buffer.sql` / rollback (kind `buffer`, 250 kg rail, kind guard, views) | **next** |
-| 4 | upload: per-device channel refactor of `scale_telemetry` (counter JSON must stay byte-identical); the buffer channel must follow the Vessel correction switch (food on, gross off) as C1's weight_g already does | |
-| 5 | cut-over of BWL-001 (stop other writers, re-kind, enable upload) | |
-| 6 | web front end (kg for buffers); **ask before pushing — a push deploys** | |
-| 7 | `tools/fleet_sim.py` to kg; re-kind BWL-002..024 together | |
+| 3 | Supabase `migrate_buffer.sql` / `rollback_buffer.sql` (kind `buffer`, 250 kg rail, kind guards, views, `weight_samples` columns) | written, PGlite-verified (fresh, upgrade, cut-over, rollbacks, re-runs); **owner to run** |
+| 4 | upload: per-device channel refactor of `scale_telemetry` (counter JSON must stay byte-identical); buffer channel sends FOOD as weight_g always (owner: "dashboard always food"), plus gross_g / bowls / bowls_confirmed, NULL unless ok | **next after the cut-over** — until then BWL-001 is blank on the dashboard |
+| 5 | `cutover_buffers.sql` / rollback: re-kind **every** BWL-001..032 to `buffer`, NULL their stack_* | written; owner runs after the web push, with every stack writer of BWL ids stopped |
+| 6 | web front end, version 1.42 (kg for buffers, works before and after the migration) | written; smoke 387/387; **ask before pushing — a push deploys** |
+| 7 | `tools/fleet_sim.py` to kg for BWL-004..024 (001..003 are the panel's), whole-bowl steps | written; dry-run audit passes; start only after the cut-over |
 | 8–9 | docs; remove dormant bowl code | |
 
 **Done on the bench, 2026-10-03 evening (V1.14–V1.19, `3ca63ba`..`295cbe0`, not pushed):**
