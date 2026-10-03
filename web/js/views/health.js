@@ -200,7 +200,7 @@ function miniLevels(levels) {
 // `power` threaded in rather than reached for: this is called from two
 // places and neither had state in scope, which is why the chip here kept
 // the old behaviour after the Power card was fixed.
-function deviceRow(d, power, devices) {
+export function deviceRow(d, power, devices) {
   const sev = deviceSeverity(d);
   const hub = isHub(d);
   // How many of its nodes a hub has, beside its power: a hub on mains with half

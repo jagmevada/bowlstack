@@ -1963,6 +1963,13 @@ console.log('\n[hubs: the battery is the hub\'s, platforms report node health]')
     !/Stack now|Counter now|Buffer now|History/.test(text()));
   ok('...and counts its nodes', kvOf('Nodes')?.textContent === '1 active of 1 mapped',
     kvOf('Nodes')?.textContent);
+  await go('#/device/HUB-D');
+  const paired = [...view.querySelectorAll('.section .dev')].map(r => r.querySelector('.dev-id')?.textContent);
+  ok('...and lists the platforms paired to it, as Health rows linking to each',
+    ['BWL-201', 'BWL-202', 'LDC-207'].every(id => paired.includes(id))
+    && !paired.some(id => /HUB-|BWL-20[34]/.test(id))
+    && hRow('BWL-202')?.getAttribute('href') === '#/device/BWL-202'
+    && hRow('BWL-202')?.classList.contains('sev-critical'), paired.join(','));
   await go('#/device/LDC-207?h=24');
   await new Promise(r => setTimeout(r, 80));
   ok('a platform page has Node health, not Power',

@@ -160,7 +160,9 @@ export function hubNodes(hub, devices) {
   const mapped = (devices || []).filter(d =>
     isWeighed(d) && d.location === hub.location && d.food_slot != null);
   const active = mapped.filter(d => d.reported && !d.offline && d.responding !== false);
-  return { mapped: mapped.length, active: active.length };
+  const list = mapped.sort((a, b) => a.food_slot - b.food_slot
+    || String(a.device_id).localeCompare(String(b.device_id)));
+  return { mapped: mapped.length, active: active.length, list };
 }
 
 // --- stack count trust ----------------------------------------------

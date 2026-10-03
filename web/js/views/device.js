@@ -21,6 +21,7 @@ import {
   serviceState, fmtRelative, fmtDateTime, fmtUptime, fmtWeight, bowlsText,
 } from '../domain.js';
 import { APP_VERSION } from '../version.js';
+import { deviceRow } from './health.js';
 
 const WINDOWS = [
   { key: '2',  label: '2 h',  hours: 2 },
@@ -211,8 +212,18 @@ export function renderDevice(state, params, ctx) {
 
   // No history for a hub: it writes neither table -- status_events is
   // bowl-shaped and weight_samples weight-shaped -- so a query could only
-  // ever come back empty and read as "nothing changed".
-  if (isHub(dev)) return frag;
+  // ever come back empty and read as "nothing changed". What it has instead
+  // is its platforms, in the Health roster's own rows so they read the same.
+  if (isHub(dev)) {
+    const list = h('div', { class: 'dev-list compact' });
+    for (const d of nodes.list) list.append(deviceRow(d, state.power, state.devices));
+    frag.append(h('div', { class: 'section' },
+      h('div', { class: 'section-head' },
+        h('h2', {}, 'Paired platforms'),
+        h('span', { class: 'count' }, `${nodes.active} active of ${nodes.mapped} mapped`)),
+      nodes.mapped ? list : empty('No platform is mapped to this area yet.')));
+    return frag;
+  }
 
   // --- history -------------------------------------------------------
   const hoursKey = WINDOWS.some(w => w.key === params.get('h')) ? params.get('h') : '24';
