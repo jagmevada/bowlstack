@@ -106,6 +106,9 @@ struct ScaleView {
   bool platformZeroed;
   // Empty-vessel mass to subtract from what is shown and sent. 0 = off.
   float vesselOffsetG;
+  // THE VESSEL CORRECTION SWITCH, for every platform: off, C1 drops its vessel
+  // offset and the buffers show gross instead of food. Use vesselAppliedG().
+  bool vesselOn;
   bool overRange;  // at least one cell saturated -- the total is not a weight
 
   // Carried so the Device page can state them rather than the reader having to
@@ -134,6 +137,10 @@ struct ScaleView {
 
   uint8_t online;
 };
+
+// The counter's offset as it is APPLIED: the stored mass while the correction is
+// on, nothing while it is off. The one place both the panel and the device read it.
+inline float vesselAppliedG(const ScaleView &s) { return s.vesselOn ? s.vesselOffsetG : 0.0f; }
 
 // --- the weighing platforms ---------------------------------------------------
 // EVERY PLATFORM IS ITS OWN UNIT -- the counter (C1, LDC-001) and up to three

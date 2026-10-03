@@ -83,6 +83,7 @@ void (*onTare_)(void) = nullptr;
 void (*onClearCal_)(void) = nullptr;
 void (*onCycleAvg_)(void) = nullptr;
 void (*onCyclePrecision_)(void) = nullptr;
+void (*onToggleVessel_)(void) = nullptr;
 void (*onRestore_)(void) = nullptr;
 void (*onPlatformZero_)(void) = nullptr;
 // The buffer platforms' commands, by slot. Installed by the firmware; null in the
@@ -117,7 +118,8 @@ uint8_t calSlot_ = 0;
 //
 // THE ROWS MOVED TWICE with the per-platform dashboard. "Cells on home" left (the
 // page draws no A/B/C rows), Buffers arrived between Scale and Diagnose, and
-// Precision left and came back after it -- 0.0 or 0.00 kg for every platform.
+// Precision left and came back after it -- 0.0 or 0.00 kg for every platform --
+// followed by Vessel correction, on/off for every platform.
 // Every index below each change moved, which is exactly what the paragraph above
 // is about.
 enum : uint8_t {
@@ -126,6 +128,7 @@ enum : uint8_t {
   ROW_SET_SCALE,
   ROW_SET_BUFFERS,
   ROW_SET_PRECISION,
+  ROW_SET_VESSEL,
   ROW_SET_DIAGNOSE,
   ROW_SET_DEFAULT_PAGE,  // TRIAL HARNESS
 };
@@ -183,6 +186,7 @@ void doTare() {
 void doClearCal() { if (onClearCal_) onClearCal_(); }
 void doCycleAvg() { if (onCycleAvg_) onCycleAvg_(); }
 void doCyclePrecision() { if (onCyclePrecision_) onCyclePrecision_(); }
+void doToggleVessel() { if (onToggleVessel_) onToggleVessel_(); }
 void doRestore() { if (onRestore_) onRestore_(); }
 // Home afterwards, for doTare()'s reason: the weight page is the confirmation. An
 // empty platform already reading 0.045 kg shows "0.0kg" before and after, so a
@@ -609,6 +613,10 @@ void buildPages() {
   // column (see ui_weight.cpp). Stored in NVS on the scale task. Above Diagnose,
   // whose order matches ROW_SET_*.
   menuAddRow(settingsMenu_, "Precision", nullptr, doCyclePrecision);
+  // The vessel correction for EVERY platform at once -- C1's vessel offset and the
+  // buffers' bowls x dry mass. A plain on/off: off reads gross everywhere, keeping
+  // the offset and the bowl counts for when it goes back on.
+  menuAddRow(settingsMenu_, "Vessel correction", nullptr, doToggleVessel);
   menuAddRow(settingsMenu_, "Diagnose", nullptr, openDevice);
   // TRIAL HARNESS. Which page the device returns to when left alone and which
   // one it opens on after a power cycle.
@@ -733,6 +741,7 @@ void pagesOnScaleTare(void (*cb)(void)) { onTare_ = cb; }
 void pagesOnScaleClearCal(void (*cb)(void)) { onClearCal_ = cb; }
 void pagesOnScaleCycleAvg(void (*cb)(void)) { onCycleAvg_ = cb; }
 void pagesOnCyclePrecision(void (*cb)(void)) { onCyclePrecision_ = cb; }
+void pagesOnToggleVessel(void (*cb)(void)) { onToggleVessel_ = cb; }
 void pagesOnVesselApply(void (*cb)(float)) { vesselOnApply(cb); }
 void pagesOnScaleRestore(void (*cb)(void)) { onRestore_ = cb; }
 void pagesOnScalePlatformZero(void (*cb)(void)) { onPlatformZero_ = cb; }
@@ -813,6 +822,7 @@ void pagesTick(uint32_t nowMs) {
     else snprintf(fitted, sizeof(fitted), "%u fitted", nf);
     menuSetHint(settingsMenu_, ROW_SET_BUFFERS, fitted);
     menuSetHint(settingsMenu_, ROW_SET_PRECISION, s.scale.decimals == 2 ? "0.00 kg" : "0.0 kg");
+    menuSetHint(settingsMenu_, ROW_SET_VESSEL, s.scale.vesselOn ? "on" : "off");
     menuSetHint(settingsMenu_, ROW_SET_DEFAULT_PAGE, s.defaultPage == 1 ? "Knob" : "Weight");
   }
 
@@ -825,8 +835,8 @@ void pagesTick(uint32_t nowMs) {
     if (b.fitted && b.label[0]) snprintf(bufLabel_[i], sizeof(bufLabel_[i]), "%s", b.label);
     char reading[24];
     if (!b.fitted) snprintf(reading, sizeof(reading), "not fitted");
-    else if (b.kgKnown)
-      snprintf(reading, sizeof(reading), "%.1f kg", b.foodG / 1000.0f);
+    else if (b.kgKnown)  // what the dashboard row shows: food, or gross with the correction off
+      snprintf(reading, sizeof(reading), "%.1f kg", (s.scale.vesselOn ? b.foodG : b.grossG) / 1000.0f);
     else
       snprintf(reading, sizeof(reading), "%s", b.why[0] ? b.why : "--");
     if (buffersMenu_) {
@@ -873,8 +883,10 @@ void pagesTick(uint32_t nowMs) {
     static char avg[8];
     snprintf(avg, sizeof(avg), "%u", s.scale.window);
     menuSetHint(scaleMenu_, ROW_SCALE_AVERAGE, avg);
-    static char vessel[12];
+    static char vessel[16];
     if (s.scale.vesselOffsetG <= 0.0f) snprintf(vessel, sizeof(vessel), "off");
+    else if (!s.scale.vesselOn)  // kept, but the Settings switch has it off
+      snprintf(vessel, sizeof(vessel), "%.1f kg, off", s.scale.vesselOffsetG / 1000.0f);
     else snprintf(vessel, sizeof(vessel), "%.1f kg", s.scale.vesselOffsetG / 1000.0f);
     // "off" and "0.0 kg" are the same state; the row says the word because a
     // person scanning the menu is looking for whether it is on, not for a zero.

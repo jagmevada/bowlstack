@@ -45,7 +45,7 @@ void platformFromCounter(const ScaleView &sc, const char *label, PlatformRow &r)
   }
   r.kgKnown = true;
   // NET OF THE EMPTY VESSEL -- while one is on the platform (see netOfVessel()).
-  r.grams = lscale::netOfVessel(sc.totalGrams, sc.vesselOffsetG);
+  r.grams = lscale::netOfVessel(sc.totalGrams, vesselAppliedG(sc));
   if (sc.online < CELLS) {
     // The cells that ARE working give a genuine lower bound -- a missing corner
     // cannot carry a negative share -- so it is added in, and flagged.

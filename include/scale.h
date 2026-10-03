@@ -225,6 +225,16 @@ float vesselOffsetG();
 // Zero switches it off. Queued and written on the scale task, never here.
 float setVesselOffset(float grams);
 
+// THE VESSEL CORRECTION, ON OR OFF FOR EVERY PLATFORM AT ONCE: the counter's
+// vessel offset above AND each buffer's bowls x dry mass. Off, C1 and B1..B3 all
+// read their gross load -- for checking a known mass or running without vessels.
+// The offset and the bowl counts are kept, not cleared, so switching back on
+// needs no re-entry. Lives here because this namespace already holds the
+// panel's display settings; default on; persisted; queued like every setting
+// here (see wantDecimals_).
+bool vesselOn();
+bool toggleVesselOn();  // returns the new value
+
 AutoTare autoTareState();
 
 // A short line fit for the dashboard.
@@ -305,6 +315,7 @@ struct Snapshot {
   // feature is off. Never applied to taring or to the per-cell figures -- see
   // the note where it is used.
   float vesselOffsetG;
+  bool vesselOn;   // the correction switch -- see vesselOn(); off = gross everywhere
   bool overRange;  // at least one cell is saturated -- the total is not a weight
 
   // Increments on every publish. Lets a reader tell a fresh snapshot from a

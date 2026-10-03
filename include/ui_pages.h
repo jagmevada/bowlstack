@@ -68,6 +68,11 @@ void pagesOnVesselApply(void (*cb)(float grams));
 // persists it; the row's hint reads ScaleView::decimals back.
 void pagesOnCyclePrecision(void (*cb)(void));
 
+// Settings > Vessel correction: on/off for every platform at once (C1's vessel
+// offset, the buffers' bowls x dry mass). The firmware persists it; the row's hint
+// reads ScaleView::vesselOn back.
+void pagesOnToggleVessel(void (*cb)(void));
+
 // Loads the factor the firmware was built with and persists it as this unit's
 // own. It is what lets "Clear calibration" mean cleared: without a deliberate
 // route back to the built-in figure, clearing had to leave the stored key

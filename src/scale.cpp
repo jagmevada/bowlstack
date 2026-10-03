@@ -103,6 +103,10 @@ const char *KEY_OFF_FMT = "off%c";
 // and Default page, and it needs no keypad.
 const char *KEY_VESSEL = "vesg";
 float vesselOffsetG_ = 0.0f;
+// The vessel correction switch (scale.h, vesselOn()). Separate from the offset so
+// that off does not forget the mass.
+const char *KEY_VESSEL_ON = "vesOn";
+bool vesselOn_ = true;
 const char *KEY_TARED_FMT = "tar%c";
 
 // NVS keys are capped at 15 characters; these are four.
@@ -402,6 +406,8 @@ volatile uint8_t wantShowCells_ = 0;
 // 0 = nothing pending; otherwise the vessel offset in grams, +1 so that a
 // pending "off" is distinguishable from "no request". See cycleVesselOffset().
 volatile uint16_t wantVessel_ = 0;
+// Tristate like wantShowCells_: 0 nothing pending, 1 = turn off, 2 = turn on.
+volatile uint8_t wantVesselOn_ = 0;
 
 Preferences prefs_;
 
@@ -500,6 +506,7 @@ void loadPersisted() {
     platformZero_[i] = prefs_.getInt(cellKey(key, sizeof(key), KEY_OFF_FMT, i), 0);
   // Not per cell -- one vessel offset for the platform.
   vesselOffsetG_ = prefs_.getFloat(KEY_VESSEL, 0.0f);
+  vesselOn_ = prefs_.getBool(KEY_VESSEL_ON, true);
   // The build-time default is the fallback, so a freshly flashed board reads
   // kilograms straight away instead of counts. NVS still wins: a unit that has
   // been calibrated against its own mass keeps that figure across reflashes,
@@ -563,6 +570,10 @@ void loadPersisted() {
     // counts. An uncalibrated scale is a working ADC, not a broken scale.
     Serial.println("  no calibration stored -- readings will be in COUNTS, not grams");
   }
+  // Said at boot for the precision line's reason: a stored switch that comes back
+  // silently cannot be told from one that reset.
+  Serial.printf("  vessel correction %s (C1 offset %.1f kg, buffers bowls x dry mass)\n",
+                vesselOn_ ? "ON" : "OFF -- every platform reads gross", vesselOffsetG_ / 1000.0f);
 }
 
 // NVS WRITES BLOCK THIS TASK, and briefly the other core with it: a flash erase
@@ -667,6 +678,7 @@ void publish() {
   // still held 2500. The next tap would then read the real value and jump to
   // 3000, so the operator asks for 2.0 kg and silently gets 3.0.
   s.vesselOffsetG = vesselOffsetG_;
+  s.vesselOn = vesselOn_;
 
   // A COMMISSIONED ZERO IS A ZERO. Every online cell carries a platformZero
   // restored from NVS, so the reading is referenced to an empty platform even
@@ -694,6 +706,19 @@ void serviceCommands() {
     prefs_.putFloat(KEY_VESSEL, vesselOffsetG_);
     prefs_.end();
     Serial.printf("scale: vessel offset -> %.1f kg\n", vesselOffsetG_ / 1000.0f);
+  }
+
+  if (wantVesselOn_) {
+    const bool want = (wantVesselOn_ == 2);
+    wantVesselOn_ = 0;
+    if (want != vesselOn_) {
+      vesselOn_ = want;
+      prefs_.begin(NVS_NS, false);
+      prefs_.putBool(KEY_VESSEL_ON, vesselOn_);
+      prefs_.end();
+      Serial.printf("scale: vessel correction -> %s\n",
+                    vesselOn_ ? "ON" : "OFF (every platform reads gross)");
+    }
   }
 
   if (wantWindow_) {
@@ -1480,6 +1505,16 @@ void setPlatformZero() { wantPlatformZero_ = true; }
 void requestSelfTest() { wantSelfTest_ = true; }
 
 float vesselOffsetG() { return vesselOffsetG_; }
+
+bool vesselOn() { return vesselOn_; }
+
+bool toggleVesselOn() {
+  // From the PENDING value, so a double tap lands back where it started -- see
+  // toggleShowCells().
+  const bool from = wantVesselOn_ ? (wantVesselOn_ == 2) : vesselOn_;
+  wantVesselOn_ = from ? 1 : 2;
+  return !from;
+}
 
 // off -> 2.0 -> 2.5 -> 3.0 -> 3.5 -> off. Persisted immediately: this is a
 // property of the crockery, not of the session, and re-entering it after every

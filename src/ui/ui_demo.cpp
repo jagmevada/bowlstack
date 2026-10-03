@@ -165,13 +165,17 @@ void withScale(State &s, float aG, float bG, float cG, bool calibrated, bool tar
   // The default the firmware ships with, so the preview and the panel agree
   // about what the Average row says before anyone touches it.
   s.scale.window = (uint8_t)BOWLSTACK_AVG_WINDOW;
-  // Three places, which is what a unit that has never been told otherwise
+  // One place, which is what a unit that has never been told otherwise
   // shows. The preview and the panel have to agree about the Precision row's
   // hint for the same reason they agree about Average: a fixture that picked a
   // prettier value would make the simulator a picture of the product rather
   // than evidence about it.
   s.scale.decimals = (uint8_t)BOWLSTACK_DECIMALS;
   s.scale.calMassG = (float)BOWLSTACK_CAL_MASS_G;
+  // ON, the firmware default (scale.cpp vesselOn_), so the buffer rows below -- food,
+  // not gross -- are what a unit shows. Left unset it would read as off and the
+  // preview's Settings row would disagree with the panel's.
+  s.scale.vesselOn = true;
   s.scale.zeroed = (online == CELLS);
   // OFF, matching the firmware default, so the preview shows what a unit shows
   // out of the box. Individual scenarios below turn it on -- the preview has to

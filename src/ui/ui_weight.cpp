@@ -441,7 +441,7 @@ void updateWeight(const State &st) {
   // The counter's vessel offset, only while it is actually being applied to C1.
   char off[16];
   if (s.calibrated && st.platforms[0].kgKnown &&
-      lscale::vesselOnPlatform(s.totalGrams, s.vesselOffsetG))
+      lscale::vesselOnPlatform(s.totalGrams, vesselAppliedG(s)))
     snprintf(off, sizeof(off), "C1 -%.1fkg", s.vesselOffsetG / 1000.0f);
   else
     off[0] = '\0';

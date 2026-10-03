@@ -223,6 +223,12 @@ const char *const ST_UNCALIBRATED  = "uncalibrated";
 const char *const ST_UNTARED       = "untared";
 const char *const ST_OK            = "ok";
 
+// What goes in weight_g: the panel's C1 figure exactly -- the vessel rule, and the
+// vessel correction switch (off sends the gross, as the panel then shows it).
+float netGrams(const scale::Snapshot &s) {
+  return lscale::netOfVessel(s.totalGrams, s.vesselOn ? s.vesselOffsetG : 0.0f);
+}
+
 const char *weightState(const scale::Snapshot &s) {
   // No converter is answering. This is also what a missing or unpowered mux
   // looks like from up here, which is why the boot console says so explicitly
@@ -282,7 +288,7 @@ const char *weightState(const scale::Snapshot &s) {
   // CHECK on it. Testing the gross let an out-of-band net through to PostgREST,
   // which answers 400 -- and a rejected PATCH takes the whole row with it,
   // including the state that would have explained the reading.
-  const float g = lscale::netOfVessel(s.totalGrams, s.vesselOffsetG);
+  const float g = netGrams(s);
   if (!(g >= (float)config::WEIGHT_PUBLISH_MIN_G &&
         g <= (float)config::WEIGHT_PUBLISH_MAX_G)) {
     // Written as !(in range) rather than (out of range) so a NaN -- which
@@ -632,7 +638,7 @@ void loop(const scale::Snapshot &s, uint32_t uptimeSec, uint16_t batteryMv,
   // which now test the net, so it reports over_range with weight_g null rather
   // than a fabricated zero.
   const int32_t weightG =
-      haveWeight ? (int32_t)lroundf(lscale::netOfVessel(s.totalGrams, s.vesselOffsetG)) : 0;
+      haveWeight ? (int32_t)lroundf(netGrams(s)) : 0;
 
   // --- is there news? ------------------------------------------------------
   // Deliberately NOT "has anything changed". The weight changes on every

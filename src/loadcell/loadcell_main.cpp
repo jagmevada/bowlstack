@@ -2,7 +2,7 @@
 // Bowlstack :: load-cell station -- Waveshare ESP32-S3-Touch-LCD-2,
 //              3x NAU7802 behind a TCA9548A
 //
-// Firmware: V1.18 261003
+// Firmware: V1.19 261003
 //
 // Also carries the 200 kg buffer-stock cell on its own bus (IO21/IO16) -- see
 // buffer_bank.h. It is a separate instrument: nothing below sums it into the
@@ -481,6 +481,7 @@ void publishScale(uint32_t nowMs) {
   s.scale.tared = sn.tared;
   s.scale.platformZeroed = sn.platformZeroed;
   s.scale.vesselOffsetG = sn.vesselOffsetG;
+  s.scale.vesselOn = sn.vesselOn;
   s.scale.online = sn.online;
   s.scale.totalGrams = sn.totalGrams;
   s.scale.overRange = sn.overRange;
@@ -539,7 +540,7 @@ void publishScale(uint32_t nowMs) {
       else if (r.state == lscale::WState::OverRange) why = "OVER";
       else if (r.state == lscale::WState::Uncalibrated) why = "uncal";
       else if (r.state == lscale::WState::Untared) why = "no zero";
-      else if (r.kgKnown && !r.bowlsConfirmed) why = "bowls?";
+      else if (sn.vesselOn && r.kgKnown && !r.bowlsConfirmed) why = "bowls?";
 
       ui::PlatformRow &row = s.platforms[1 + i];
       memset(&row, 0, sizeof(row));
@@ -548,12 +549,15 @@ void publishScale(uint32_t nowMs) {
       snprintf(row.label, sizeof(row.label), "%.3s", b.cfg.label);
       row.state = cell;
       row.kgKnown = r.kgKnown;
-      row.grams = r.foodG;
+      // THE VESSEL CORRECTION SWITCH (Settings, scale::vesselOn()): food -- gross less
+      // bowls x dry mass -- while on, the gross load while off, as C1 does.
+      row.grams = sn.vesselOn ? r.foodG : r.grossG;
       row.bowls = r.bowls;
       row.bowlsConfirmed = r.bowlsConfirmed;
       // Food that rests on an unconfirmed bowl count is real but uncertain by 2.5 kg
-      // a bowl, so the total it joins says "at least".
-      row.partial = r.kgKnown && !r.bowlsConfirmed;
+      // a bowl, so the total it joins says "at least". The gross is not: it does not
+      // depend on the count.
+      row.partial = sn.vesselOn && r.kgKnown && !r.bowlsConfirmed;
       row.overRange = r.state == lscale::WState::OverRange;
       snprintf(row.why, sizeof(row.why), "%s", why);
 
@@ -689,6 +693,10 @@ void onCycleAvg() {
 
 void onCyclePrecision() {
   Serial.printf("ui: dashboard -> %u decimals\n", scale::cycleDecimals());
+}
+
+void onToggleVessel() {
+  Serial.printf("ui: vessel correction -> %s\n", scale::toggleVesselOn() ? "on" : "off");
 }
 
 // --- Settings > Buffers -------------------------------------------------------------
@@ -1000,6 +1008,11 @@ void serviceConsole() {
       case 'D':
         Serial.printf("\n> reading -> %u decimals\n", scale::cycleDecimals());
         break;
+      case 'v':
+      case 'V':
+        Serial.println("\n> vessel correction toggle");
+        onToggleVessel();
+        break;
       case 'p':
       case 'P': {
         // An exhausted pool does not fail politely: LV_ASSERT_MALLOC spins forever,
@@ -1040,6 +1053,8 @@ void serviceConsole() {
             "  w      step the moving average 8 -> 16 -> 32 -> 64 -> 128 -> 8\n"
             "  d      dashboard 0.0 <-> 0.00 kg, stored (= Settings > Precision;\n"
             "         display only, Diagnose keeps all three places)\n"
+            "  v      vessel correction on <-> off for C1 and every buffer, stored\n"
+            "         (= Settings > Vessel correction; off reads gross everywhere)\n"
             "  p      build every settings page now and print the LVGL pool before\n"
             "         and after -- the most a session can ask of it\n"
             "\n  Order matters: tare on an EMPTY platform, then put the mass on,\n"
@@ -1246,6 +1261,7 @@ void setup() {
   ui::pagesOnScaleClearCal(onClearCal);
   ui::pagesOnScaleCycleAvg(onCycleAvg);
   ui::pagesOnCyclePrecision(onCyclePrecision);
+  ui::pagesOnToggleVessel(onToggleVessel);
   ui::pagesOnVesselApply(onVesselApply);
   ui::pagesOnScaleRestore(onRestoreDefault);
   ui::pagesOnBufferZero(onBufZero);
