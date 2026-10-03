@@ -297,15 +297,33 @@ static void restoreLoadedThenEvent() {
 }
 
 static void inconsistentCount() {
-  section("bowls: a count heavier than the shelf is flagged, not silently changed");
+  section("bowls: a count heavier than the shelf is limited to what it holds, unconfirmed");
   Rig g;
   g.commission();
-  g.s.setBowls(3);  // operator says 3, but only 4 kg is on the shelf
-  g.gross = 4000;
+  g.s.setBowls(3);  // operator says 3, but only 4.5 kg is on the shelf (2 bowls fit: 4.5 - 2 x 2.5 is inside the 1 kg tolerance)
+  g.gross = 4500;
   g.run(8000);
   const Reading r = g.r();
-  CHECK(r.bowls == 3 && !r.bowlsConfirmed, "3 bowls kept, now unconfirmed (got %u, %d)", r.bowls, r.bowlsConfirmed);
-  CHECK(g.count(BowlEvent::Inconsistent) == 1, "one Inconsistent event (got %d)", g.count(BowlEvent::Inconsistent));
+  CHECK(r.bowls == 2 && !r.bowlsConfirmed, "limited to 2 bowls, unconfirmed (got %u, %d)", r.bowls, r.bowlsConfirmed);
+  CHECK(g.count(BowlEvent::Clamped) == 1, "one Clamped event (got %d)", g.count(BowlEvent::Clamped));
+}
+
+static void restoreImpossibleCount() {
+  section("power cycle: a remembered count the shelf cannot hold is limited, not kept");
+  // Found on the panel: "2 bw?" over a 3.26 kg load after a power cycle -- food read
+  // -1.7 kg and stayed there, because the check skipped an already-unconfirmed count.
+  Rig g;
+  Persisted p;
+  p.zeroed = true;
+  p.zero = (int32_t)ZERO;
+  p.cpg = (float)CPG;
+  p.bowls = 2;
+  g.s.restore(p);
+  g.gross = 3260;
+  g.run(8000);
+  const Reading r = g.r();
+  CHECK(r.bowls == 1 && !r.bowlsConfirmed, "limited to 1 bowl, unconfirmed (got %u, %d)", r.bowls, r.bowlsConfirmed);
+  CHECK(r.kgKnown && std::fabs(r.foodG - 760) < 80, "food %.0f g (want 3260 - 2500 = 760)", r.foodG);
 }
 
 static void operatorCorrectionIsRechecked() {
@@ -324,12 +342,12 @@ static void operatorCorrectionIsRechecked() {
   // And with load on it, a count heavier than the shelf is flagged, not kept as true.
   Rig h;
   h.commission();
-  h.gross = 4000;
+  h.gross = 4500;
   h.run(8000);
   h.events.clear();
   h.s.setBowls(3);
   h.run(7000);
-  CHECK(h.r().bowls == 3 && !h.r().bowlsConfirmed, "3 bowls on 4 kg is flagged unconfirmed (got %u, %d)",
+  CHECK(h.r().bowls == 2 && !h.r().bowlsConfirmed, "3 bowls on 4.5 kg is limited to 2, unconfirmed (got %u, %d)",
         h.r().bowls, h.r().bowlsConfirmed);
   CHECK(h.count(BowlEvent::Loaded) == 0 && h.count(BowlEvent::Unloaded) == 0,
         "no phantom load/unload from the correction");
@@ -520,6 +538,7 @@ int main() {
   restoreAndEmptyReset();
   restoreLoadedThenEvent();
   inconsistentCount();
+  restoreImpossibleCount();
   operatorCorrectionIsRechecked();
   clampAtMax();
   staleCountIsNotOver();

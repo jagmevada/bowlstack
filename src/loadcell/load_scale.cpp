@@ -293,12 +293,20 @@ BowlChange BowlTracker::update(uint32_t nowMs, float g) {
     }
     bowls_ = 0;
     confirmed_ = true;
-  } else if (level - (float)bowls_ * cfg_.dryG < -cfg_.inconsistentG && confirmed_) {
+  } else if (level - (float)bowls_ * cfg_.dryG < -cfg_.inconsistentG) {
     // Less on the shelf than the counted bowls alone would weigh: an unload was
-    // missed (a nearly-empty bowl taken off is under the 10 kg threshold). The
-    // count is not changed -- guessing would be a claim -- it is marked unconfirmed.
+    // missed (a nearly-empty bowl taken off is under the 10 kg threshold), or bowls
+    // left while the unit was off. The count is LIMITED to what the shelf can hold
+    // and marked unconfirmed -- a bound, not a count. Leaving it alone (as this did
+    // while unconfirmed) kept "2 bw?" over a 3.3 kg load after a power cycle, food
+    // -1.7 kg, until somebody intervened (owner, 2026-10-04: "2bw? is bug").
+    const uint8_t fit = (uint8_t)((level + cfg_.inconsistentG) / cfg_.dryG);
+    if (fit < bowls_) {
+      out.delta = (int8_t)((int)fit - (int)bowls_);
+      bowls_ = fit;
+    }
     confirmed_ = false;
-    if (out.event == BowlEvent::None) out.event = BowlEvent::Inconsistent;
+    if (out.event == BowlEvent::None) out.event = BowlEvent::Clamped;
   }
 
   out.bowlsAfter = bowls_;

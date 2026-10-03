@@ -2,7 +2,7 @@
 // Bowlstack :: load-cell station -- Waveshare ESP32-S3-Touch-LCD-2,
 //              3x NAU7802 behind a TCA9548A
 //
-// Firmware: V1.27 261004
+// Firmware: V1.28 261004
 //
 // Also carries the 200 kg buffer-stock cell on its own bus (IO21/IO16) -- see
 // buffer_bank.h. It is a separate instrument: nothing below sums it into the
@@ -476,8 +476,34 @@ ui::Cell toUiCell(CellState s) {
   }
 }
 
+// DISPLAY-ONLY SMOOTHING (owner, 2026-10-04): the panel figures are the mean of the
+// last 4 NEW readings -- ~0.4 s at 10 SPS -- for a steadier last digit. Only what is
+// drawn: step detection, bowls, tare, calibration and the uplink all keep reading the
+// filter itself. A reading enters when it changes (publishScale runs at 20 Hz, faster
+// than the converters), and reset() on a platform with no weight keeps a stale figure
+// from blending into the next real one.
+struct Avg4 {
+  float v[4];
+  uint8_t n = 0, i = 0;
+  float last = NAN;
+  float push(float g) {
+    if (g != last) {
+      last = g;
+      v[i] = g;
+      i = (uint8_t)((i + 1) & 3);
+      if (n < 4) n++;
+    }
+    float s = 0;
+    for (uint8_t k = 0; k < n; k++) s += v[k];
+    return s / n;
+  }
+  void reset() { n = 0; i = 0; last = NAN; }
+};
+
 void publishScale(uint32_t nowMs) {
   const scale::Snapshot sn = scale::snapshot();
+  static Avg4 c1Avg;
+  static Avg4 bufAvg[ui::BUFFERS];
 
   ui::State s = ui::demoLatest(nowMs);
   s.scale.calibrated = sn.calibrated;
@@ -486,7 +512,9 @@ void publishScale(uint32_t nowMs) {
   s.scale.vesselOffsetG = sn.vesselOffsetG;
   s.scale.vesselOn = sn.vesselOn;
   s.scale.online = sn.online;
-  s.scale.totalGrams = sn.totalGrams;
+  if (!sn.calibrated || sn.online == 0 || sn.overRange) c1Avg.reset();
+  s.scale.totalGrams = (!sn.calibrated || sn.online == 0 || sn.overRange) ? sn.totalGrams
+                                                                          : c1Avg.push(sn.totalGrams);
   s.scale.overRange = sn.overRange;
   s.scale.countsPerGram = sn.countsPerGram;
   s.scale.window = sn.window;
@@ -561,6 +589,8 @@ void publishScale(uint32_t nowMs) {
       // THE VESSEL CORRECTION SWITCH (Settings, scale::vesselOn()): food -- gross less
       // bowls x dry mass -- while on, the gross load while off, as C1 does.
       row.grams = sn.vesselOn ? r.foodG : r.grossG;
+      if (kgKnown) row.grams = bufAvg[i].push(row.grams);
+      else bufAvg[i].reset();
       row.bowls = r.bowls;
       row.bowlsConfirmed = r.bowlsConfirmed;
       // Food that rests on an unconfirmed bowl count is real but uncertain by 2.5 kg
