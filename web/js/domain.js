@@ -54,6 +54,14 @@ export const SERVICE_WINDOWS = [
 // bolt means on a phone and is still true at 100%. `word` is the tooltip, and
 // it never claims a charge it cannot see.
 export function powerState(dev, powerRows) {
+  // A HUB'S `charging` IS ITS MAINS: true on the charger, false running on
+  // the backup battery, null unknown. It has no STAT-pin caveat to work
+  // around, so the three states are read straight off it.
+  if (isHub(dev)) {
+    return dev.charging === true ? { powered: true, word: 'charging' }
+         : dev.charging === false ? { powered: false, word: 'on battery' }
+         : { powered: false, word: 'charging unknown' };
+  }
   const row = (powerRows || []).find(p => p.device_id === dev.device_id);
   const ext = row ? row.external_power : null;
   const chg = dev.charging;
@@ -76,6 +84,72 @@ const BATTERY = {
 export function batteryInfo(level) {
   if (level == null) return { label: 'No battery', status: 'idle', glyph: '—', absent: true };
   return BATTERY[level] || { label: `Battery ${level}`, status: 'idle', glyph: '?' };
+}
+
+// WHO HAS A BATTERY. Since migrate_hubs.sql the battery is the HUB's -- one
+// ESP32 per area on mains with a small backup cell -- and a weighed platform
+// reports none at all. A legacy stack keeps its own. Asking this, rather than
+// whether battery_level is null, is what stops every platform reading "No
+// battery detected": NULL there is not a missing cell, it is not its column.
+export function carriesBattery(dev) {
+  return isHub(dev) || isStack(dev);
+}
+
+/** Low or critical, on a device that carries a battery. One test, because the
+ *  header chip and the Health filter it opens must count the same rows. */
+export function isBatteryWarn(dev) {
+  return carriesBattery(dev)
+    && (dev.battery_level === 'low' || dev.battery_level === 'critical');
+}
+
+// --- node health ------------------------------------------------------
+//
+// What a hub polls from each platform hanging off it. NULL is "not measured"
+// -- today's I2C platforms report only some of the four, RS485 nodes all --
+// so a NULL ranks nothing and renders as a dash, never as 0.
+
+/** A 5 V feed read below 4.5 V at the node has lost a tenth to cable drop or
+ *  a failing supply; brown-outs and dropped cells are the next step down. */
+export const NODE_MIN_SUPPLY_MV = 4500;
+/** Half a kilo on an EMPTY platform is a moved zero, not creep -- and every
+ *  figure the platform sends is off by that much until it is re-zeroed. */
+export const NODE_MAX_DRIFT_G = 500;
+/** A stray few corrupt frames since power-up is cable noise; a hundred is a
+ *  connector, cable or termination fault worth a visit before it gets worse. */
+export const NODE_MAX_CRC = 100;
+
+/** The four facts as display strings, '—' for each one not measured. */
+export function nodeParts(dev) {
+  const mv = dev.supply_mv, crc = dev.crc_errors, g = dev.no_load_g;
+  return {
+    supply: mv == null ? '—' : `${(Number(mv) / 1000).toFixed(2)} V`,
+    crc: crc == null ? '—' : String(crc),
+    link: dev.responding == null ? '—' : dev.responding ? 'responding' : 'not responding',
+    drift: g == null ? '—' : `${Number(g) > 0 ? '+' : ''}${g} g`,
+  };
+}
+
+/** The roster's short form: only what was measured, in display order. */
+export function nodeHealthList(dev) {
+  const p = nodeParts(dev);
+  return [
+    dev.supply_mv == null ? null : p.supply,
+    dev.crc_errors == null ? null : `${p.crc} CRC`,
+    dev.responding == null ? null : p.link,
+    dev.no_load_g == null ? null : `no-load ${p.drift}`,
+  ].filter(Boolean);
+}
+
+/** ...as one line, '—' when nothing was measured. */
+export function nodeHealthText(dev) {
+  return nodeHealthList(dev).join(' · ') || '—';
+}
+
+/** The hub a platform hangs off: the one in its area. Null before
+ *  migrate_hubs.sql, when there are no hub rows to find. */
+export function hubOf(dev, devices) {
+  return dev.location == null ? null
+    : (devices || []).find(d => isHub(d) && d.location === dev.location) || null;
 }
 
 // --- stack count trust ----------------------------------------------
@@ -432,7 +506,10 @@ export function slotOffline(slot) {
 export function isFault(dev) {
   return dev.stack_status === 'discontiguous'
       || dev.weight_state === 'no_cells'
-      || dev.weight_state === 'over_range';
+      || dev.weight_state === 'over_range'
+      // A platform its hub cannot reach: whatever weight the row still holds
+      // is not being refreshed. Strict === false -- NULL is "not measured".
+      || dev.responding === false;
 }
 
 export function isDegraded(dev) {
@@ -464,6 +541,12 @@ export function isStack(dev) {
 
 export function isWeighed(dev) {
   return isScale(dev) || isBuffer(dev);
+}
+
+/** HUB-D / HUB-M / HUB-T: one per area, measures nothing itself. Its
+ *  platforms are the scales and buffers sharing its `location`. */
+export function isHub(dev) {
+  return !!dev && dev.kind === 'hub';
 }
 
 /** Cells under one platform: the counter sums three 20 kg cells, a buffer
@@ -532,6 +615,12 @@ export function deviceWeight(dev) {
 }
 
 export function deviceGlyph(d) {
+  // A hub has no reading to judge, so it is only ever talking or not.
+  if (isHub(d)) {
+    if (deviceOffline(d)) return { cls: 'off', glyph: '✕', word: 'offline' };
+    if (!d.reported) return { cls: 'none', glyph: '◌', word: 'never reported' };
+    return { cls: 'ok', glyph: '●', word: 'reporting' };
+  }
   // A scale has no levels and no stack status, so the bowl-counter ladder
   // below would read every one of them as "no reading" -- a grey ring on a
   // station that is weighing perfectly well.
@@ -539,6 +628,8 @@ export function deviceGlyph(d) {
     const w = deviceWeight(d);
     if (deviceOffline(d))
       return { cls: 'off', glyph: '✕', word: 'offline — showing its last value' };
+    if (d.responding === false)
+      return { cls: 'fault', glyph: '▲', word: 'not answering the hub' };
     if (w.kind === 'fault')
       return { cls: 'fault', glyph: '▲', word: w.note.toLowerCase() };
     if (w.kind === 'nostate')
@@ -569,12 +660,45 @@ export function deviceSeverity(dev) {
   if (dev.offline) { rank = Math.max(rank, 100); reasons.push('Offline during service'); }
   if (dev.missed_last_service) { rank = Math.max(rank, 85); reasons.push('Not reporting since before the last service ended'); }
 
-  // Liveness and battery above are true of any device. What follows is
-  // product-specific, and running the bowl-counter tests over a scale is how
-  // a perfectly healthy load cell acquires "0 of 4 sensors online".
-  if (isWeighed(dev)) {
+  // Liveness above is true of any device. What follows is product-specific,
+  // and running the bowl-counter tests over a scale is how a perfectly
+  // healthy load cell acquires "0 of 4 sensors online".
+  if (isHub(dev)) {
+    // THE AREA'S POWER. A hub on its backup cell has lost mains, and every
+    // platform it polls runs on that cell's remaining charge -- ranked into
+    // "needs attention", below a low battery that is already running out.
     if (dev.battery_level === 'critical') { rank = Math.max(rank, 80); reasons.push('Battery critical'); }
     if (dev.battery_level === 'low') { rank = Math.max(rank, 60); reasons.push('Battery low'); }
+    if (dev.charging === false) { rank = Math.max(rank, 50); reasons.push('On backup battery — mains lost'); }
+    if (dev.battery_mv == null && dev.battery_level == null) {
+      rank = Math.max(rank, 20); reasons.push('No battery detected');
+    }
+    // No food_slot is the design, not a gap: a hub serves an AREA.
+    if (dev.location == null) { rank = Math.max(rank, 10); reasons.push('Not assigned to an area'); }
+    return { rank, level: levelOf(rank), reasons };
+  }
+  if (isWeighed(dev)) {
+    // NO BATTERY RANKS HERE. A platform's battery is its hub's; its columns
+    // are NULL by contract, and "No battery detected" on every one of them
+    // would bury the hub that actually has a problem.
+    if (dev.responding === false) {
+      rank = Math.max(rank, 90); reasons.push('Not answering the hub');
+    }
+    if (dev.supply_mv != null && dev.supply_mv < NODE_MIN_SUPPLY_MV) {
+      rank = Math.max(rank, 50);
+      reasons.push(`Low supply at the node — ${nodeParts(dev).supply}`);
+    }
+    if (dev.no_load_g != null && Math.abs(dev.no_load_g) >= NODE_MAX_DRIFT_G) {
+      // Ranked with uncalibrated: the figure is wrong by a known amount, not absent.
+      rank = Math.max(rank, 45);
+      reasons.push(`Zero drifted — reads ${nodeParts(dev).drift} empty`);
+    }
+    if (dev.crc_errors != null && dev.crc_errors >= NODE_MAX_CRC) {
+      // Below the rest: frames that fail the check are dropped, so the
+      // readings that do arrive are still good -- there are just fewer.
+      rank = Math.max(rank, 30);
+      reasons.push(`${dev.crc_errors} checksum errors since power-up`);
+    }
     if (dev.weight_state === 'no_cells') {
       rank = Math.max(rank, 90); reasons.push('No load cell is answering');
     } else if (dev.weight_state === 'cells_partial') {
@@ -592,21 +716,10 @@ export function deviceSeverity(dev) {
     } else if (dev.weight_state === 'settling') {
       rank = Math.max(rank, 15); reasons.push(deviceWeight(dev).note);
     }
-    if (dev.battery_mv == null && dev.battery_level == null) {
-      rank = Math.max(rank, 20); reasons.push('No battery detected');
-    }
     if (dev.location == null || dev.food_slot == null) {
       rank = Math.max(rank, 10); reasons.push('Not assigned to a position');
     }
-    // THE SAME THRESHOLDS AND THE SAME THREE WORDS as the stack path below.
-    // An earlier cut invented its own -- 'warn'/'idle'/'ok' against
-    // 'warning'/'good' -- and the CSS keys off these, so a scale and a stack
-    // with identical severity drew different colours on the same list. The
-    // vocabulary is shared because the ROSTER is shared.
-    const level = rank >= 80 ? 'critical'
-                : rank >= 20 ? 'warning'
-                : 'good';
-    return { rank, level, reasons };
+    return { rank, level: levelOf(rank), reasons };
   }
 
   if (dev.stack_status === 'discontiguous') { rank = Math.max(rank, 90); reasons.push('Impossible level pattern'); }
@@ -626,14 +739,20 @@ export function deviceSeverity(dev) {
     rank = Math.max(rank, 10); reasons.push('Not assigned to a position');
   }
 
-  // Rank is fine-grained because it drives the SORT; `level` is only the colour,
-  // and colour gets three tones because the status palette cannot reliably
-  // separate four (see the note in app.css). Order is carried by position in
-  // the list, which needs no colour at all.
-  const level = rank >= 80 ? 'critical'
-              : rank >= 20 ? 'warning'
-              : 'good';
-  return { rank, level, reasons };
+  return { rank, level: levelOf(rank), reasons };
+}
+
+// Rank is fine-grained because it drives the SORT; `level` is only the colour,
+// and colour gets three tones because the status palette cannot reliably
+// separate four (see the note in app.css). Order is carried by position in
+// the list, which needs no colour at all.
+//
+// ONE MAPPING FOR EVERY PRODUCT. An earlier cut gave scales their own --
+// 'warn'/'idle'/'ok' against 'warning'/'good' -- and the CSS keys off these,
+// so a scale and a stack with identical severity drew different colours on
+// the same list. The vocabulary is shared because the ROSTER is shared.
+function levelOf(rank) {
+  return rank >= 80 ? 'critical' : rank >= 20 ? 'warning' : 'good';
 }
 
 export function compareDevices(a, b) {
@@ -658,7 +777,8 @@ export function fleetSummary(devices) {
     if (deviceOffline(d)) s.offline++;
     if (isFault(d)) s.fault++;
     if (isDegraded(d)) s.degraded++;
-    if (d.battery_level === 'low' || d.battery_level === 'critical') s.batteryWarn++;
+    // Hubs and legacy stacks only -- a platform's battery is its hub's.
+    if (isBatteryWarn(d)) s.batteryWarn++;
     // GUARDED ON THE PRODUCT, the way deviceSeverity() already is. sensors_online
     // is the ToF array's four-up count; a scale has three cells and does not
     // populate it, so an unguarded `< 4` would have called every load cell

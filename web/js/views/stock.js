@@ -17,7 +17,7 @@ import {
   deviceWeight, isWeighed, isStack, deviceSeverity,
   deviceGlyph, deviceOffline, slotOffline, weekdayOf, serviceDate,
   fmtClock, fmtRelative, serviceState, fmtWeight,
-  powerState,
+  powerState, nodeHealthText,
 } from '../domain.js';
 
 export function renderStock(state) {
@@ -277,7 +277,8 @@ function slotCard(power, sl, stacks, inService, tz, template) {
     card.append(h('div', { class: 'slot-sub dim' }, `As of ${fmtClock(sl.oldest_update, tz)}`));
   }
 
-  // One symbolic line per stack: state glyph · id · count · battery. No
+  // One symbolic line per device: state glyph · id · count · battery (a
+  // legacy stack's; a platform has none). No
   // chips, no words — the words live in the tooltip, on the Health page, and
   // in the page legend. Glyph priority mirrors severity: an impossible
   // reading outranks silence outranks a dead sensor.
@@ -291,7 +292,11 @@ function slotCard(power, sl, stacks, inService, tz, template) {
       // that is null on every board without the STAT mod. So the one surface
       // that could have said "on mains" said nothing at all.
       const pw = powerState(d, power);
-      const battWord = d.battery_level == null
+      // NO BATTERY ON A PLATFORM: since the hubs, its power is its hub's and
+      // its own columns are NULL. What it does have is the hub's view of it.
+      const weighed = isWeighed(d);
+      const battWord = weighed ? `node: ${nodeHealthText(d)}`
+        : d.battery_level == null
         ? 'no battery detected'
         : `battery ${d.battery_level}`
           + `${d.battery_mv ? ` (${d.battery_mv} mV)` : ''}`
@@ -312,7 +317,7 @@ function slotCard(power, sl, stacks, inService, tz, template) {
         // kind of thing.
         h('span', { class: 'id' }, d.device_id),
         h('span', { class: 'ct' }, st.text),
-        batteryBar(d.battery_level, pw.powered, `${d.device_id}: ${battWord}`)));
+        weighed ? null : batteryBar(d.battery_level, pw.powered, `${d.device_id}: ${battWord}`)));
     }
     card.append(strip);
   }

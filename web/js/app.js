@@ -528,7 +528,7 @@ function renderChrome() {
     'A reading that may be low or is not set up — a sensor down, or a scale '
     + 'not calibrated or tared.'));
   chips.push(chip('battery', s.batteryWarn, 'warning', 'battery',
-    'Battery low or critical'));
+    'Battery low or critical — an area hub\'s backup battery, or a legacy stack\'s'));
   // No "N not deployed" chip: the figure is static configuration, not
   // status, and dropping it is what lets the capsules hold ONE row on a
   // phone. The list itself is still one tap away — Health › Not deployed.

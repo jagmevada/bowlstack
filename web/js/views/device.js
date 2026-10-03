@@ -15,7 +15,8 @@ import { h, badge, empty, banner, copyText, fillSlot, cellColumn } from '../ui.j
 import { unwrap, describeError } from '../supa.js';
 import { stepChart, weightChart, statusTimeline, STATUS_STYLE } from '../chart.js';
 import {
-  batteryInfo, deviceStack, deviceWeight, isScale, isBuffer, isWeighed, cellsTotal,
+  batteryInfo, deviceStack, deviceWeight, isScale, isBuffer, isWeighed, isHub, cellsTotal,
+  carriesBattery, powerState, nodeParts, hubOf,
   deviceSeverity, deviceOffline, positionLabel,
   serviceState, fmtRelative, fmtDateTime, fmtUptime, fmtWeight, bowlsText,
 } from '../domain.js';
@@ -119,7 +120,9 @@ export function renderDevice(state, params, ctx) {
   const trial = isScale(dev) ? trialCard(dev, state, ctx) : null;
   if (trial) grid.append(trial);
 
-  grid.append(isWeighed(dev) ? weightCard(dev) : h('div', { class: 'card' },
+  // A hub measures nothing, so it has no reading card at all -- the stack
+  // card's fallback would draw it four striped levels it does not have.
+  if (!isHub(dev)) grid.append(isWeighed(dev) ? weightCard(dev) : h('div', { class: 'card' },
     h('div', { class: 'chart-title' }, 'Stack now'),
     h('div', { style: 'display:flex;gap:1.2rem;align-items:center;margin-top:.5rem' },
       // ONE labelled column — f-label, cell, state word. It used to be an
@@ -150,46 +153,35 @@ export function renderDevice(state, params, ctx) {
     h('div', { class: 'dim', style: 'font-size:.75rem;margin-top:.5rem' },
       'f4 on top, f1 the bottom bowl · blue: bowl present · outline: empty · striped: sensor not answering')));
 
-  grid.append(h('div', { class: 'card' },
+  // POWER IS A HUB'S OR A LEGACY STACK'S. A platform's battery columns are
+  // NULL by contract -- its hub carries the backup cell -- so in this slot it
+  // gets the hub's view of it instead, and a link to the hub.
+  grid.append(carriesBattery(dev) ? h('div', { class: 'card' },
     h('div', { class: 'chart-title' }, 'Power'),
     h('div', { style: 'margin:.6rem 0' },
       badge(batt.status === 'idle' ? 'idle' : batt.status, batt.glyph, batt.label),
       ' ',
-      // THE BADGE FOLLOWS THE SAME FOUR STATES AS THE ROW BELOW IT. It used to
-      // show a bare "?" whenever `charging` was null, which is every unmodified
+      // THE BADGE FOLLOWS THE SAME STATES AS powerState(). It used to show a
+      // bare "?" whenever `charging` was null, which is every unmodified
       // board -- so a plugged-in station wore a question mark beside a battery
       // the device could see perfectly well was on mains.
       powerBadge(dev, state)),
     h('dl', { class: 'kv' },
       kv('Cell', dev.battery_mv != null ? `${dev.battery_mv} mV` : 'not detected'),
       kv('Band', dev.battery_level ?? 'none'),
-      // THREE STATES, NOT TWO, and only on the board that needs it. The
-      // panel's charger drives its LED and reaches no GPIO, so "not charging"
-      // is a claim the hardware cannot support -- null means unreadable, and
-      // rendering that as a missing badge would read as "no".
-      // FOUR STATES, because two different things are known to different
-      // degrees and this row used to report only the one that is not.
-      //
-      // `charging` comes from the ETA6098's STAT pin, which reaches no GPIO
-      // unless the mod is fitted -- so it is usually null and "no sense pin"
-      // was true of it. But the board CAN see VBUS, through the divider on
-      // IO10, and saying nothing about that threw away a fact the device had:
-      // somebody looking at a plugged-in station was told only that something
-      // was unreadable.
-      //
-      // "on mains" is deliberately not "yes". Plugged in is all this hardware
-      // can see without the STAT wire; whether current is still flowing is
-      // exactly what it cannot tell.
-      isWeighed(dev) ? kv('Charging', chargeText(dev, state)) : null),
+      // A hub's `charging` is its mains, so all three of its states are
+      // facts worth a row: charging, on battery, or unknown.
+      isHub(dev) ? kv('Charging', powerState(dev).word) : null),
     h('div', { class: 'dim', style: 'font-size:.75rem;margin-top:.5rem;line-height:1.4' },
       'The band is hysteretic — it leaves a level lower than it re-enters it, so a band ',
       'that has not moved while the millivolts have is correct, not stale. There is no ',
-      'percentage, deliberately.')));
+      'percentage, deliberately.')) : nodeCard(dev, state.devices));
 
   grid.append(h('div', { class: 'card' },
     h('div', { class: 'chart-title' }, 'Device'),
     h('dl', { class: 'kv', style: 'margin-top:.6rem' },
-      isWeighed(dev)
+      isHub(dev) ? null
+      : isWeighed(dev)
         ? kv('Load cells', dev.cells_online != null
               ? `${dev.cells_online} of ${cellsTotal(dev)} converting` : '—')
         : kv('Sensors', dev.sensors_online != null ? `${dev.sensors_online} of 4 online` : '—'),
@@ -210,6 +202,11 @@ export function renderDevice(state, params, ctx) {
     frag.append(h('div', { class: 'slot-notes section' },
       ...sev.reasons.map(r => badge(sev.level, '•', r))));
   }
+
+  // No history for a hub: it writes neither table -- status_events is
+  // bowl-shaped and weight_samples weight-shaped -- so a query could only
+  // ever come back empty and read as "nothing changed".
+  if (isHub(dev)) return frag;
 
   // --- history -------------------------------------------------------
   const hoursKey = WINDOWS.some(w => w.key === params.get('h')) ? params.get('h') : '24';
@@ -446,37 +443,49 @@ function diagnostics(dev, rows, hours) {
 //  second, and when there is no number the card says WHY rather than
 //  showing a dash and leaving somebody to guess.
 // ====================================================================
-// The badge beside the battery, sharing chargeText()'s four states so the two
-// cannot disagree about the same instant -- a bolt for charging, a plug glyph
-// for mains-but-not-charging, and a question mark ONLY when nothing is known.
+// The badge beside the battery -- a bolt for charging, a plug glyph for
+// mains-but-not-charging, and a question mark ONLY when nothing is known.
 function powerBadge(dev, state) {
+  // A hub's `charging` IS its mains, so false is the alarm: the whole area
+  // is running on the backup cell.
+  if (isHub(dev)) {
+    return dev.charging === true ? badge('good', '⚡', 'Charging')
+         : dev.charging === false ? badge('warning', '▮', 'On battery — mains lost')
+         : badge('idle', '?', 'Charging unknown');
+  }
+  // external_power lives in device_power, not device_overview -- see
+  // supabase/migrate_vbus_sense.sql.
   const row = (state.power || []).find(p => p.device_id === dev.device_id);
   const ext = row ? row.external_power : null;
   if (dev.charging) return badge('good', '⚡', 'Charging');
   if (ext === true) return badge('good', '⚡', dev.charging === false
                                    ? 'On mains — charge complete' : 'On mains');
   if (ext === false) return badge('idle', '▮', 'On battery');
-  if (dev.charging === null && isWeighed(dev)) {
-    return badge('idle', '?', 'Charge state unknown — no sense pin');
-  }
   return '';
 }
 
-// See the Charging row above for why this is four states and not two.
-function chargeText(dev, state) {
-  // external_power lives in device_power, not device_overview -- the view it
-  // belongs in is defined in three files that must agree, so it has its own for
-  // now. See supabase/migrate_vbus_sense.sql.
-  const row = (state.power || []).find(p => p.device_id === dev.device_id);
-  const ext = row ? row.external_power : null;
-  if (dev.charging != null) {
-    if (dev.charging) return 'yes';
-    // Not charging AND on mains is the terminated case -- the cell is full and
-    // the charger has stopped, which is worth distinguishing from running down.
-    return ext ? 'no — charged' : 'no';
-  }
-  if (ext == null) return 'unknown — no sense pin';
-  return ext ? 'on mains' : 'on battery';
+// ====================================================================
+//  A platform's NODE HEALTH -- what its hub polls from it -- in the slot
+//  where a hub or a stack has its Power card. Each fact is '—' when this
+//  platform does not measure it (today's I2C platforms report only some),
+//  and never 0: a 0 is a reading, and a dash is the absence of one.
+// ====================================================================
+function nodeCard(dev, devices) {
+  const p = nodeParts(dev);
+  const hub = hubOf(dev, devices);
+  return h('div', { class: 'card' },
+    h('div', { class: 'chart-title' }, 'Node health'),
+    h('dl', { class: 'kv', style: 'margin-top:.6rem' },
+      kv('Hub', hub ? h('a', { href: `#/device/${encodeURIComponent(hub.device_id)}` }, hub.device_id)
+        : dev.location == null ? '—' : 'no hub in this area'),
+      kv('Link', p.link),
+      kv('Supply', p.supply),
+      kv('Checksum errors', dev.crc_errors == null ? '—' : `${p.crc} since power-up`),
+      kv('No-load', dev.no_load_g == null ? '—' : `${p.drift} when last empty`)),
+    h('div', { class: 'dim', style: 'font-size:.75rem;margin-top:.5rem;line-height:1.4' },
+      'Power and the backup battery are the hub\'s. Supply is what this platform\'s ',
+      'own ADC reads at the end of its cable. No-load is what it weighed the last ',
+      'time it was empty — anything but 0 is drift in its zero.'));
 }
 
 function weightCard(dev) {
@@ -762,8 +771,10 @@ function renderWeightHistory(rowsDesc, dev, tz, hours) {
     h('thead', {}, h('tr', {},
       h('th', {}, 'Recorded'), h('th', {}, 'Reason'), h('th', { class: 'num' }, 'Weight'),
       ...(buffer ? [h('th', { class: 'num' }, 'Bowls'), h('th', { class: 'num' }, 'Gross')] : []),
+      // No Battery column: a platform's battery is its hub's. The rows still
+      // carry battery_level (select '*'), so Copy diagnostics keeps it.
       h('th', {}, 'State'), h('th', { class: 'num' }, 'Cells'),
-      h('th', { class: 'num' }, 'Raw counts'), h('th', {}, 'Battery'),
+      h('th', { class: 'num' }, 'Raw counts'),
       h('th', { class: 'num' }, 'Boot/seq'), h('th', {}, 'Delay'))),
     h('tbody', {}, ...rowsDesc.map(r => {
       const delayMs = new Date(r.received_at) - new Date(r.recorded_at);
@@ -784,7 +795,6 @@ function renderWeightHistory(rowsDesc, dev, tz, hours) {
         h('td', { class: 'num' }, r.cells_online ?? '—'),
         h('td', { class: 'num' },
           r.net_counts == null ? '—' : Number(r.net_counts).toLocaleString()),
-        h('td', {}, r.battery_level ?? '—'),
         h('td', { class: 'num' }, `${r.boot_id ?? '—'}/${r.seq}`),
         h('td', {}, Number.isFinite(delayMs) ? `${Math.round(delayMs / 1000)}s` : '—'));
     })));

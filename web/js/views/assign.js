@@ -15,7 +15,7 @@
 
 import { h, badge, banner, toast } from '../ui.js';
 import { unwrap, describeError } from '../supa.js';
-import { LOCATION_NAMES, FOOD_SLOTS, fmtRelative } from '../domain.js';
+import { LOCATION_NAMES, FOOD_SLOTS, fmtRelative, isHub } from '../domain.js';
 
 const LOCATIONS = ['D', 'M', 'T', 'R'];
 
@@ -70,7 +70,9 @@ export function renderAssign(state, params, ctx) {
       ...LOCATIONS.map(l => h('option', { value: l, selected: d.location === l },
         `${l} ${LOCATION_NAMES[l]}`)));
 
-    const slotSel = h('select', { 'aria-label': `${d.device_id} slot` },
+    // A hub serves an AREA and has no dish position; a slot here would put it
+    // on a Stock card as if it weighed something.
+    const slotSel = h('select', { 'aria-label': `${d.device_id} slot`, disabled: isHub(d) },
       h('option', { value: '', selected: d.food_slot == null }, '—'),
       ...FOOD_SLOTS.map(n => h('option', { value: n, selected: Number(d.food_slot) === n }, n)));
 

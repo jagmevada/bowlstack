@@ -216,7 +216,9 @@ a fourth stack to Darshanarthi slot 1 and the ceiling rises on its own.
 
 **Battery is a band with no percentage.** The bands are hysteretic, so no number
 is inferred from them in either direction, and `null` renders as "no battery" —
-never a flat-battery icon.
+never a flat-battery icon. **Only a hub or a legacy stack has one:** a scale or
+buffer platform's battery is its area hub's, so it never shows a battery bar or
+"no battery detected" — its row shows the node health the hub polls instead.
 
 **One meaning per colour.** A stock number is ink; it turns red for exactly one
 reason — the figure is compromised (a stack offline, degraded or faulted).
@@ -437,7 +439,7 @@ npm install      # jsdom, only for the test — the app itself has no dependenci
 node smoke.mjs
 ```
 
-387 assertions at 1.42. It loads the real `index.html`, stubs PostgREST with rows
+427 assertions at 1.43. It loads the real `index.html`, stubs PostgREST with rows
 shaped like `device_overview` / `slot_overview` / `status_events`, and drives
 every screen — first against kind-less bowl stacks (a database from before
 `migrate_buffer.sql`), then with buffer platforms spliced in (after the

@@ -85,9 +85,6 @@ const UNCONFIRMED = 'BWL-004';  // D/2: a count remembered across a power cycle 
 const SETTLING = 'BWL-008';     // D/3: first readings still arriving -- slot 3 reads ≥
 const OFFLINE = 'BWL-014';      // M/2: died mid-service -- keeps its last value, in red
 const EMPTY = 'BWL-016';        // M/4: tared and empty -- 0.0 kg, which means refill me
-const NO_BATTERY = 'BWL-019';
-const CRITICAL_B = 'BWL-005';
-const LOW_B = 'BWL-011';
 
 const AREA_LABEL = { D: 'Darshanarthi', M: 'Mahatma', T: 'Tiffin', R: 'Reserved' };
 
@@ -145,6 +142,56 @@ for (let n = 25; n <= 32; n++) {
     device_id: `LDC-0${n}`, location: 'R', food_slot: null, i: n, kind: 'scale',
     label: 'Reserved (scale)', timezone: TZ, firmware: null, mac: null,
   });
+}
+
+// --- the hubs ----------------------------------------------------------
+//
+// One ESP32 per area, on mains with a small backup cell. THE BATTERY IS THE
+// HUB'S: a platform reports none. One hub per power state, so every label the
+// Health page has is on screen -- D charging, M on its backup cell (mains
+// lost), T low with its charge state unknown. `charging` here is mains.
+const HUBS = {
+  'HUB-D': { battery_mv: 4110, battery_level: 'good', charging: true },
+  'HUB-M': { battery_mv: 3790, battery_level: 'medium', charging: false },
+  'HUB-T': { battery_mv: 3560, battery_level: 'low', charging: null },
+};
+Object.keys(HUBS).forEach((device_id, k) => {
+  const location = device_id.slice(4);
+  devices.push({
+    device_id, location, food_slot: null, i: k, kind: 'hub',
+    label: `${AREA_LABEL[location]} hub`, timezone: TZ,
+    firmware: 'V0.1 261004', mac: `24:0A:C4:12:34:5${k}`,
+  });
+});
+
+// --- node health -------------------------------------------------------
+//
+// What each hub polls from the platforms in its area. The supply sags a few
+// millivolts at every node down the chain, checksum errors are a stray few,
+// and one platform per rule is seeded wrong. The panel's own I2C platforms --
+// LDC-001 and BWL-001..003 -- have no ADC on their supply and no checksum on
+// the bus, so those two are NULL there, which is what their live rows carry.
+const NOT_RESPONDING = 'BWL-010';   // D/4: its hub cannot reach it -- a fault
+const DRIFTED = 'BWL-015';          // M/3: reads +650 g empty -- a warning
+const I2C_NODES = new Set(['LDC-001', 'BWL-001', 'BWL-002', 'BWL-003']);
+const chainPos = new Map();
+for (const loc of ['D', 'M', 'T']) {
+  devices.filter(d => d.location === loc && d.food_slot != null)
+    .forEach((d, k) => chainPos.set(d.device_id, k));
+}
+const NO_NODE = { supply_mv: null, crc_errors: null, responding: null, no_load_g: null };
+
+function nodeOf(dev) {
+  if (!chainPos.has(dev.device_id)) return NO_NODE;   // a hub, or a reserved unit
+  const i2c = I2C_NODES.has(dev.device_id);
+  return {
+    supply_mv: i2c ? null : 5050 - 9 * chainPos.get(dev.device_id),
+    crc_errors: i2c ? null : (dev.i * 7) % 5,
+    // A platform whose cell is not answering is not answering the hub either --
+    // the panel firmware sends responding = (any cell converting).
+    responding: dev.device_id !== NOT_RESPONDING && dev.device_id !== NO_CELLS,
+    no_load_g: dev.device_id === DRIFTED ? 650 : ((dev.i * 37) % 41) - 20,
+  };
 }
 
 // --- the menu, writable ----------------------------------------------
@@ -255,13 +302,6 @@ function counterAt(dev, at) {
   return Math.round(fullBowlG(dev, c, 0) * (1 - 0.9 * (t - c * period) / period));
 }
 
-function batteryOf(dev) {
-  if (dev.device_id === NO_BATTERY) return [null, null];
-  if (dev.device_id === CRITICAL_B) return [3320, 'critical'];
-  if (dev.device_id === LOW_B) return [3560, 'low'];
-  return [4020, 'good'];
-}
-
 /** The weight half of one device's row at an instant, in the columns its
  *  firmware sends.
  *
@@ -312,6 +352,7 @@ function reading(dev, at) {
 }
 
 function isReported(dev) {
+  if (dev.kind === 'hub') return true;
   const deployed = dev.location !== 'R' && dev.food_slot != null;
   return dev.kind === 'scale'
     ? deployed && SCALE_SLOTS_LIVE.has(dev.food_slot) && !SCALE_NOT_FITTED.has(dev.device_id)
@@ -330,25 +371,26 @@ function deviceOverview(at = Date.now()) {
       in_service: true, data_is_stale: false, missed_last_service: false,
       // Neither product writes the stack half of the row any more.
       stack_count: null, stack_status: null, levels: null, sensors_online: null,
-      // Unreadable on the panel -- the ETA6098's STAT pin reaches no GPIO --
-      // so null, never false. See include/board_waveshare_s3.h section 5.
-      charging: null,
+      // NO BATTERY ON A PLATFORM -- it is the hub's, and the hub's own three
+      // columns are spread over these below.
+      battery_mv: null, battery_level: null, charging: null,
+    };
+    const unread = {
+      weight_g: null, weight_state: null, cells_online: null,
+      counts_per_gram: null, net_counts: null,
+      bowls: null, bowls_confirmed: null, gross_g: null,
     };
     if (!isReported(dev)) {
       return {
         ...base, current_food: null,
         reported: false, updated_at: null, stale_for: null,
         offline: false, awaiting_deployment: true,
-        battery_mv: null, battery_level: null,
         uptime_s: null, firmware: null, mac: null,
-        weight_g: null, weight_state: null, cells_online: null,
-        counts_per_gram: null, net_counts: null,
-        bowls: null, bowls_confirmed: null, gross_g: null,
+        ...unread, ...NO_NODE,
       };
     }
     const offline = dev.device_id === OFFLINE;
     const dish = menu.get(`${dev.location}|${date}|${meal}|${dev.food_slot}`);
-    const [battery_mv, battery_level] = batteryOf(dev);
     return {
       ...base,
       current_food: dish ? dish.food_name : null,
@@ -356,10 +398,11 @@ function deviceOverview(at = Date.now()) {
       updated_at: iso(at - (offline ? 20 * 60_000 : 20_000)),
       stale_for: offline ? '00:20:00' : '00:00:20',
       offline, awaiting_deployment: false,
-      battery_mv, battery_level,
       uptime_s: 3120 + Math.floor(elapsed()),
       firmware: dev.firmware, mac: dev.mac,
-      ...reading(dev, at),
+      // A hub measures nothing; it carries the area's battery instead.
+      ...(dev.kind === 'hub' ? { ...unread, ...HUBS[dev.device_id] } : reading(dev, at)),
+      ...nodeOf(dev),
     };
   });
 }
@@ -605,8 +648,7 @@ function slotQuantityRows(rows) {
  *  as the live row, so the curve ends where the card's figure is. */
 function weightSamples(deviceId) {
   const dev = devices.find(d => d.device_id === deviceId);
-  if (!dev || !isReported(dev)) return [];
-  const [battery_mv, battery_level] = batteryOf(dev);
+  if (!dev || dev.kind === 'hub' || !isReported(dev)) return [];
   // An offline unit's history stops where it went quiet.
   const last = Date.now() - (deviceId === OFFLINE ? 20 * 60_000 : 0);
   const out = [];
@@ -616,7 +658,8 @@ function weightSamples(deviceId) {
       device_id: deviceId, boot_id: 7, seq: 1000 - k,
       recorded_at: iso(at), received_at: iso(at + 400),
       reason: k === 999 ? 'boot' : 'periodic',
-      battery_mv, battery_level, firmware: dev.firmware, manual_fill_pct: null,
+      // The columns are still on the table; a platform just has nothing for them.
+      battery_mv: null, battery_level: null, firmware: dev.firmware, manual_fill_pct: null,
       ...reading(dev, at),
     });
   }

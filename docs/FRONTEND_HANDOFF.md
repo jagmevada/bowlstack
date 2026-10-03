@@ -19,7 +19,12 @@ Three kinds of device, told apart by `device_overview.kind`:
 | --- | --- | --- |
 | `buffer` | `BWL-001` … `BWL-032` | one 200 kg load cell under the waiting bowls: **food in grams** and **how many bowls** are on it |
 | `scale` | `LDC-001` … `LDC-032` | three 20 kg cells under the counter vessel: food in grams |
+| `hub` | `HUB-D`, `HUB-M`, `HUB-T` | one ESP32 per area, on mains with a small **backup battery**; it polls the area's scales and buffers and measures nothing itself. *Added by `migrate_hubs.sql`* |
 | `stack` | (legacy) | the old ToF bowl counter: **0–4 bowls**, no grams |
+
+**The battery is the hub's.** A hub's platforms — the `scale` and `buffer`
+rows with the same `location` — carry no battery of their own; they carry
+*node health* instead (§3). A legacy `stack` keeps its own battery.
 
 Every BWL was a `stack` until `supabase/cutover_buffers.sql` re-kinded it. A
 database that predates `migrate_loadcell.sql` has no `kind` column at all;
@@ -83,13 +88,13 @@ const { data } = await supabase.from('device_overview').select('*')
 | `stack_status` | text | `stack` only: `ok` / `discontiguous` / `degraded` |
 | `levels` | text[] | `stack` only: 4 entries, bottom-up: `present` / `absent` / `unknown` |
 | `sensors_online` | int | `stack` only: 0–4 |
-| `battery_mv` | int | millivolts at the cell — raw measurement, for diagnosis |
-| `battery_level` | text | `good` / `medium` / `low` / `critical`, or **`null`** |
-| `charging` | bool | **null is "unreadable", not "no"** — the panel that hosts scales and buffers cannot see it |
+| `battery_mv` | int | `hub` and `stack` only: millivolts at the cell — raw measurement, for diagnosis. NULL on every `scale`/`buffer` |
+| `battery_level` | text | `hub` and `stack` only: `good` / `medium` / `low` / `critical`, or **`null`** |
+| `charging` | bool | on a `hub`, its mains: **true** on the charger, **false** on the backup battery (mains lost), **null** unknown. On a `stack`, null is "unreadable", not "no". NULL on every `scale`/`buffer` |
 | `uptime_s` | int | seconds since the device booted |
 | `firmware` | text | e.g. `0.2.0`, `V1.20 261003` |
 | `mac` | text | which physical board is in this installation — one panel hosts LDC-001 *and* its buffers, so they share a MAC by design |
-| `kind` | text | `stack` / `scale` / `buffer` — see §1. Absent before `migrate_loadcell.sql` |
+| `kind` | text | `stack` / `scale` / `buffer` / `hub` — see §1. Absent before `migrate_loadcell.sql` |
 | `weight_g` | int | `scale`/`buffer`: grams of **food**. **NULL unless `weight_state = 'ok'`**; 0 is a real, empty platform |
 | `weight_state` | text | `scale`/`buffer`: always sent — `ok`, `no_cells`, `cells_partial` (scale only), `over_range`, `settling`, `uncalibrated`, `untared` |
 | `cells_online` | int | 0–3 for a scale, 0–1 for a buffer |
@@ -98,6 +103,21 @@ const { data } = await supabase.from('device_overview').select('*')
 | `bowls` | smallint | `buffer` only: bowls on the platform, 0–4 in practice (0–8 allowed). NULL unless `ok`. *Appended by `migrate_buffer.sql`* |
 | `bowls_confirmed` | bool | `buffer` only: **false = the count is remembered from before a power cycle**, not yet confirmed by a bowl moving or the platform reading empty. NULL exactly when `bowls` is |
 | `gross_g` | int | `buffer` only: everything on the platform, `weight_g + bowls × 2500`. NULL unless `ok` |
+| `supply_mv` | int | `scale`/`buffer`: millivolts the node's own ADC reads on its supply. *Appended by `migrate_hubs.sql`* |
+| `crc_errors` | int | `scale`/`buffer`: checksum failures since the node powered up |
+| `responding` | bool | `scale`/`buffer`: answered the hub's last health poll |
+| `no_load_g` | int | `scale`/`buffer`: what the platform read the last time it was empty — ideally 0; anything else is drift in its zero |
+
+**A hub is an ordinary row**: `kind = 'hub'`, `location` its area, `food_slot`
+NULL by design (it serves an area, not a dish position), with `battery_*`,
+`charging`, `firmware`, `uptime_s`, `mac`, `updated_at` and the server's
+`offline` like any device. It has no reading and no history table.
+
+**The four node-health columns are NULL when not measured**, and today's I2C
+platforms measure only some of them (no supply ADC, no bus checksum) — RS485
+nodes will report all four. Render NULL as a dash, never as 0. The trial
+dashboard's thresholds: `responding = false` is a **fault**; `supply_mv` below
+4500, `|no_load_g|` of 500 g or more, and 100+ `crc_errors` are **warnings**.
 
 **A buffer's `weight_g` is always food** — the gross load less 2.5 kg of steel
 per counted bowl — whatever the panel's own display switch shows. Read it as
@@ -205,7 +225,13 @@ Two consequences for the UI:
 - A band that has not changed while `battery_mv` clearly has is **correct**, not
   a stale reading. Render the band; if you need the trend, use `battery_mv`.
 
-`null` means **no cell detected**, which is not the same as flat. The device
+**Only a `hub` or a legacy `stack` has a battery.** On a `scale` or `buffer`
+the battery columns are NULL because they are not its columns — do not read
+that as "no battery detected", and do not count platforms in a battery alarm.
+On a hub, `charging = false` means mains is lost and the area is running on
+the backup cell: worth a warning on its own, before the band drops.
+
+On a device that has one, `null` means **no cell detected**, which is not the same as flat. The device
 also rejects implausible readings — anything a lithium cell cannot produce
 means the *measurement* is broken, and it reports `null` rather than a
 confident value.
@@ -577,6 +603,15 @@ it. This is what lets the kitchen in-charge tell the service
 counter in-charge which station needs attention — so sort by severity, not by
 device ID. (The trial dashboard renders this as a symbolic roster — one glyph
 line per device — with the sentences on each device's own page.)
+
+Since `migrate_hubs.sql`: battery and charging belong on the **hub** rows
+(charging / on battery / charging unknown — the trial dashboard lists the hubs
+first, in a section of their own); a platform's row shows its **node health**
+instead — e.g. `5.02 V · 0 CRC · responding · no-load +12 g`, leaving out the
+parts it does not measure — and its device page names the hub it hangs off.
+A database without the migration has no hub rows and none of the four
+columns: everything else renders as before, and a platform is still never
+"no battery detected".
 
 ### Configuration page
 

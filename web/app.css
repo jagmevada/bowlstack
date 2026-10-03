@@ -734,6 +734,17 @@ button:disabled { opacity: .45; cursor: default; }
    battery holds the right edge. */
 .dev.devc .dev-count { font-size: 1.05rem; text-align: left; }
 .dev.devc .batt-slot { width: 26px; }
+/* A platform's node health, in the battery's column. Four short facts that
+   wrap onto a second line on a phone rather than squeezing the weight out. */
+.dev.devc .devc-node {
+  max-width: 10rem;
+  font-size: .7rem;
+  line-height: 1.25;
+  color: var(--ink-3);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.dev.devc .devc-node span { white-space: nowrap; }
 
 .dev {
   display: grid;

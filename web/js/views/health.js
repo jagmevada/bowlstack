@@ -18,7 +18,7 @@
 import { h, empty, levelColumn, cellColumn, banner, batteryBar } from '../ui.js';
 import {
   compareDevices, deviceSeverity, deviceStack, deviceGlyph, deviceWeight, isWeighed,
-  cellsTotal, isFault, isDegraded,
+  cellsTotal, isFault, isDegraded, isHub, isBatteryWarn, nodeHealthText, nodeHealthList,
   deviceOffline, fmtRelative,
   powerState,
 } from '../domain.js';
@@ -33,7 +33,7 @@ const FILTERS = {
   all:      { label: 'All', test: () => true },
   problems: { label: 'Needs attention', test: d => !d.awaiting_deployment && deviceSeverity(d).rank >= 50 },
   offline:  { label: 'Offline', test: deviceOffline },
-  battery:  { label: 'Battery', test: d => d.battery_level === 'low' || d.battery_level === 'critical' },
+  battery:  { label: 'Battery', test: isBatteryWarn },
   // BOTH PRODUCTS, because these are filters on a FAULT, not on a sensor type.
   // Keyed on stack_status alone they silently excluded every load cell: a
   // station with no cell answering is the most serious thing on this page and
@@ -147,26 +147,33 @@ export function renderHealth(state, params) {
     return frag;
   }
 
-  if (live.length) {
+  const section = (title, devs, note, muted = false) => {
     const list = h('div', { class: 'dev-list compact' });
-    for (const d of live) list.append(deviceRow(d, state.power));
-    frag.append(h('div', { class: 'section' },
+    for (const d of devs) list.append(deviceRow(d, state.power));
+    return h('div', { class: 'section' },
       h('div', { class: 'section-head' },
-        h('h2', {}, searching ? 'Matches' : active === 'all' ? 'Deployed' : FILTERS[active].label),
-        h('span', { class: 'count' }, `${live.length} device${live.length === 1 ? '' : 's'}`)),
-      list));
-  } else if (active !== 'all' && active !== 'awaiting' && !searching) {
+        h('h2', muted ? { class: 'muted' } : {}, title),
+        h('span', { class: 'count' }, note)),
+      list);
+  };
+
+  // HUBS FIRST, in a section of their own. There are three at most and each is
+  // its area's power and link to the platforms -- a hub on its backup battery
+  // is the explanation for whatever goes quiet below it next. Severity still
+  // orders the rows within each section.
+  const hubs = live.filter(isHub);
+  const rest = live.filter(d => !isHub(d));
+  if (hubs.length) frag.append(section('Hubs', hubs, `${hubs.length} area hub${hubs.length === 1 ? '' : 's'}`));
+  if (rest.length) {
+    frag.append(section(searching ? 'Matches' : active === 'all' ? 'Deployed' : FILTERS[active].label,
+      rest, `${rest.length} device${rest.length === 1 ? '' : 's'}`));
+  } else if (!live.length && active !== 'all' && active !== 'awaiting' && !searching) {
     frag.append(banner('info', '✓', 'Nothing in this category. '));
   }
 
   if (waiting.length && waitingShown) {
-    const list = h('div', { class: 'dev-list compact' });
-    for (const d of waiting) list.append(deviceRow(d, state.power));
-    frag.append(h('div', { class: 'section' },
-      h('div', { class: 'section-head' },
-        h('h2', { class: 'muted' }, 'Awaiting deployment'),
-        h('span', { class: 'count' }, `${waiting.length} registered, never reported — not a fault`)),
-      list));
+    frag.append(section('Awaiting deployment', waiting,
+      `${waiting.length} registered, never reported — not a fault`, true));
   }
 
   return frag;
@@ -186,8 +193,8 @@ function miniLevels(levels) {
   return col;
 }
 
-// One line per device: glyph · id · position · levels · count · battery.
-// Everything the old badge stack said now rides the tooltip; the device page
+// One line per device: glyph · id · position · levels · count · battery (node
+// health on a platform; charging and battery on a hub). Everything the old badge stack said now rides the tooltip; the device page
 // says it in full sentences. The full device_id stays (this is the roster
 // someone searches), the position compresses to D3-style.
 // `power` threaded in rather than reached for: this is called from two
@@ -195,6 +202,7 @@ function miniLevels(levels) {
 // the old behaviour after the Power card was fixed.
 function deviceRow(d, power) {
   const sev = deviceSeverity(d);
+  const hub = isHub(d);
   const scale = isWeighed(d);   // a counter scale or a buffer platform
   // Same six columns whichever product this is, so the roster stays a single
   // scannable grid -- only what column 4 and 5 CONTAIN differs. A scale that
@@ -205,7 +213,12 @@ function deviceRow(d, power) {
   // `charging` was truthy, and that is null on every board without the STAT
   // mod -- so a plugged-in unit's tooltip mentioned power not at all.
   const pw = powerState(d, power);
-  const battWord = d.battery_level == null
+  // A PLATFORM HAS NO BATTERY -- its hub does -- so the slot the battery held
+  // carries what the hub polls from it instead.
+  const node = scale ? nodeHealthText(d) : null;
+  const nodeList = scale ? nodeHealthList(d) : null;
+  const battWord = scale ? `node: ${node}`
+    : d.battery_level == null
     ? 'no battery detected'
     : `battery ${d.battery_level}`
       + `${d.battery_mv ? ` (${d.battery_mv} mV)` : ''}`
@@ -228,11 +241,13 @@ function deviceRow(d, power) {
     h('span', { class: 'devc-pos' },
       d.location != null && d.food_slot != null ? `${d.location}${d.food_slot}`
         : d.location != null ? d.location : '—'),
-    scale ? cellColumn(d.cells_online, cellsTotal(d)) : miniLevels(d.levels),
+    // A hub measures nothing: no ladder, no cells -- an empty cell keeps the grid.
+    hub ? h('span', { 'aria-hidden': 'true' })
+      : scale ? cellColumn(d.cells_online, cellsTotal(d)) : miniLevels(d.levels),
     // Red only where there IS a last value to redden — the fault (`!`) and
     // never-reported (`—`) renderings are not counts, so the `na` grey owns
     // them and the offline red must not touch them.
-    h('span', {
+    hub ? h('span', { class: 'dev-count na' }, pw.word) : h('span', {
       class: 'dev-count'
         + (reading.kind === 'count' || reading.kind === 'bound'
            || reading.kind === 'weight'
@@ -243,5 +258,8 @@ function deviceRow(d, power) {
     }, reading.text),
     d.awaiting_deployment
       ? h('span', { class: 'batt-slot', 'aria-hidden': 'true' })
+      // One span per fact, so a phone wraps BETWEEN them -- never "no-" / "load".
+      : scale ? h('span', { class: 'devc-node' }, nodeList.length
+          ? nodeList.map((p, i) => [i ? ' · ' : null, h('span', {}, p)]) : node)
       : batteryBar(d.battery_level, pw.powered, battWord));
 }

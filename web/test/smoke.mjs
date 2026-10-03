@@ -1797,6 +1797,201 @@ console.log('\n[buffers: one 200 kg cell, food in kilograms]');
     && [...view.querySelectorAll('.row-form .w-input')].every(i => !i.hasAttribute('hidden')));
 }
 
+// =======================================================================
+//  Hubs and node health -- supabase/migrate_hubs.sql.
+//
+//  The battery moved to the HUB (one per area, mains + a backup cell). A
+//  platform reports none, and carries instead what its hub polls from it:
+//  supply_mv, crc_errors, responding, no_load_g -- NULL when not measured.
+//  Every legacy stack above kept its OWN battery, and those assertions
+//  passing untouched is the proof that still holds. Spliced in and taken
+//  out again, the buffer block's pattern, so no count elsewhere moves.
+//
+//    HUB-D charging    HUB-M on battery (mains lost)    HUB-T low, unknown
+//    D/7  BWL-201 healthy node, all four measured
+//         BWL-202 not answering the hub                 -> fault
+//         LDC-207 I2C: supply and CRC NULL, +650 g      -> drift warning
+//    T/7  BWL-204 4.42 V supply, 140 CRC errors         -> warnings
+//    M/7  BWL-203 the four columns ABSENT, and the panel's old battery
+//         'low' still on the row                        -> ranks nothing
+// =======================================================================
+console.log('\n[hubs: the battery is the hub\'s, platforms report node health]');
+{
+  const live = { reported: true, updated_at: iso(now - 20_000), stale_for: '00:00:20',
+    in_service: true, offline: false, awaiting_deployment: false, data_is_stale: false,
+    missed_last_service: false, stack_count: null, stack_status: null, levels: null,
+    sensors_online: null, battery_mv: null, battery_level: null, charging: null,
+    uptime_s: 3120, firmware: 'V1.21 261004', mac: '28:84:85:47:AB:02',
+    timezone: 'Asia/Kolkata', current_meal: 'Lunch' };
+  const hub = (loc, o) => ({ ...live, device_id: `HUB-${loc}`, kind: 'hub', location: loc,
+    food_slot: null, label: `${AREA[loc]} hub`, current_food: null, ...o });
+  const plat = (id, kind, loc, o) => ({ ...live, device_id: id, kind, location: loc,
+    food_slot: 7, label: `${AREA[loc]} slot 7`, current_food: 'Pulao',
+    weight_state: 'ok', weight_g: 20000, cells_online: kind === 'buffer' ? 1 : 3,
+    gross_g: kind === 'buffer' ? 25000 : null, bowls: kind === 'buffer' ? 2 : null,
+    bowls_confirmed: kind === 'buffer' ? true : null,
+    counts_per_gram: 20.7, net_counts: 517500,
+    supply_mv: 4980, crc_errors: 2, responding: true, no_load_g: 12, ...o });
+  const hubs = [
+    hub('D', { battery_mv: 4110, battery_level: 'good', charging: true }),
+    hub('M', { battery_mv: 3790, battery_level: 'medium', charging: false }),
+    hub('T', { battery_mv: 3560, battery_level: 'low', charging: null }),
+  ];
+  const legacy = plat('BWL-203', 'buffer', 'M', { battery_mv: 3600, battery_level: 'low' });
+  for (const k of ['supply_mv', 'crc_errors', 'responding', 'no_load_g']) delete legacy[k];
+  const plats = [
+    plat('BWL-201', 'buffer', 'D'),
+    plat('BWL-202', 'buffer', 'D', { supply_mv: 4890, crc_errors: null, no_load_g: null,
+                                     responding: false }),
+    plat('LDC-207', 'scale', 'D', { supply_mv: null, crc_errors: null, no_load_g: 650 }),
+    plat('BWL-204', 'buffer', 'T', { supply_mv: 4420, crc_errors: 140 }),
+    legacy,
+  ];
+  const extraSlots = ['D', 'M', 'T'].map(loc => ({ location: loc, food_slot: 7,
+    current_food: 'Pulao', current_meal: 'Lunch', devices: 0, devices_reported: 0,
+    bowls_capacity: 0, bowls_trusted: null, bowls_reported: null, any_fault: false,
+    any_degraded: false, any_battery_warn: false, any_offline: false,
+    any_missed_service: false, oldest_update: iso(now - 20_000), scales: 0, scales_ok: 0,
+    measured_weight_g: null, scale_issues: [], bowl_weight_g: null, buffers: 1,
+    buffers_ok: 1, buffer_issues: 0, buffer_measured_g: 20000, buffer_g: 20000,
+    buffer_bowls: 2, buffer_unconfirmed: false, weight_g: 20000 }));
+  const refetch = async () => {
+    window.document.getElementById('refresh-btn').dispatchEvent(new window.Event('click'));
+    await new Promise(r => setTimeout(r, 200));
+  };
+  const chipN = label => [...window.document.getElementById('fleet-chips').children]
+    .find(c => c.textContent.replace(/^\d+/, '') === label)?.querySelector('b')?.textContent;
+  const hRow = id => [...view.querySelectorAll('.dev')].find(r => r.textContent.includes(id));
+  const kvOf = k => [...view.querySelectorAll('dl.kv dt')]
+    .find(dt => dt.textContent === k)?.nextElementSibling;
+  const platIds = plats.map(p => p.device_id);
+
+  devices.push(...hubs, ...plats);
+  slots.push(...extraSlots);
+  await refetch();
+
+  // --- the header chip ----------------------------------------------------
+  // Two legacy stacks (BWL-005 critical, BWL-011 low) + HUB-T low. BWL-203's
+  // leftover 'low' is a platform's, so it is not the area's battery.
+  ok('the battery chip counts hubs and stacks, not platforms', chipN('battery') === '3',
+    chipN('battery'));
+
+  // --- Health -------------------------------------------------------------
+  await go('#/health');
+  const first = view.querySelector('.section');
+  ok('hubs lead the roster, in a section of their own',
+    first?.querySelector('h2')?.textContent === 'Hubs'
+    && first.querySelectorAll('.dev').length === 3
+    && [...first.querySelectorAll('.dev')].every(r => /HUB-/.test(r.textContent)));
+  ok('a hub row draws its battery', hRow('HUB-T')?.querySelector('.batt.lvl-low') != null);
+  ok('...and says charging, on battery or unknown beside it',
+    hRow('HUB-D')?.querySelector('.dev-count')?.textContent === 'charging'
+    && hRow('HUB-M')?.querySelector('.dev-count')?.textContent === 'on battery'
+    && hRow('HUB-T')?.querySelector('.dev-count')?.textContent === 'charging unknown');
+  ok('a charging hub wears the bolt, one on battery does not',
+    hRow('HUB-D')?.querySelector('.batt .bolt') != null
+    && hRow('HUB-M')?.querySelector('.batt .bolt') == null);
+  ok('a hub draws no level ladder and no cells',
+    !!hRow('HUB-D') && hRow('HUB-D').querySelector('.levels, .cells') == null);
+  ok('a hub on battery warns that mains is lost',
+    /mains lost/.test(hRow('HUB-M')?.title || '')
+    && hRow('HUB-M')?.classList.contains('sev-warning'));
+  ok('a hub with no slot is not "Not assigned to a position"',
+    !/Not assigned/.test(hRow('HUB-D')?.title || ''), hRow('HUB-D')?.title);
+  ok('no platform row draws a battery bar',
+    platIds.every(id => hRow(id) && !hRow(id).querySelector('.batt')));
+  ok('...nor is ever "No battery detected"',
+    platIds.every(id => !/no battery detected/i.test(hRow(id)?.title || '')));
+  ok('the battery column carries node health instead',
+    hRow('BWL-201')?.querySelector('.devc-node')?.textContent
+      === '4.98 V · 2 CRC · responding · no-load +12 g',
+    hRow('BWL-201')?.querySelector('.devc-node')?.textContent);
+  ok('a part not measured is left out, never printed as 0',
+    hRow('LDC-207')?.querySelector('.devc-node')?.textContent === 'responding · no-load +650 g',
+    hRow('LDC-207')?.querySelector('.devc-node')?.textContent);
+  ok('a platform with none of the columns reads —, not 0',
+    hRow('BWL-203')?.querySelector('.devc-node')?.textContent === '—',
+    hRow('BWL-203')?.querySelector('.devc-node')?.textContent);
+  ok('a healthy node is not flagged', hRow('BWL-201')?.classList.contains('sev-good'));
+  ok('not answering the hub is a fault',
+    hRow('BWL-202')?.querySelector('.st-fault') != null
+    && hRow('BWL-202')?.classList.contains('sev-critical')
+    && /Not answering the hub/.test(hRow('BWL-202')?.title || ''));
+  ok('a zero drifted 500 g or more warns',
+    hRow('LDC-207')?.classList.contains('sev-warning')
+    && /Zero drifted — reads \+650 g empty/.test(hRow('LDC-207')?.title || ''),
+    hRow('LDC-207')?.title);
+  ok('low supply and checksum errors warn',
+    hRow('BWL-204')?.classList.contains('sev-warning')
+    && /Low supply at the node — 4\.42 V/.test(hRow('BWL-204')?.title || '')
+    && /140 checksum errors/.test(hRow('BWL-204')?.title || ''),
+    hRow('BWL-204')?.title);
+  ok("a platform's leftover battery ranks nothing",
+    hRow('BWL-203')?.classList.contains('sev-good') && !/Battery/.test(hRow('BWL-203')?.title || ''));
+  await go('#/health?f=fault');
+  ok('...and the Faults filter lists the unreachable node', text().includes('BWL-202'));
+  await go('#/health?f=battery');
+  ok('the Battery filter lists the hub, not the platform',
+    text().includes('HUB-T') && !text().includes('BWL-203'));
+
+  // --- Stock --------------------------------------------------------------
+  await go('#/stock');
+  const line = id => [...view.querySelectorAll('.dev-line')]
+    .find(l => l.getAttribute('href')?.includes(id));
+  ok('Stock: no battery on a platform line',
+    platIds.every(id => line(id) && !line(id).querySelector('.batt')));
+  ok('...its tooltip carries node health, never "no battery detected"',
+    /node: 4\.98 V/.test(line('BWL-201')?.title || '')
+    && !/no battery/i.test(line('BWL-203')?.title || ''), line('BWL-201')?.title);
+  ok('...while a legacy stack keeps its own',
+    line('BWL-005')?.querySelector('.batt.lvl-critical') != null);
+  ok('a hub is never drawn on a Stock card', !line('HUB-D'));
+
+  // --- Device -------------------------------------------------------------
+  await go('#/device/HUB-M');
+  ok('a hub page has the Power card, charging spelt out',
+    [...view.querySelectorAll('.chart-title')].some(t => t.textContent === 'Power')
+    && kvOf('Charging')?.textContent === 'on battery', kvOf('Charging')?.textContent);
+  ok('...with the mains-lost badge', /On battery — mains lost/.test(text()));
+  ok('...and no reading card and no history',
+    !/Stack now|Counter now|Buffer now|History/.test(text()));
+  await go('#/device/LDC-207?h=24');
+  await new Promise(r => setTimeout(r, 80));
+  ok('a platform page has Node health, not Power',
+    [...view.querySelectorAll('.chart-title')].some(t => t.textContent === 'Node health')
+    && ![...view.querySelectorAll('.chart-title')].some(t => t.textContent === 'Power'));
+  ok('...linking to its hub',
+    kvOf('Hub')?.querySelector('a')?.getAttribute('href') === '#/device/HUB-D');
+  ok('...a NULL is a dash, never 0',
+    kvOf('Supply')?.textContent === '—' && kvOf('Checksum errors')?.textContent === '—');
+  ok('...the drift is signed', kvOf('No-load')?.textContent === '+650 g when last empty',
+    kvOf('No-load')?.textContent);
+  ok('...and its history table has no Battery column',
+    view.querySelector('table thead') != null
+    && ![...view.querySelectorAll('table thead th')].some(t => t.textContent === 'Battery'));
+
+  // --- a database WITHOUT migrate_hubs.sql: no hub rows, no node columns ---
+  for (const x of hubs) devices.splice(devices.indexOf(x), 1);
+  await refetch();
+  await go('#/health');
+  ok('without hubs there is no Hubs section',
+    ![...view.querySelectorAll('.section h2')].some(e => e.textContent === 'Hubs'));
+  ok('...the chip is the stacks alone again', chipN('battery') === '2', chipN('battery'));
+  ok('...and a platform is still never "No battery detected"',
+    !/no battery detected/i.test(hRow('BWL-203')?.title || '')
+    && hRow('BWL-203')?.classList.contains('sev-good'));
+  await go('#/device/BWL-203');
+  ok('...its page says there is no hub and dashes the rest',
+    kvOf('Hub')?.textContent === 'no hub in this area'
+    && ['Link', 'Supply', 'Checksum errors', 'No-load'].every(k => kvOf(k)?.textContent === '—'));
+
+  for (const x of plats) devices.splice(devices.indexOf(x), 1);
+  for (const x of extraSlots) slots.splice(slots.indexOf(x), 1);
+  await refetch();
+  ok('the fixtures are restored', devices.length === 32 && slots.length === 16
+    && chipN('battery') === '2');
+}
+
 
 // =======================================================================
 //  Load cells -- slotQuantity() against the columns migrate_loadcell.sql
@@ -1971,6 +2166,21 @@ console.log('\n[buffers: one 200 kg cell, food in kilograms]');
       || d.stack_count != null || d.levels != null || d.weight_state === 'cells_partial';
   });
   ok('every buffer row obeys the contract', !badBuf, JSON.stringify(badBuf));
+  const hubRows = rowsNow.filter(d => d.kind === 'hub');
+  ok('demo mode serves three hubs, one on battery and one low',
+    hubRows.length === 3 && hubRows.every(d => d.food_slot == null && d.reported)
+    && hubRows.some(d => d.charging === false) && hubRows.some(d => d.battery_level === 'low'));
+  ok('...and no platform carries a battery',
+    rowsNow.filter(d => d.kind !== 'hub')
+      .every(d => d.battery_mv == null && d.battery_level == null && d.charging == null));
+  ok('...but node health, one unreachable, one drifted, the I2C ones part-NULL',
+    rowsNow.some(d => d.responding === false) && rowsNow.some(d => d.no_load_g >= 500)
+    && ['LDC-001', 'BWL-001'].every(id => {
+      const d = rowsNow.find(r => r.device_id === id);
+      return d.supply_mv == null && d.crc_errors == null && d.responding === true;
+    })
+    && rowsNow.filter(d => d.supply_mv != null)
+      .every(d => d.supply_mv >= 4800 && d.supply_mv <= 5050));
   const seeded = s => buffers.some(d => s(d));
   ok('the demo seeds every buffer state the UI has a rule for',
     seeded(d => d.bowls_confirmed === false) && seeded(d => d.offline)
