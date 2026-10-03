@@ -997,12 +997,28 @@ void loop(const scale::Snapshot &s, uint32_t uptimeSec, uint16_t batteryMv,
 }
 
 void loopBuffers(const bufbank::Snapshot &b, uint32_t uptimeSec) {
-  // Nothing until the bank has published once: a zero-initialised slot would go out
-  // as no_cells -- a claim about the hardware, not "has not spoken yet".
-  if (b.seq == 0) return;
-  const uint32_t now = millis();
+  // Nothing until the bank TASK has published: begin() publishes seq 1 before the
+  // task runs, with fitted slots still holding the default reading -- which would go
+  // out as no_cells, a claim about the hardware rather than "has not spoken yet".
+  if (b.seq <= 1) return;
+  uint32_t now = millis();
+
+  // A WEDGED BANK TASK stops publishing, and re-sending its last snapshot every 20 s
+  // would read as a live weight. It publishes every 100 ms, so 5 s without a new seq
+  // means stuck: post nothing and let the rows go offline -- "not heard from", which
+  // is the truth.
+  static uint32_t lastSeq = 0, lastSeqMs = 0;
+  if (b.seq != lastSeq) {
+    lastSeq = b.seq;
+    lastSeqMs = now;
+  } else if ((uint32_t)(now - lastSeqMs) > 5000) {
+    return;
+  }
 
   for (uint8_t i = 0; i < bufbank::SLOTS; i++) {
+    // Per slot: a previous slot's request can block for the HTTP timeout, and a stale
+    // `now` would back-date this slot's samples and timers by that much.
+    now = millis();
     const bufbank::SlotSnapshot &s = b.slot[i];
     // Never post a platform that is not there: an unfitted slot's row stays
     // "awaiting deployment" rather than reading as a dead cell.
