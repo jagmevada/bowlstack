@@ -493,7 +493,7 @@ bool patchStatus(const scale::Snapshot &s, uint32_t uptimeSec, const char *state
 
   // --- node health (migrate_hubs.sql) ---
   // RESPONDING: the counter answers if any of its cells converts -- a dead cell
-  // is cells_partial, not a silent node. supply_mv, crc_errors and no_load_g are
+  // is cells_partial, not a silent node. supply_mv, checksum_errors and no_load_g are
   // left out: this I2C platform has no node ADC, no checksum and no empty
   // detector yet, and a column a PATCH omits stays NULL -- "not measured".
   o["responding"] = s.online > 0;

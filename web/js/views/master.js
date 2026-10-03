@@ -252,7 +252,8 @@ function slotCard(row, devices, inService, tz, meal, rate, series) {
   for (const loc of SERVING_LOCATIONS) {
     const a = areas.find(x => x.location === loc);
     if (!a) continue;                     // this hall has no stack at this slot
-    list.append(areaLine(a, areaHealth(devices, loc, row.food_slot), dishes.length > 1));
+    list.append(areaLine(a, areaHealth(devices, loc, row.food_slot), dishes.length > 1,
+                         row.food_slot));
   }
   if (list.childNodes.length) card.append(list);
 
@@ -290,7 +291,7 @@ export function areaWeightNote(a, bowls) {
   return undefined;
 }
 
-function areaLine(a, health, showDish) {
+function areaLine(a, health, showDish, slot) {
   const bowls = a.bowls_trusted == null ? null : Number(a.bowls_trusted);
   const grams = a.weight_g == null ? null : Number(a.weight_g);
   // Stacks count against a capacity; a buffer counts what is on it. Absent
@@ -308,7 +309,15 @@ function areaLine(a, health, showDish) {
       ? { cls: 'deg', g: '◐', word: 'a sensor is down or not set up — this figure may be low' }
     : null;
 
-  const line = h('div', { class: `marea${glyph ? ' is-alert' : ''}` });
+  // A LINK TO THAT HALL ON STOCK, the way a Stock station links to its Health
+  // page: the slot card answers "how much across the halls", and the hall's own
+  // page answers "which stations, and are they all right". The slot rides along
+  // so Stock can mark the card the tap came from.
+  const line = h('a', {
+    class: `marea${glyph ? ' is-alert' : ''}`,
+    href: `#/stock?area=${encodeURIComponent(a.location)}&slot=${slot}`,
+    'aria-label': `${LOCATION_NAMES[a.location] || a.location} on the Stock page`,
+  });
 
   // EXACTLY three children, always: name, bowls, mass. An earlier cut emitted
   // an empty placeholder span when there was no dish to show — four children

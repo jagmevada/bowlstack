@@ -104,7 +104,7 @@ const { data } = await supabase.from('device_overview').select('*')
 | `bowls_confirmed` | bool | `buffer` only: **false = the count is remembered from before a power cycle**, not yet confirmed by a bowl moving or the platform reading empty. NULL exactly when `bowls` is |
 | `gross_g` | int | `buffer` only: everything on the platform, `weight_g + bowls × 2500`. NULL unless `ok` |
 | `supply_mv` | int | `scale`/`buffer`: millivolts the node's own ADC reads on its supply. *Appended by `migrate_hubs.sql`* |
-| `crc_errors` | int | `scale`/`buffer`: checksum failures since the node powered up |
+| `checksum_errors` | int | `scale`/`buffer`: checksum failures since the node powered up |
 | `responding` | bool | `scale`/`buffer`: answered the hub's last health poll |
 | `no_load_g` | int | `scale`/`buffer`: what the platform read the last time it was empty — ideally 0; anything else is drift in its zero |
 
@@ -117,7 +117,7 @@ NULL by design (it serves an area, not a dish position), with `battery_*`,
 platforms measure only some of them (no supply ADC, no bus checksum) — RS485
 nodes will report all four. Render NULL as a dash, never as 0. The trial
 dashboard's thresholds: `responding = false` is a **fault**; `supply_mv` below
-4500, `|no_load_g|` of 500 g or more, and 100+ `crc_errors` are **warnings**.
+4500, `|no_load_g|` of 500 g or more, and 100+ `checksum_errors` are **warnings**.
 
 **A buffer's `weight_g` is always food** — the gross load less 2.5 kg of steel
 per counted bowl — whatever the panel's own display switch shows. Read it as
@@ -607,7 +607,7 @@ line per device — with the sentences on each device's own page.)
 Since `migrate_hubs.sql`: battery and charging belong on the **hub** rows
 (charging / on battery / charging unknown — the trial dashboard lists the hubs
 first, in a section of their own); a platform's row shows its **node health**
-instead — e.g. `5.02 V · 0 CRC · responding · no-load +12 g`, leaving out the
+instead — e.g. `5.02 V · 0 checksum err · responding · no-load +12 g`, leaving out the
 parts it does not measure — and its device page names the hub it hangs off.
 A database without the migration has no hub rows and none of the four
 columns: everything else renders as before, and a platform is still never

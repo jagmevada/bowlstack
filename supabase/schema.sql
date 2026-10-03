@@ -335,14 +335,14 @@ create table public.device_status (
   -- the weight in the same PATCH. LAST because migrate_hubs.sql appends them
   -- there; see its section 3.
   supply_mv       smallint,
-  crc_errors      integer,
+  checksum_errors      integer,
   responding      boolean,
   no_load_g       integer,
 
   constraint device_status_supply_mv_ck
     check (supply_mv is null or supply_mv between 0 and 20000),
-  constraint device_status_crc_errors_ck
-    check (crc_errors is null or crc_errors >= 0),
+  constraint device_status_checksum_errors_ck
+    check (checksum_errors is null or checksum_errors >= 0),
   constraint device_status_no_load_ck
     check (no_load_g is null or no_load_g between -50000 and 50000)
 );
@@ -355,7 +355,7 @@ comment on column public.device_status.supply_mv is
   'PLATFORM NODE HEALTH. Supply voltage at the platform''s node, measured by '
   'its own ADC, in mV (0..20000). Not a battery: a platform has none -- the '
   'area''s battery is on its hub''s row. NULL = not measured.';
-comment on column public.device_status.crc_errors is
+comment on column public.device_status.checksum_errors is
   'PLATFORM NODE HEALTH. Frames from this node that failed their checksum '
   'since the node powered up (>= 0); back to 0 when the node restarts. '
   'NULL = not measured.';
@@ -604,7 +604,7 @@ begin
     or (new.sensors_ok      is not null and new.sensors_ok      is distinct from old.sensors_ok)
     or (new.sensors_online  is not null and new.sensors_online  is distinct from old.sensors_online)
     or (new.supply_mv       is not null and new.supply_mv       is distinct from old.supply_mv)
-    or (new.crc_errors      is not null and new.crc_errors      is distinct from old.crc_errors)
+    or (new.checksum_errors      is not null and new.checksum_errors      is distinct from old.checksum_errors)
     or (new.responding      is not null and new.responding      is distinct from old.responding)
     or (new.no_load_g       is not null and new.no_load_g       is distinct from old.no_load_g) then
       raise exception
@@ -1300,7 +1300,7 @@ grant update (bowls, bowls_confirmed, gross_g)
 -- Mains presence (migrate_vbus_sense.sql) and platform node health
 -- (migrate_hubs.sql). Which kind may write which is the guard's business,
 -- not the grant's -- every device holds the same key.
-grant update (external_power, supply_mv, crc_errors, responding, no_load_g)
+grant update (external_power, supply_mv, checksum_errors, responding, no_load_g)
   on public.device_status to anon;
 
 -- Plain INSERT; no SELECT of any kind. A duplicate raises 23505, which is the
@@ -1464,7 +1464,7 @@ select d.device_id,
        -- node has not measured it. A hub's battery needs nothing new: it is
        -- battery_mv / battery_level / charging above, on the hub's own row.
        s.supply_mv,
-       s.crc_errors,
+       s.checksum_errors,
        s.responding,
        s.no_load_g
   from public.devices d

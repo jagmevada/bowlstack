@@ -16,7 +16,7 @@ import { unwrap, describeError } from '../supa.js';
 import { stepChart, weightChart, statusTimeline, STATUS_STYLE } from '../chart.js';
 import {
   batteryInfo, deviceStack, deviceWeight, isScale, isBuffer, isWeighed, isHub, cellsTotal,
-  carriesBattery, powerState, nodeParts, hubOf,
+  carriesBattery, powerState, nodeParts, hubOf, hubNodes,
   deviceSeverity, deviceOffline, positionLabel,
   serviceState, fmtRelative, fmtDateTime, fmtUptime, fmtWeight, bowlsText,
 } from '../domain.js';
@@ -177,10 +177,14 @@ export function renderDevice(state, params, ctx) {
       'that has not moved while the millivolts have is correct, not stale. There is no ',
       'percentage, deliberately.')) : nodeCard(dev, state.devices));
 
+  // AN ATTINY NODE HAS NO MAC: a platform's row carries its hub's, so the page
+  // names it as the hub's -- read from the hub row, which the hub itself writes.
+  const hubRow = isWeighed(dev) ? hubOf(dev, state.devices) : null;
+  const nodes = isHub(dev) ? hubNodes(dev, state.devices) : null;
   grid.append(h('div', { class: 'card' },
     h('div', { class: 'chart-title' }, 'Device'),
     h('dl', { class: 'kv', style: 'margin-top:.6rem' },
-      isHub(dev) ? null
+      isHub(dev) ? kv('Nodes', `${nodes.active} active of ${nodes.mapped} mapped`)
       : isWeighed(dev)
         ? kv('Load cells', dev.cells_online != null
               ? `${dev.cells_online} of ${cellsTotal(dev)} converting` : '—')
@@ -190,11 +194,13 @@ export function renderDevice(state, params, ctx) {
       kv('Last report', dev.updated_at ? `${fmtRelative(dev.updated_at)} (${fmtDateTime(dev.updated_at, tz)})` : 'never'),
       kv('In service', dev.in_service ? 'yes' : 'no'),
       kv('Timezone', dev.timezone),
-      kv('Board MAC', dev.mac ?? '—'),
+      hubRow ? kv('Hub MAC', hubRow.mac ?? dev.mac ?? '—') : kv('Board MAC', dev.mac ?? '—'),
       kv('Dish now', dev.current_food ?? '—'),
       kv('Meal', dev.current_meal ?? 'none')),
     h('div', { class: 'dim', style: 'font-size:.75rem;margin-top:.5rem' },
-      'The MAC identifies the board. A replaced board keeps this device_id — only the MAC changes.')));
+      hubRow ? 'A platform has no MAC of its own — this is the board of its hub, '
+               + `${hubRow.device_id}. A replaced hub keeps every device_id.`
+        : 'The MAC identifies the board. A replaced board keeps this device_id — only the MAC changes.')));
 
   frag.append(grid);
 
@@ -480,7 +486,7 @@ function nodeCard(dev, devices) {
         : dev.location == null ? '—' : 'no hub in this area'),
       kv('Link', p.link),
       kv('Supply', p.supply),
-      kv('Checksum errors', dev.crc_errors == null ? '—' : `${p.crc} since power-up`),
+      kv('Checksum errors', dev.checksum_errors == null ? '—' : `${p.checksum} since power-up`),
       kv('No-load', dev.no_load_g == null ? '—' : `${p.drift} when last empty`)),
     h('div', { class: 'dim', style: 'font-size:.75rem;margin-top:.5rem;line-height:1.4' },
       'Power and the backup battery are the hub\'s. Supply is what this platform\'s ',

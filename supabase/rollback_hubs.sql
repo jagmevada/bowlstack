@@ -3,7 +3,7 @@
 --
 --  Run as owner in the Supabase SQL editor. Returns the database to the
 --  shape migrate_buffer.sql left it in: kind is stack, scale or buffer, no
---  hub devices, no supply_mv / crc_errors / responding / no_load_g, the
+--  hub devices, no supply_mv / checksum_errors / responding / no_load_g, the
 --  kind guard and device_overview back to migrate_buffer.sql's bodies.
 --
 --  ORDER. FIRST of the undos -- before rollback_cutover_buffers.sql and
@@ -218,12 +218,12 @@ delete from public.devices where kind = 'hub';
 -- ---------------------------------------------------------------------
 alter table public.device_status
   drop constraint if exists device_status_supply_mv_ck,
-  drop constraint if exists device_status_crc_errors_ck,
+  drop constraint if exists device_status_checksum_errors_ck,
   drop constraint if exists device_status_no_load_ck;
 
 alter table public.device_status
   drop column if exists supply_mv,
-  drop column if exists crc_errors,
+  drop column if exists checksum_errors,
   drop column if exists responding,
   drop column if exists no_load_g;
 
@@ -254,7 +254,7 @@ select 'node-health columns remaining' as what,
   from information_schema.columns
  where table_schema = 'public'
    and table_name in ('device_status','device_overview')
-   and column_name in ('supply_mv','crc_errors','responding','no_load_g')
+   and column_name in ('supply_mv','checksum_errors','responding','no_load_g')
 union all
 select 'hub devices remaining',
        count(*)

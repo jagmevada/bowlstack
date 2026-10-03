@@ -11,7 +11,7 @@
 --  full copies of device_overview and slot_overview, and those bodies now
 --  read devices.kind, device_status.weight_*, the buffer columns (bowls,
 --  bowls_confirmed, gross_g) and the platform node health (supply_mv,
---  crc_errors, responding, no_load_g), which only exist after those
+--  checksum_errors, responding, no_load_g), which only exist after those
 --  migrations. It also recreates
 --  meal_mapping_preload with the bowl_weight_g column the weight migration
 --  added. Run out of order it aborts on a missing column -- so section 0
@@ -120,7 +120,7 @@ begin
                     and column_name = 'supply_mv') then
     raise exception
       'Run supabase/migrate_hubs.sql (the last part of apply_loadcell.sql) '
-      'before this file: device_overview below reads supply_mv, crc_errors, '
+      'before this file: device_overview below reads supply_mv, checksum_errors, '
       'responding and no_load_g, which it adds.';
   end if;
 end $$;
@@ -645,7 +645,7 @@ select d.device_id,
        -- reason. NULL -- never 0 -- on a hub, a stack, and a platform whose
        -- node has not measured it.
        s.supply_mv,
-       s.crc_errors,
+       s.checksum_errors,
        s.responding,
        s.no_load_g
   from public.devices d

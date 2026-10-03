@@ -3948,14 +3948,14 @@ update public.devices
 --
 -- ALL NULL = NOT MEASURED, NEVER 0, the rule weight_g keeps: today's
 -- platforms are wired straight to the hub and measure none of these, and a
--- 0 crc_errors or 0 g no_load beside them would claim a check nobody ran.
+-- 0 checksum_errors or 0 g no_load beside them would claim a check nobody ran.
 --
 -- The ranges are wide on purpose -- a value the hub can send that a CHECK
 -- refuses is a 400 that loses the weight in the same PATCH:
 --
 --   supply_mv   0..20000   a 12 V RS485 supply with surge headroom.
 --                          smallint holds it.
---   crc_errors  >= 0       a counter since the node powered up; it falls
+--   checksum_errors  >= 0       a counter since the node powered up; it falls
 --                          back to 0 when the node restarts, which is
 --                          itself worth seeing beside uptime.
 --   no_load_g   +/-50 kg   a zero that has drifted 50 kg is a broken cell,
@@ -3966,18 +3966,18 @@ update public.devices
 -- ---------------------------------------------------------------------
 alter table public.device_status
   add column if not exists supply_mv  smallint,
-  add column if not exists crc_errors integer,
+  add column if not exists checksum_errors integer,
   add column if not exists responding boolean,
   add column if not exists no_load_g  integer;
 
 alter table public.device_status
   drop constraint if exists device_status_supply_mv_ck,
-  drop constraint if exists device_status_crc_errors_ck,
+  drop constraint if exists device_status_checksum_errors_ck,
   drop constraint if exists device_status_no_load_ck,
   add  constraint device_status_supply_mv_ck
        check (supply_mv is null or supply_mv between 0 and 20000),
-  add  constraint device_status_crc_errors_ck
-       check (crc_errors is null or crc_errors >= 0),
+  add  constraint device_status_checksum_errors_ck
+       check (checksum_errors is null or checksum_errors >= 0),
   add  constraint device_status_no_load_ck
        check (no_load_g is null or no_load_g between -50000 and 50000);
 
@@ -3985,7 +3985,7 @@ comment on column public.device_status.supply_mv is
   'PLATFORM NODE HEALTH. Supply voltage at the platform''s node, measured by '
   'its own ADC, in mV (0..20000). Not a battery: a platform has none -- the '
   'area''s battery is on its hub''s row. NULL = not measured.';
-comment on column public.device_status.crc_errors is
+comment on column public.device_status.checksum_errors is
   'PLATFORM NODE HEALTH. Frames from this node that failed their checksum '
   'since the node powered up (>= 0); back to 0 when the node restarts. '
   'NULL = not measured.';
@@ -4005,7 +4005,7 @@ comment on column public.device_status.no_load_g is
 -- device_id alone: the hub can no more read a platform's health back than
 -- the platform can read its weight.
 -- ---------------------------------------------------------------------
-grant update (supply_mv, crc_errors, responding, no_load_g)
+grant update (supply_mv, checksum_errors, responding, no_load_g)
   on public.device_status to anon;
 
 -- ---------------------------------------------------------------------
@@ -4154,7 +4154,7 @@ begin
     or (new.sensors_ok      is not null and new.sensors_ok      is distinct from old.sensors_ok)
     or (new.sensors_online  is not null and new.sensors_online  is distinct from old.sensors_online)
     or (new.supply_mv       is not null and new.supply_mv       is distinct from old.supply_mv)
-    or (new.crc_errors      is not null and new.crc_errors      is distinct from old.crc_errors)
+    or (new.checksum_errors      is not null and new.checksum_errors      is distinct from old.checksum_errors)
     or (new.responding      is not null and new.responding      is distinct from old.responding)
     or (new.no_load_g       is not null and new.no_load_g       is distinct from old.no_load_g) then
       raise exception
@@ -4240,7 +4240,7 @@ select d.device_id,
        -- Platform node health. NULL -- never 0 -- on a hub, a stack, and a
        -- platform whose node has not measured it.
        s.supply_mv,
-       s.crc_errors,
+       s.checksum_errors,
        s.responding,
        s.no_load_g
   from public.devices d

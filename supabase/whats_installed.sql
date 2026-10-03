@@ -82,7 +82,7 @@ with present as (
     -- missing other is a PATCH that matches nothing.
     (select count(*) from information_schema.columns
       where table_schema='public' and table_name='device_status'
-        and column_name in ('supply_mv','crc_errors','responding','no_load_g'))
+        and column_name in ('supply_mv','checksum_errors','responding','no_load_g'))
                                                                     as n_health,
     -- kind through to_jsonb(), as below, so this parses before kind exists.
     (select count(*) from public.devices d

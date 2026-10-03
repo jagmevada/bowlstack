@@ -19,7 +19,7 @@ status_events -- see tools/README.md for the contract.
 
 A platform has NO battery: power belongs to its area's HUB (one ESP32 per area,
 mains plus a small backup cell). A platform reports node health instead --
-supply_mv, crc_errors, responding, no_load_g. The simulator also owns two hubs,
+supply_mv, checksum_errors, responding, no_load_g. The simulator also owns two hubs,
 HUB-M and HUB-T, whose rows carry the backup cell and mains state and nothing
 else. HUB-D is the LDC-001 panel's own row and is never written here.
 
@@ -139,7 +139,7 @@ SUPPLY_DROP_MV_PER_HOP = 20
 SUPPLY_NOISE_MV = 10
 # Per minute: a frame failing its checksum is rare -- ~0.45 per 2.5 h service, so
 # most nodes read 0 and a few read 1 by the end of one.
-P_CRC_ERROR = 0.003
+P_CHECKSUM_ERROR = 0.003
 # A load cell's zero creeps a few grams an hour (creep, temperature), as a random
 # walk. no_load_g -- the reading of an EMPTY platform -- is that drift made
 # visible, so the drift is in every reading, not only in no_load_g: an empty
@@ -321,7 +321,7 @@ def load_credentials() -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 BUFFER_STATES = {"ok", "uncalibrated", "untared", "settling", "no_cells", "over_range"}
 STACK_KEYS = {"stack_count", "stack_status", "levels", "sensors_ok", "sensors_online"}
-NODE_KEYS = {"supply_mv", "crc_errors", "responding", "no_load_g"}
+NODE_KEYS = {"supply_mv", "checksum_errors", "responding", "no_load_g"}
 HUB_KEYS = {"boot_id", "uptime_s", "firmware", "mac",
             "battery_mv", "battery_level", "charging", "external_power"}
 BANDS = {"good", "medium", "low", "critical"}
@@ -368,7 +368,7 @@ def check_payload(p: dict, device_id: str | None = None) -> None:
             assert SUPPLY_NOMINAL_MV - 600 <= sv <= SUPPLY_NOMINAL_MV + SUPPLY_NOISE_MV, p
         else:
             assert sv is None, p
-        assert type(p["crc_errors"]) is int and p["crc_errors"] >= 0, p
+        assert type(p["checksum_errors"]) is int and p["checksum_errors"] >= 0, p
         nl = p["no_load_g"]
         # Grams, so never without a calibration.
         assert nl is None or (type(nl) is int and -1000 <= nl <= 1000
@@ -413,7 +413,7 @@ class SimBuffer:
 
     hop: int = 1              # position on the area's daisy chain
     zero_g: float = 0.0       # the cell's zero drift, in every reading
-    crc_errors: int = 0       # since the node's power-up
+    checksum_errors: int = 0       # since the node's power-up
     no_load_g: int | None = None  # the last EMPTY reading since boot
 
     queue: list[tuple] = field(default_factory=list)
@@ -441,7 +441,7 @@ class SimBuffer:
         self.fault = None
         self.confirmed = not self.bowls
         # Both live in the node's RAM: a power-up forgets them.
-        self.crc_errors = 0
+        self.checksum_errors = 0
         self.no_load_g = None
         self.last = None
         self.queue.clear()
@@ -483,8 +483,8 @@ class SimBuffer:
             self.confirmed = True  # an empty platform IS a count, of zero
 
         # A silent node sends no frames, so none can fail their checksum.
-        if self.fault != "no_cells" and self.rng.random() < P_CRC_ERROR * minutes:
-            self.crc_errors += 1
+        if self.fault != "no_cells" and self.rng.random() < P_CHECKSUM_ERROR * minutes:
+            self.checksum_errors += 1
         self.zero_g += self.rng.gauss(0.0, ZERO_WALK_G_PER_SQRT_H * (minutes / 60) ** 0.5)
         self._measure()
         # Only a settled gram reading is a no-load: not while settling or faulted,
@@ -591,7 +591,7 @@ class SimBuffer:
             "supply_mv": SUPPLY_NOMINAL_MV - SUPPLY_DROP_MV_PER_HOP * self.hop
                          + self.rng.randint(-SUPPLY_NOISE_MV, SUPPLY_NOISE_MV)
                          if responding else None,
-            "crc_errors": self.crc_errors,
+            "checksum_errors": self.checksum_errors,
             "responding": responding,
             "no_load_g": self.no_load_g,
         }

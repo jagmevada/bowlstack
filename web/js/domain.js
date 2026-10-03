@@ -116,14 +116,14 @@ export const NODE_MIN_SUPPLY_MV = 4500;
 export const NODE_MAX_DRIFT_G = 500;
 /** A stray few corrupt frames since power-up is cable noise; a hundred is a
  *  connector, cable or termination fault worth a visit before it gets worse. */
-export const NODE_MAX_CRC = 100;
+export const NODE_MAX_CHECKSUM = 100;
 
 /** The four facts as display strings, '—' for each one not measured. */
 export function nodeParts(dev) {
-  const mv = dev.supply_mv, crc = dev.crc_errors, g = dev.no_load_g;
+  const mv = dev.supply_mv, bad = dev.checksum_errors, g = dev.no_load_g;
   return {
     supply: mv == null ? '—' : `${(Number(mv) / 1000).toFixed(2)} V`,
-    crc: crc == null ? '—' : String(crc),
+    checksum: bad == null ? '—' : String(bad),
     link: dev.responding == null ? '—' : dev.responding ? 'responding' : 'not responding',
     drift: g == null ? '—' : `${Number(g) > 0 ? '+' : ''}${g} g`,
   };
@@ -134,7 +134,8 @@ export function nodeHealthList(dev) {
   const p = nodeParts(dev);
   return [
     dev.supply_mv == null ? null : p.supply,
-    dev.crc_errors == null ? null : `${p.crc} CRC`,
+    // "checksum", not "CRC": the RS485 frames carry a plain checksum (owner).
+    dev.checksum_errors == null ? null : `${p.checksum} checksum err`,
     dev.responding == null ? null : p.link,
     dev.no_load_g == null ? null : `no-load ${p.drift}`,
   ].filter(Boolean);
@@ -150,6 +151,16 @@ export function nodeHealthText(dev) {
 export function hubOf(dev, devices) {
   return dev.location == null ? null
     : (devices || []).find(d => isHub(d) && d.location === dev.location) || null;
+}
+
+/** A hub's nodes (ATtiny platforms): MAPPED = every counter scale or buffer in its
+ *  area with a slot -- a spare has none, so it hangs off nothing -- and ACTIVE =
+ *  those reporting, not offline, and not refusing the hub's poll. */
+export function hubNodes(hub, devices) {
+  const mapped = (devices || []).filter(d =>
+    isWeighed(d) && d.location === hub.location && d.food_slot != null);
+  const active = mapped.filter(d => d.reported && !d.offline && d.responding !== false);
+  return { mapped: mapped.length, active: active.length };
 }
 
 // --- stack count trust ----------------------------------------------
@@ -693,11 +704,11 @@ export function deviceSeverity(dev) {
       rank = Math.max(rank, 45);
       reasons.push(`Zero drifted — reads ${nodeParts(dev).drift} empty`);
     }
-    if (dev.crc_errors != null && dev.crc_errors >= NODE_MAX_CRC) {
+    if (dev.checksum_errors != null && dev.checksum_errors >= NODE_MAX_CHECKSUM) {
       // Below the rest: frames that fail the check are dropped, so the
       // readings that do arrive are still good -- there are just fewer.
       rank = Math.max(rank, 30);
-      reasons.push(`${dev.crc_errors} checksum errors since power-up`);
+      reasons.push(`${dev.checksum_errors} checksum errors since power-up`);
     }
     if (dev.weight_state === 'no_cells') {
       rank = Math.max(rank, 90); reasons.push('No load cell is answering');

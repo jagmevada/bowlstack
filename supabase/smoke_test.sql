@@ -1585,7 +1585,7 @@ begin
   begin
     execute 'set local role anon';
     update public.device_status
-       set supply_mv = 5020, crc_errors = 0, responding = true, no_load_g = 0
+       set supply_mv = 5020, checksum_errors = 0, responding = true, no_load_g = 0
      where device_id = BUF1;
     get diagnostics v_n = row_count;
     if v_n <> 1 then st := 'node-health PATCH matched ' || v_n || ' rows, want 1'; end if;
@@ -1594,12 +1594,12 @@ begin
   end;
   execute 'reset role';
   if st = 'OK' then
-    select supply_mv, crc_errors, no_load_g, responding into v_w, v_bg, v_cg, v_part
+    select supply_mv, checksum_errors, no_load_g, responding into v_w, v_bg, v_cg, v_part
       from public.device_overview where device_id = BUF1;
     if v_w is distinct from 5020 or v_bg is distinct from 0
        or v_cg is distinct from 0 or v_part is not true then
       st := 'BUF1 supply_mv=' || coalesce(v_w::text,'null')
-         || ' crc_errors=' || coalesce(v_bg::text,'null')
+         || ' checksum_errors=' || coalesce(v_bg::text,'null')
          || ' no_load_g=' || coalesce(v_cg::text,'null')
          || ' responding=' || coalesce(v_part::text,'null') || ', want 5020/0/0/true';
     end if;
@@ -1607,7 +1607,7 @@ begin
   if st = 'OK' then
     select count(*) into v_n from public.device_overview
      where device_id = BUF2
-       and supply_mv is null and crc_errors is null
+       and supply_mv is null and checksum_errors is null
        and responding is null and no_load_g is null;
     if v_n <> 1 then st := 'BUF2 never reported node health, yet it is not NULL'; end if;
   end if;
@@ -1620,8 +1620,8 @@ begin
   end if;
   if st = 'OK' then
     begin
-      update public.device_status set crc_errors = -1 where device_id = BUF1;
-      st := 'crc_errors -1 was ACCEPTED';
+      update public.device_status set checksum_errors = -1 where device_id = BUF1;
+      st := 'checksum_errors -1 was ACCEPTED';
     exception when check_violation then null;
     end;
   end if;

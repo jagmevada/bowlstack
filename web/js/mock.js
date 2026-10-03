@@ -163,6 +163,10 @@ Object.keys(HUBS).forEach((device_id, k) => {
     firmware: 'V0.1 261004', mac: `24:0A:C4:12:34:5${k}`,
   });
 });
+// A platform's row carries its HUB'S MAC -- an ATtiny node has none of its own,
+// and the hub writes every row it hosts. The per-device MACs above stay only for
+// the stack era's own boards.
+const HUB_MAC = Object.fromEntries(devices.filter(d => d.kind === 'hub').map(d => [d.location, d.mac]));
 
 // --- node health -------------------------------------------------------
 //
@@ -179,14 +183,14 @@ for (const loc of ['D', 'M', 'T']) {
   devices.filter(d => d.location === loc && d.food_slot != null)
     .forEach((d, k) => chainPos.set(d.device_id, k));
 }
-const NO_NODE = { supply_mv: null, crc_errors: null, responding: null, no_load_g: null };
+const NO_NODE = { supply_mv: null, checksum_errors: null, responding: null, no_load_g: null };
 
 function nodeOf(dev) {
   if (!chainPos.has(dev.device_id)) return NO_NODE;   // a hub, or a reserved unit
   const i2c = I2C_NODES.has(dev.device_id);
   return {
     supply_mv: i2c ? null : 5050 - 9 * chainPos.get(dev.device_id),
-    crc_errors: i2c ? null : (dev.i * 7) % 5,
+    checksum_errors: i2c ? null : (dev.i * 7) % 5,
     // A platform whose cell is not answering is not answering the hub either --
     // the panel firmware sends responding = (any cell converting).
     responding: dev.device_id !== NOT_RESPONDING && dev.device_id !== NO_CELLS,
@@ -399,7 +403,8 @@ function deviceOverview(at = Date.now()) {
       stale_for: offline ? '00:20:00' : '00:00:20',
       offline, awaiting_deployment: false,
       uptime_s: 3120 + Math.floor(elapsed()),
-      firmware: dev.firmware, mac: dev.mac,
+      firmware: dev.firmware,
+      mac: dev.kind === 'hub' || dev.food_slot == null ? dev.mac : HUB_MAC[dev.location] ?? dev.mac,
       // A hub measures nothing; it carries the area's battery instead.
       ...(dev.kind === 'hub' ? { ...unread, ...HUBS[dev.device_id] } : reading(dev, at)),
       ...nodeOf(dev),

@@ -18,7 +18,7 @@
 import { h, empty, levelColumn, cellColumn, banner, batteryBar } from '../ui.js';
 import {
   compareDevices, deviceSeverity, deviceStack, deviceGlyph, deviceWeight, isWeighed,
-  cellsTotal, isFault, isDegraded, isHub, isBatteryWarn, nodeHealthText, nodeHealthList,
+  cellsTotal, isFault, isDegraded, isHub, isBatteryWarn, nodeHealthText, nodeHealthList, hubNodes,
   deviceOffline, fmtRelative,
   powerState,
 } from '../domain.js';
@@ -149,7 +149,7 @@ export function renderHealth(state, params) {
 
   const section = (title, devs, note, muted = false) => {
     const list = h('div', { class: 'dev-list compact' });
-    for (const d of devs) list.append(deviceRow(d, state.power));
+    for (const d of devs) list.append(deviceRow(d, state.power, state.devices));
     return h('div', { class: 'section' },
       h('div', { class: 'section-head' },
         h('h2', muted ? { class: 'muted' } : {}, title),
@@ -200,9 +200,12 @@ function miniLevels(levels) {
 // `power` threaded in rather than reached for: this is called from two
 // places and neither had state in scope, which is why the chip here kept
 // the old behaviour after the Power card was fixed.
-function deviceRow(d, power) {
+function deviceRow(d, power, devices) {
   const sev = deviceSeverity(d);
   const hub = isHub(d);
+  // How many of its nodes a hub has, beside its power: a hub on mains with half
+  // its platforms silent is the thing to walk over to.
+  const nodes = hub ? hubNodes(d, devices) : null;
   const scale = isWeighed(d);   // a counter scale or a buffer platform
   // Same six columns whichever product this is, so the roster stays a single
   // scannable grid -- only what column 4 and 5 CONTAIN differs. A scale that
@@ -227,6 +230,7 @@ function deviceRow(d, power) {
     sev.reasons.join(' · ') || 'Healthy',
     d.updated_at ? `updated ${fmtRelative(d.updated_at)}` : 'never reported',
     d.awaiting_deployment ? null : battWord,
+    nodes ? `${nodes.active} of ${nodes.mapped} nodes active` : null,
     d.firmware ? `fw ${d.firmware}` : null,
   ].filter(Boolean).join(' · ');
 
@@ -247,7 +251,7 @@ function deviceRow(d, power) {
     // Red only where there IS a last value to redden — the fault (`!`) and
     // never-reported (`—`) renderings are not counts, so the `na` grey owns
     // them and the offline red must not touch them.
-    hub ? h('span', { class: 'dev-count na' }, pw.word) : h('span', {
+    hub ? h('span', { class: 'dev-count na' }, `${pw.word} · ${nodes.active}/${nodes.mapped} nodes`) : h('span', {
       class: 'dev-count'
         + (reading.kind === 'count' || reading.kind === 'bound'
            || reading.kind === 'weight'

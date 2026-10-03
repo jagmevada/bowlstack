@@ -20,10 +20,15 @@ import {
   powerState, nodeHealthText,
 } from '../domain.js';
 
-export function renderStock(state) {
+export function renderStock(state, params) {
   const frag = document.createDocumentFragment();
   const { slots, devices } = state;
   const { inService, meal, tz } = serviceState(devices);
+  // ONE HALL, when Master's hall line opened this page: ?area=D, with &slot=3
+  // marking the card the tap came from. Anything else shows every hall.
+  const only = params && SERVING_LOCATIONS.includes(params.get('area')) ? params.get('area') : null;
+  const markSlot = only ? Number(params.get('slot')) || null : null;
+  if (only) frag.append(h('a', { class: 'back', href: '#/stock' }, '← All areas'));
 
   const byPosition = new Map();
   for (const d of devices) {
@@ -85,6 +90,7 @@ export function renderStock(state) {
   }
 
   for (const loc of SERVING_LOCATIONS) {
+    if (only && loc !== only) continue;
     const rows = serving
       .filter(sl => sl.location === loc)
       .sort((a, b) => a.food_slot - b.food_slot);
@@ -98,9 +104,11 @@ export function renderStock(state) {
     // the status palette (red/green/amber carry meaning; these carry place).
     const grid = h('div', { class: 'slot-grid' });
     for (const sl of rows) {
-      grid.append(slotCard(state.power, sl,
+      const card = slotCard(state.power, sl,
         byPosition.get(`${loc}|${sl.food_slot}`) || [],
-        inService, tz, state.template || []));
+        inService, tz, state.template || []);
+      if (sl.food_slot === markSlot) card.classList.add('is-target');
+      grid.append(card);
     }
     frag.append(h('section', { class: `area area-${loc}` },
       h('div', { class: 'area-head' },

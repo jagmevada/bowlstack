@@ -39,7 +39,7 @@ The rollout order is:
 Before step 3, the database rejects this simulator's writes to `stack` rows. The
 `weight_samples` kind guard refuses them, and so does the device_status kind
 guard. Before step 1 the new columns do not exist at all. Before step 4 the hub
-rows do not exist (their PATCH matches 0 rows) and `supply_mv`, `crc_errors`,
+rows do not exist (their PATCH matches 0 rows) and `supply_mv`, `checksum_errors`,
 `responding` and `no_load_g` are unknown columns, so every platform PATCH fails
 too. Each of these shows up as an `ERROR` line with a pointer back here, and the
 run exits non-zero.
@@ -99,7 +99,7 @@ Two calls, the same ones the firmware makes, and nothing else:
   - Node health:
     - `supply_mv`: the 5 V rail measured at the node. About 5000 mV, minus
       20 mV per hop along the area's daisy chain, ±10 mV.
-    - `crc_errors`: frames that failed their checksum since the node powered
+    - `checksum_errors`: frames that failed their checksum since the node powered
       up. Mostly 0, occasionally 1. Back to 0 on every reboot.
     - `responding`: `false` exactly while the platform is in `no_cells`.
     - `no_load_g`: the platform's reading the last time it was settled,

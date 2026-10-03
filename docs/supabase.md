@@ -401,13 +401,13 @@ poll says about the node under each scale or buffer:
 | Column | Meaning | Range |
 | --- | --- | --- |
 | `supply_mv` | supply voltage at the node, from its own ADC | 0 … 20 000 mV |
-| `crc_errors` | frames that failed their checksum since the node powered up | ≥ 0 |
+| `checksum_errors` | frames that failed their checksum since the node powered up | ≥ 0 |
 | `responding` | did the node answer the hub's last health poll | — |
 | `no_load_g` | what the platform read when last empty — should sit near 0; drift shows here first | −50 000 … 50 000 g |
 
 All four are NULL = **not measured**, never 0: today's platforms are wired
 straight to the hub and measure none of them. A 0 is a reading. The CHECKs
-are named (`device_status_supply_mv_ck`, `_crc_errors_ck`, `_no_load_ck`),
+are named (`device_status_supply_mv_ck`, `_checksum_errors_ck`, `_no_load_ck`),
 anon has UPDATE on all four and SELECT on none, and `device_overview` appends
 them after `gross_g`. A write from the hub stamps the platform's `updated_at`
 like any PATCH.
