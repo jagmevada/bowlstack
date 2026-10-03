@@ -202,6 +202,29 @@ struct Persisted {
   float typicalFullG = 15000.0f;
 };
 
+// --- the counter's empty-vessel rule -------------------------------------------------
+// The counter holds at most ONE serving vessel, so its offset is subtracted only while
+// the platform plainly carries one: a 100 g spoon reads 100 g, not -2.4 kg, and a
+// 2.5 kg vessel holding 150 g reads 150 g. Here rather than in each consumer because
+// the panel row, the uplink's weight_g and its plausibility band must all agree.
+//
+// HALF THE VESSEL, NOT THE WHOLE OF IT. Vessels vary: "if heavier than the offset"
+// would show an empty 2.4 kg vessel as 2.4 kg of food -- the one reading that sends
+// nobody to refill a counter that needs it. At half, that vessel reads -0.1 kg,
+// visibly impossible, and nothing a person puts down without a vessel comes near
+// 1.25 kg. Food left in a vessel never takes it below half, so the rule does not
+// flicker as a dish empties.
+//
+// NOT CLAMPED, for scale_telemetry.cpp's reason: a clamp turns "lighter vessel than
+// the offset" into "empty". Stateless, so a reboot with a vessel on reads correctly.
+// The buffers do not use it: they count bowls by the size of each jump (BowlTracker).
+inline bool vesselOnPlatform(float grossG, float vesselG) {
+  return vesselG > 0.0f && grossG >= vesselG * 0.5f;
+}
+inline float netOfVessel(float grossG, float vesselG) {
+  return vesselOnPlatform(grossG, vesselG) ? grossG - vesselG : grossG;
+}
+
 class LoadScale {
  public:
   void configure(Role role, const FilterConfig &f, const BowlConfig &b);

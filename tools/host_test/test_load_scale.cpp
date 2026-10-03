@@ -433,8 +433,23 @@ static void commits() {
   CHECK(g.s.zero() == Commit::NotConverting, "zero refused while offline");
 }
 
+// The counter's vessel rule, in the cases the kitchen described.
+static void vesselRule() {
+  section("vessel rule (counter)");
+  const float V = 2500;
+  CHECK(netOfVessel(0, V) == 0, "empty platform reads 0, not -2.5 kg");
+  CHECK(netOfVessel(100, V) == 100, "a 100 g item with no vessel reads 100 g");
+  CHECK(netOfVessel(2650, V) == 150, "vessel + 150 g reads 150 g");
+  CHECK(netOfVessel(2600, V) == 100, "a dish run down to 100 g residue reads 100 g");
+  CHECK(netOfVessel(2400, V) == -100, "an empty LIGHTER vessel reads -100 g, not 2.4 kg of food");
+  CHECK(netOfVessel(12500, V) == 10000, "a full dish reads its food");
+  CHECK(!vesselOnPlatform(1249, V) && vesselOnPlatform(1250, V), "the line is half the vessel");
+  CHECK(netOfVessel(2650, 0) == 2650 && !vesselOnPlatform(2650, 0), "offset off: gross untouched");
+}
+
 int main() {
   std::printf("load_scale host tests\n");
+  vesselRule();
   filterStepResponse();
   filterNoFalseSteps();
   singleLoad();

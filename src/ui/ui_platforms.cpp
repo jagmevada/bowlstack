@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "load_scale.h"
+
 namespace ui {
 
 void platformFromCounter(const ScaleView &sc, const char *label, PlatformRow &r) {
@@ -42,8 +44,8 @@ void platformFromCounter(const ScaleView &sc, const char *label, PlatformRow &r)
     return;
   }
   r.kgKnown = true;
-  // NET OF THE EMPTY VESSEL, as the counter's total always was on this panel.
-  r.grams = sc.totalGrams - sc.vesselOffsetG;
+  // NET OF THE EMPTY VESSEL -- while one is on the platform (see netOfVessel()).
+  r.grams = lscale::netOfVessel(sc.totalGrams, sc.vesselOffsetG);
   if (sc.online < CELLS) {
     // The cells that ARE working give a genuine lower bound -- a missing corner
     // cannot carry a negative share -- so it is added in, and flagged.

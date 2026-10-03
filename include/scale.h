@@ -216,7 +216,8 @@ bool toggleShowCells();
 enum class AutoTare : uint8_t { Waiting, Observing, Done, GaveUp, Off };
 
 // The empty vessel's mass, subtracted from the DISPLAYED and REPORTED figure
-// only. Cycles off -> 2.0 -> 2.5 -> 3.0 -> 3.5 kg; persisted to NVS.
+// only, and only while a vessel is on the platform -- lscale::netOfVessel() in
+// load_scale.h. Typed on the Vessel offset page; persisted to NVS.
 float vesselOffsetG();
 // Zero switches it off. Queued and written on the scale task, never here.
 float setVesselOffset(float grams);
@@ -297,8 +298,9 @@ struct Snapshot {
   bool platformZeroed;
 
   // The mass of the empty serving vessel, subtracted from what is DISPLAYED and
-  // REPORTED. 0 means the feature is off. Never applied to taring or to the
-  // per-cell figures -- see the note where it is used.
+  // REPORTED while one is on the platform (lscale::netOfVessel). 0 means the
+  // feature is off. Never applied to taring or to the per-cell figures -- see
+  // the note where it is used.
   float vesselOffsetG;
   bool overRange;  // at least one cell is saturated -- the total is not a weight
 

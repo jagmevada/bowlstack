@@ -8,6 +8,7 @@
 #include "bringup_wifi.h"
 #include "config.h"
 #include "inputs.h"
+#include "load_scale.h"
 #include "uplink.h"
 #include "version.h"
 
@@ -281,7 +282,7 @@ const char *weightState(const scale::Snapshot &s) {
   // CHECK on it. Testing the gross let an out-of-band net through to PostgREST,
   // which answers 400 -- and a rejected PATCH takes the whole row with it,
   // including the state that would have explained the reading.
-  const float g = s.totalGrams - s.vesselOffsetG;
+  const float g = lscale::netOfVessel(s.totalGrams, s.vesselOffsetG);
   if (!(g >= (float)config::WEIGHT_PUBLISH_MIN_G &&
         g <= (float)config::WEIGHT_PUBLISH_MAX_G)) {
     // Written as !(in range) rather than (out of range) so a NaN -- which
@@ -631,7 +632,7 @@ void loop(const scale::Snapshot &s, uint32_t uptimeSec, uint16_t batteryMv,
   // which now test the net, so it reports over_range with weight_g null rather
   // than a fabricated zero.
   const int32_t weightG =
-      haveWeight ? (int32_t)lroundf(s.totalGrams - s.vesselOffsetG) : 0;
+      haveWeight ? (int32_t)lroundf(lscale::netOfVessel(s.totalGrams, s.vesselOffsetG)) : 0;
 
   // --- is there news? ------------------------------------------------------
   // Deliberately NOT "has anything changed". The weight changes on every
