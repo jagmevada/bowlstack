@@ -312,6 +312,26 @@ static void clampAtMax() {
   CHECK(g.count(BowlEvent::Clamped) == 1, "one Clamped event (got %d)", g.count(BowlEvent::Clamped));
 }
 
+static void staleCountIsNotOver() {
+  section("bowls: stepping off reads 'settling', not over_range, until the count catches up");
+  // Found on the bench: a 65 kg person on B1 counted as 4 bowls; stepping off left the
+  // count at 4 for the 5 s an unload must hold, so food read 0 - 4 x 2.5 = -10 kg, under
+  // the -5 kg floor -- and the panel said OVER for a platform that was simply empty.
+  Rig g;
+  g.commission();
+  g.gross = 65000;
+  g.run(8000);
+  CHECK(g.r().bowls == 4, "65 kg counted as 4 bowls (got %u)", g.r().bowls);
+  g.gross = 0;
+  g.run(2000);  // off, but not yet held the 5 s an unload needs
+  CHECK(g.r().state == WState::Settling && !g.r().kgKnown, "stale count -> settling, no weight (%s)",
+        wstateToken(g.r().state));
+  CHECK(std::fabs(g.r().grossG) < 100, "the gross still reads the empty platform (%.0f g)", g.r().grossG);
+  g.run(8000);
+  CHECK(g.r().state == WState::Ok && g.r().bowls == 0, "then ok, 0 bowls (%s, %u)", wstateToken(g.r().state),
+        g.r().bowls);
+}
+
 static void counterRole() {
   section("counter role: no bowl tracking, food == gross");
   Rig g(Role::Counter);
@@ -464,6 +484,7 @@ int main() {
   inconsistentCount();
   operatorCorrectionIsRechecked();
   clampAtMax();
+  staleCountIsNotOver();
   counterRole();
   stateLadder();
   commits();

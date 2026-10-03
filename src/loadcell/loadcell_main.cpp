@@ -2,7 +2,7 @@
 // Bowlstack :: load-cell station -- Waveshare ESP32-S3-Touch-LCD-2,
 //              3x NAU7802 behind a TCA9548A
 //
-// Firmware: V1.20 261003
+// Firmware: V1.21 261003
 //
 // Also carries the 200 kg buffer-stock cell on its own bus (IO21/IO16) -- see
 // buffer_bank.h. It is a separate instrument: nothing below sums it into the
@@ -533,9 +533,13 @@ void publishScale(uint32_t nowMs) {
       const ui::Cell cell = r.link == lscale::Link::Online
                                 ? ui::Cell::Online
                                 : (r.link == lscale::Link::Warming ? ui::Cell::Warming : ui::Cell::Offline);
+      // Settling with food under the floor is the core saying the BOWL COUNT is out of
+      // date (load_scale.cpp), not that the platform is moving -- the gross is good.
+      const bool staleCount = r.state == lscale::WState::Settling && r.foodG < 0.0f;
       // The short reason, in the panel's words, in the core's ladder order.
       const char *why = "";
       if (r.link == lscale::Link::Offline) why = "offline";
+      else if (staleCount) why = "bowls?";
       else if (r.state == lscale::WState::Settling) why = "settling";
       else if (r.state == lscale::WState::OverRange) why = "OVER";
       else if (r.state == lscale::WState::Uncalibrated) why = "uncal";
@@ -548,7 +552,9 @@ void publishScale(uint32_t nowMs) {
       row.role = ui::PlatformRole::Buffer;
       snprintf(row.label, sizeof(row.label), "%.3s", b.cfg.label);
       row.state = cell;
-      row.kgKnown = r.kgKnown;
+      // With the correction off the row is the gross, which a stale count does not touch.
+      const bool kgKnown = r.kgKnown || (!sn.vesselOn && staleCount);
+      row.kgKnown = kgKnown;
       // THE VESSEL CORRECTION SWITCH (Settings, scale::vesselOn()): food -- gross less
       // bowls x dry mass -- while on, the gross load while off, as C1 does.
       row.grams = sn.vesselOn ? r.foodG : r.grossG;
@@ -567,7 +573,7 @@ void publishScale(uint32_t nowMs) {
       snprintf(info.label, sizeof(info.label), "%.3s", b.cfg.label);
       snprintf(info.uid, sizeof(info.uid), "%.11s", b.cfg.uid);
       info.state = cell;
-      info.kgKnown = r.kgKnown;
+      info.kgKnown = kgKnown;
       info.foodG = r.foodG;
       info.grossG = r.grossG;
       info.bowls = r.bowls;

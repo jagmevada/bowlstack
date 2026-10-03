@@ -409,10 +409,20 @@ Reading LoadScale::reading() const {
   }
   r.grossG = (float)(r.counts - zero_) / cpg_;
   r.foodG = (role_ == Role::Buffer) ? r.grossG - (float)r.bowls * bc_.dryG : r.grossG;
-  // A figure outside the database's rails is not a weight to publish: report the
-  // ceiling as over_range instead of letting a CHECK reject the whole row.
-  if (r.foodG < fc_.railMinG || r.foodG > fc_.railMaxG) {
+  // A PLATFORM outside the database's rails is not a weight to publish: report it as
+  // over_range instead of letting a CHECK reject the whole row. The GROSS, because that
+  // is what the cell is carrying -- testing the food put "OVER" on an empty platform.
+  if (r.grossG < fc_.railMinG || r.grossG > fc_.railMaxG) {
     r.state = WState::OverRange;
+    return r;
+  }
+  // FOOD UNDER THE FLOOR WITH THE GROSS INSIDE IT IS THE BOWL COUNT OUT OF DATE -- most
+  // often an unload that has not yet held the 5 s it must (a 65 kg person stepping off
+  // "4 bowls" reads -10 kg of food for those seconds). Not a weight to publish, and not
+  // "over" either: settling, until the tracker catches up or the platform reads empty.
+  // The gross is still filled in; the panel shows it when the vessel correction is off.
+  if (r.foodG < fc_.railMinG) {
+    r.state = WState::Settling;
     return r;
   }
   r.state = WState::Ok;
