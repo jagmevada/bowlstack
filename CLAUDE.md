@@ -134,6 +134,58 @@ touches type sizes, colour or touch targets.
 
 ---
 
+## Dashboard and SQL development: iterate against the LOCAL Supabase
+
+**The same rule for the web and the database: local is the loop, live is the
+check.** Live (`foodcount`) is production -- every SQL write there, every
+`fleet_sim.py` run without the env vars below, and every push touching `web/**`
+is a deliberate step that needs the owner's go. Everything else happens here:
+
+```
+bash tools/localdb.sh up      # Docker stack + every repo SQL file in order + smoke_test
+bash tools/localdb.sh load    # rebuild the schema after editing supabase/*.sql (~1 min)
+bash tools/localdb.sh env     # URL + anon key for fleet_sim and the browser
+bash tools/localdb.sh down    # stop the containers
+
+# simulated fleet INTO LOCAL (one day of history, then live rounds every 20 s)
+. tools/localdb/.env
+BOWLSTACK_SUPABASE_URL=$API_URL BOWLSTACK_ANON_KEY=$ANON_KEY \
+  ~/.platformio/penv/Scripts/python.exe tools/fleet_sim.py --backfill 1 --always
+BOWLSTACK_SUPABASE_URL=$API_URL BOWLSTACK_ANON_KEY=$ANON_KEY \
+  ~/.platformio/penv/Scripts/python.exe -u tools/fleet_sim.py --live --always
+
+# the dashboard, served from the working tree
+cd web && ~/.platformio/penv/Scripts/python.exe -m http.server 8765 --bind 127.0.0.1
+```
+
+Then in the browser console at `http://127.0.0.1:8765/`, paste the
+`localStorage.setItem('bowlstack.connection', ...)` line `localdb.sh env` prints,
+and **reload** -- a hash-only navigation does not re-read it, which is how a
+"local" check once quietly read live. `localStorage.removeItem('bowlstack.connection')`
+plus a reload goes back to live. Studio is at `http://127.0.0.1:54323`.
+
+| | |
+| --- | --- |
+| what it is | built from THIS REPO'S SQL, in the order `whats_installed.sql` gives, plus the buffer cut-over -- live's shape, none of live's data |
+| what it is not | a copy of live: menus are `seed_meal_mapping.sql`, readings come from `fleet_sim.py`; HUB-D, LDC-001 and BWL-001..003 stay silent unless a panel is pointed at it |
+| service windows | the repo's defaults; at night set breakfast early (`update public.service_windows set starts_at='01:00' where id=1;` via `docker exec -i supabase_db_bowlstack-local psql ...`) or the dashboard idles "outside service" |
+| reading rows back | as `postgres` through that `docker exec`, not through PostgREST: `anon` cannot SELECT `device_status`, by design |
+| a firmware payload | test its exact JSON with `curl -X PATCH` against `$API_URL/rest/v1/device_status?device_id=eq.X` before flashing -- a body the CHECKs refuse silences the row. Keep `uptime_s` rising within one `boot_id`: the stamp trigger silently ignores a PATCH that goes backwards (0 rows, not an error) |
+
+**It earns its keep beyond speed.** Fingerprinting live's functions against the
+local build (md5 of `prosrc` / `pg_get_viewdef`, comments stripped) found a stale
+`meal_template_apply` in `weekly_menu_and_offline.sql` on its first run -- a file
+that silently reverted a migration when run in the documented order. Do that
+comparison before any live migration, and dry-run the migration locally first.
+
+Gotchas: Docker is not on Git Bash's PATH (`localdb.sh` adds
+`/c/Program Files/Docker/Docker/resources/bin`); `supabase db query --local -f`
+cannot run a multi-statement file (prepared statement), so the loader uses `psql`
+inside the `supabase_db_bowlstack-local` container; the web smoke tests
+(`cd web/test && node smoke.mjs`) and `?mock=1` still need no database at all.
+
+---
+
 ## Build
 
 `pio` is **not on PATH** here — use `~/.platformio/penv/Scripts/pio.exe`.
