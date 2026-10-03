@@ -17,6 +17,12 @@ bowls x 2500 g), gross_g is everything on the platform, bowls/bowls_confirmed is
 the bowl tracker. It never sends a bowl-stack column and never writes
 status_events -- see tools/README.md for the contract.
 
+A platform has NO battery: power belongs to its area's HUB (one ESP32 per area,
+mains plus a small backup cell). A platform reports node health instead --
+supply_mv, crc_errors, responding, no_load_g. The simulator also owns two hubs,
+HUB-M and HUB-T, whose rows carry the backup cell and mains state and nothing
+else. HUB-D is the LDC-001 panel's own row and is never written here.
+
 WHAT IT DELIBERATELY DOES NOT DO
 --------------------------------
 It does not bypass the schema. Every write goes through PostgREST with the anon
@@ -28,10 +34,13 @@ one is refused (the JWT's role claim is decoded, not guessed at).
 It does not write to `devices`, and it never writes an id somebody else owns:
 BWL-001..003 belong to the LDC-001 panel's buffer bank, and BWL-025..032 are
 reserved (writing one permanently retires it from awaiting_deployment). Those
-ids are refused even when passed with --ids.
+ids are refused even when passed with --ids. Of the hubs it writes only HUB-M and
+HUB-T, which are constants, not something --ids can name.
 
 It must only run AFTER supabase/cutover_buffers.sql: before that the BWL rows are
-still kind 'stack' and the database rejects every buffer write to them.
+still kind 'stack' and the database rejects every buffer write to them. And AFTER
+supabase/migrate_hubs.sql: before that the HUB rows do not exist and the
+node-health columns are unknown, so every PATCH fails.
 
 CLOCKS
 ------
@@ -78,6 +87,11 @@ DEFAULT_IDS = [f"BWL-{i:03d}" for i in range(4, 25)]
 PANEL_IDS = {"BWL-001", "BWL-002", "BWL-003"}  # buffer_bank.cpp default slots B1..B3
 RESERVED_IDS = {f"BWL-{i:03d}" for i in range(25, 33)}
 
+# The hubs this simulator owns. HUB-D is NOT one: the LDC-001 panel is area D's hub
+# and PATCHes it itself (scale_telemetry.cpp patchHub()).
+HUB_IDS = ("HUB-M", "HUB-T")
+HUB_FIRMWARE = "sim-hub 1.0"
+
 # --- the platform -------------------------------------------------------------
 # One full bowl: 14-18 kg of food in a 2.5 kg bowl (owner, 2026-10-03) -- the same
 # figures include/load_scale.h's BowlConfig is built on.
@@ -107,6 +121,46 @@ P_NO_CELLS = 0.002
 P_OVER_RANGE = 0.001
 P_FAULT_CLEARS = 0.15
 
+# --- node health ----------------------------------------------------------------
+# Each area's platforms hang off its hub on ONE daisy chain, in assign_devices.sql's
+# order, and the 5 V rail is fed from the hub end -- so every hop adds cable drop
+# and the far end of D's fourteen-node chain reads lowest. That gradient is what an
+# undersized trunk looks like in the field, which is what supply_mv exists to catch.
+# ponytail: copied from assign_devices.sql, not read from the database; a
+# reassignment there only skews this gradient.
+AREA_CHAINS = {
+    "D": [*range(1, 13), 21, 22],
+    "M": [13, 14, 15, 16, 23],
+    "T": [17, 18, 19, 20, 24],
+}
+CHAIN_HOP = {f"BWL-{n:03d}": i + 1 for ns in AREA_CHAINS.values() for i, n in enumerate(ns)}
+SUPPLY_NOMINAL_MV = 5000
+SUPPLY_DROP_MV_PER_HOP = 20
+SUPPLY_NOISE_MV = 10
+# Per minute: a frame failing its checksum is rare -- ~0.45 per 2.5 h service, so
+# most nodes read 0 and a few read 1 by the end of one.
+P_CRC_ERROR = 0.003
+# A load cell's zero creeps a few grams an hour (creep, temperature), as a random
+# walk. no_load_g -- the reading of an EMPTY platform -- is that drift made
+# visible, so the drift is in every reading, not only in no_load_g: an empty
+# BWL-014 really does claim ~600 g of food, which is why the warning matters.
+# It STARTS drifted rather than ramping because every run starts from the seed: a
+# ramp would snap back to zero between a backfill and the live run after it.
+ZERO_WALK_G_PER_SQRT_H = 3.0
+ZERO_START_G = (-15.0, 15.0)
+DRIFT_ID = "BWL-014"
+DRIFT_G = 600.0
+
+# --- the hub's mains and backup cell ------------------------------------------
+# Mains is there almost always; a cut of a few minutes is what puts a hub on its
+# backup cell, the state the dashboard has to show. ~1 cut per 2 h per hub live;
+# a backfill allows at most one per day (cut_budget).
+P_MAINS_CUT = 0.008  # per minute
+MAINS_CUT_MIN = (2.0, 6.0)
+HUB_FULL_MV = (4130, 4159)
+HUB_DRAIN_MV_PER_MIN = 10.0
+HUB_CHARGE_MV_PER_MIN = 5.0
+
 # --- the firmware's cadence (src/loadcell/scale_telemetry.cpp) ----------------
 STEP_S = 5               # one observation; equal to the 5 s history floor
 LIVE_INTERVAL_S = 20     # the heartbeat
@@ -133,7 +187,8 @@ SERVICE_WINDOWS = [
 ]
 
 # ---------------------------------------------------------------------------
-# Battery model -- mirrors include/battery_soc.h and the config.h thresholds.
+# Battery model (the HUB's backup cell) -- mirrors include/battery_soc.h and the
+# config.h thresholds.
 #
 # Duplicated rather than approximated on purpose. The front-end consumes BANDS,
 # so simulated data is only useful if the bands move the way real ones do --
@@ -266,9 +321,27 @@ def load_credentials() -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 BUFFER_STATES = {"ok", "uncalibrated", "untared", "settling", "no_cells", "over_range"}
 STACK_KEYS = {"stack_count", "stack_status", "levels", "sensors_ok", "sensors_online"}
+NODE_KEYS = {"supply_mv", "crc_errors", "responding", "no_load_g"}
+HUB_KEYS = {"boot_id", "uptime_s", "firmware", "mac",
+            "battery_mv", "battery_level", "charging", "external_power"}
+BANDS = {"good", "medium", "low", "critical"}
 
 
-def check_payload(p: dict) -> None:
+def check_payload(p: dict, device_id: str | None = None) -> None:
+    """`device_id` names a PATCH's row; a weight_samples row carries its own."""
+    dev = device_id or p["device_id"]
+    if dev in HUB_IDS:
+        # The board's power and nothing else. An EXACT key set, so a weight,
+        # stack or node-health column cannot creep in, and a weight_samples row
+        # (device_id, seq, age_ms) can never pass as a hub's.
+        assert p.keys() == HUB_KEYS, p
+        assert 0 <= p["battery_mv"] <= BATTERY_PUBLISH_MAX_MV, p
+        assert p["battery_level"] in BANDS, p
+        assert type(p["charging"]) is bool and p["external_power"] is p["charging"], p
+        return
+    assert not dev.startswith("HUB-"), dev  # HUB-D is the panel's
+
+    sample = "age_ms" in p
     ok = p["weight_state"] == "ok"
     assert p["weight_state"] in BUFFER_STATES, p  # a buffer never sends cells_partial
     for k in ("weight_g", "gross_g", "bowls"):
@@ -276,9 +349,30 @@ def check_payload(p: dict) -> None:
     assert (p["bowls_confirmed"] is None) == (p["bowls"] is None), p
     assert not (STACK_KEYS & p.keys()), p
     assert p["manual_fill_pct"] is None and p.get("manual_fill_age_s") is None, p
-    assert p.get("charging") is None, p
     assert p["cells_online"] in (0, 1), p
-    assert 0 <= p["battery_mv"] <= BATTERY_PUBLISH_MAX_MV, p
+    # No power on a platform, as EXPLICIT nulls: a PATCH that omits a column
+    # keeps its old value. weight_samples has only the first two columns.
+    for k in ("battery_mv", "battery_level") + (() if sample else ("charging", "external_power")):
+        assert k in p and p[k] is None, (k, p)
+    if sample:
+        # Node health lives on device_status only.
+        assert not ((NODE_KEYS | {"charging", "external_power"}) & p.keys()), p
+    else:
+        assert NODE_KEYS <= p.keys(), p
+        responding = p["weight_state"] != "no_cells"
+        assert p["responding"] is responding, p
+        sv = p["supply_mv"]
+        # Measured AT the node, so a silent node has none to give.
+        if responding:
+            assert type(sv) is int, p
+            assert SUPPLY_NOMINAL_MV - 600 <= sv <= SUPPLY_NOMINAL_MV + SUPPLY_NOISE_MV, p
+        else:
+            assert sv is None, p
+        assert type(p["crc_errors"]) is int and p["crc_errors"] >= 0, p
+        nl = p["no_load_g"]
+        # Grams, so never without a calibration.
+        assert nl is None or (type(nl) is int and -1000 <= nl <= 1000
+                              and p["counts_per_gram"] is not None), p
     if ok:
         assert all(type(p[k]) is int for k in ("weight_g", "gross_g", "bowls")), p
         assert -5000 <= p["weight_g"] <= 250000, p
@@ -316,9 +410,11 @@ class SimBuffer:
     gross_g: int = 0          # the last reading, noise included
 
     bowl_every_min: float = 0.0
-    on_mains: bool = False
-    cell_mv: int = 4100
-    band: str | None = None
+
+    hop: int = 1              # position on the area's daisy chain
+    zero_g: float = 0.0       # the cell's zero drift, in every reading
+    crc_errors: int = 0       # since the node's power-up
+    no_load_g: int | None = None  # the last EMPTY reading since boot
 
     queue: list[tuple] = field(default_factory=list)
     last: tuple | None = None  # (state/bowls key, weight_g, t) of the last enqueued sample
@@ -328,10 +424,9 @@ class SimBuffer:
         # serving rate, one starting stack.
         self.mac = ":".join(f"{self.rng.randrange(256):02x}" for _ in range(6))
         self.bowl_every_min = self.rng.uniform(*BOWL_EVERY_MIN)
-        self.on_mains = self.rng.random() < 0.25
-        self.cell_mv = self.rng.randint(4100, 4159) if self.on_mains else self.rng.randint(3850, 4150)
-        self.band = band_with_hysteresis(soc_from_mv(self.cell_mv), None)
         self.bowls = [self.rng.uniform(*BOWL_FOOD_G) for _ in range(self.rng.randint(1, MAX_BOWLS))]
+        self.hop = CHAIN_HOP.get(self.device_id, 1)
+        self.zero_g = DRIFT_G if self.device_id == DRIFT_ID else self.rng.uniform(*ZERO_START_G)
 
     # -- state evolution ---------------------------------------------------
     def reboot(self, t: float) -> None:
@@ -345,6 +440,9 @@ class SimBuffer:
         self.settle_until = t + self.rng.uniform(3, 10)
         self.fault = None
         self.confirmed = not self.bowls
+        # Both live in the node's RAM: a power-up forgets them.
+        self.crc_errors = 0
+        self.no_load_g = None
         self.last = None
         self.queue.clear()
         self._measure()
@@ -384,19 +482,19 @@ class SimBuffer:
         if not self.bowls:
             self.confirmed = True  # an empty platform IS a count, of zero
 
-        if not self.on_mains:
-            # ~8 h of service takes a cell from full to roughly 45%.
-            self.cell_mv = max(3000, int(self.cell_mv - self.rng.uniform(0.9, 1.4) * minutes))
-            self.band = band_with_hysteresis(soc_from_mv(self.cell_mv), self.band)
+        # A silent node sends no frames, so none can fail their checksum.
+        if self.fault != "no_cells" and self.rng.random() < P_CRC_ERROR * minutes:
+            self.crc_errors += 1
+        self.zero_g += self.rng.gauss(0.0, ZERO_WALK_G_PER_SQRT_H * (minutes / 60) ** 0.5)
         self._measure()
+        # Only a settled gram reading is a no-load: not while settling or faulted,
+        # and never uncalibrated, where there are no grams at all.
+        if not self.bowls and self.state() == "ok":
+            self.no_load_g = self.gross_g
 
     def _measure(self) -> None:
         true_g = sum(self.bowls) + len(self.bowls) * BOWL_DRY_G
-        self.gross_g = round(true_g + self.rng.uniform(-NOISE_G, NOISE_G))
-
-    def charge_overnight(self) -> None:
-        self.cell_mv = self.rng.randint(4080, 4159)
-        self.band = band_with_hysteresis(soc_from_mv(self.cell_mv), self.band)
+        self.gross_g = round(true_g + self.zero_g + self.rng.uniform(-NOISE_G, NOISE_G))
 
     def state(self) -> str:
         """The firmware's ladder (load_scale.cpp): the fault nearest the hardware
@@ -434,8 +532,11 @@ class SimBuffer:
             "cells_online": 0 if state == "no_cells" else 1,
             "net_counts": counts,
             "counts_per_gram": None if self.device_id == UNCALIBRATED_ID else CPG,
-            "battery_mv": min(self.cell_mv, BATTERY_PUBLISH_MAX_MV),
-            "battery_level": self.band,
+            # NO POWER ON A PLATFORM: it is the hub's (SimHub). Explicit nulls, not
+            # omitted -- a PATCH keeps an omitted column's old value, and these rows
+            # still hold the per-platform battery earlier versions wrote.
+            "battery_mv": None,
+            "battery_level": None,
             "manual_fill_pct": None,  # the counter's trial knob; never a buffer's
             "firmware": FIRMWARE,
         }
@@ -476,15 +577,91 @@ class SimBuffer:
         return rows
 
     def status(self) -> dict:
+        responding = self.fault != "no_cells"
         return {
             "boot_id": self.boot_id,
             "uptime_s": int(self.t - self.boot_t),
             "mac": self.mac,
             **self.fields(),
-            "external_power": self.on_mains,
-            # NULL, not false: the panel host cannot read its charger.
+            "external_power": None,
             "charging": None,
             "manual_fill_age_s": None,
+            # --- node health, device_status only ---
+            # supply_mv is measured AT the node, so a silent node has none to give.
+            "supply_mv": SUPPLY_NOMINAL_MV - SUPPLY_DROP_MV_PER_HOP * self.hop
+                         + self.rng.randint(-SUPPLY_NOISE_MV, SUPPLY_NOISE_MV)
+                         if responding else None,
+            "crc_errors": self.crc_errors,
+            "responding": responding,
+            "no_load_g": self.no_load_g,
+        }
+
+
+@dataclass
+class SimHub:
+    """An area's ESP32: mains plus a small backup cell. Its row carries the
+    board's power and nothing else -- no weight, bowls or node health, and
+    never a weight_samples or status_events row."""
+    device_id: str
+    rng: random.Random
+
+    t: float = 0.0
+    boot_t: float = 0.0
+    boot_id: int = 0
+    mac: str = ""
+
+    full_mv: int = 4150
+    cell_mv: float = 4150.0
+    band: str | None = None
+    mains: bool = True
+    mains_back_t: float = 0.0
+    # Cuts still allowed; None = unlimited. A backfill sets 1 each day.
+    cut_budget: int | None = None
+
+    def __post_init__(self) -> None:
+        self.mac = ":".join(f"{self.rng.randrange(256):02x}" for _ in range(6))
+        self.full_mv = self.rng.randint(*HUB_FULL_MV)
+        self.cell_mv = float(self.full_mv)
+        self.band = band_with_hysteresis(soc_from_mv(self.full_mv), None)
+
+    def reboot(self, t: float) -> None:
+        # Powered up for a service, so mains is there; the cell keeps its charge.
+        self.boot_id = new_boot_id()
+        self.t = self.boot_t = t
+        self.mains = True
+
+    def advance_to(self, t_end: float) -> None:
+        while self.t + STEP_S <= t_end:
+            self.t += STEP_S
+            self._step(STEP_S / 60.0)
+
+    def _step(self, minutes: float) -> None:
+        if not self.mains:
+            if self.t >= self.mains_back_t:
+                self.mains = True
+            else:
+                self.cell_mv -= HUB_DRAIN_MV_PER_MIN * minutes
+        elif self.cut_budget != 0 and self.rng.random() < P_MAINS_CUT * minutes:
+            self.mains = False
+            self.mains_back_t = self.t + self.rng.uniform(*MAINS_CUT_MIN) * 60
+            if self.cut_budget:
+                self.cut_budget -= 1
+        else:
+            self.cell_mv = min(self.full_mv, self.cell_mv + HUB_CHARGE_MV_PER_MIN * minutes)
+        self.band = band_with_hysteresis(soc_from_mv(int(self.cell_mv)), self.band)
+
+    def status(self) -> dict:
+        return {
+            "boot_id": self.boot_id,
+            "uptime_s": int(self.t - self.boot_t),
+            "firmware": HUB_FIRMWARE,
+            "mac": self.mac,
+            "battery_mv": min(int(self.cell_mv), BATTERY_PUBLISH_MAX_MV),
+            "battery_level": self.band,
+            # On a hub, charging means "on the charger", i.e. mains present --
+            # what the panel's patchHub() sends, since it reads mains, not STAT.
+            "charging": self.mains,
+            "external_power": self.mains,
         }
 
 
@@ -543,7 +720,7 @@ class Uplink:
         return ok
 
     def patch_status(self, device_id: str, body: dict) -> bool:
-        check_payload(body)
+        check_payload(body, device_id)
         if self.dry_run:
             print(f"  PATCH {device_id} {json.dumps(body)}")
             self.patches_sent += 1
@@ -565,7 +742,8 @@ class Uplink:
         if r.headers.get("Content-Range", "").endswith("/0"):
             self._record(
                 f"PATCH device_status {device_id}: matched 0 rows -- not registered "
-                f"(supabase/register_devices.sql), or skipped by the stale-write guard",
+                f"(supabase/register_devices.sql; HUB rows: migrate_hubs.sql), or "
+                f"skipped by the stale-write guard",
                 r,
             )
             return False
@@ -575,8 +753,8 @@ class Uplink:
     def _record(self, what: str, r) -> None:
         msg = f"{what} -> {r.status_code} {r.text[:200]}"
         if "kind" in r.text or "column" in r.text:
-            msg += ("\n      (is supabase/migrate_buffer.sql applied, and "
-                    "cutover_buffers.sql? see tools/README.md)")
+            msg += ("\n      (are supabase/migrate_buffer.sql, cutover_buffers.sql "
+                    "and migrate_hubs.sql applied? see tools/README.md)")
         if msg not in self.errors:
             self.errors.append(msg)
         print(f"  ERROR {msg}", file=sys.stderr)
@@ -592,22 +770,28 @@ def make_fleet(ids: list[str], seed: int) -> list[SimBuffer]:
     return [SimBuffer(i, random.Random(seed + int(i[4:]))) for i in ids]
 
 
-def run_round(fleet: list[SimBuffer], up: Uplink, now: float, boot: bool, span: float) -> int:
+def make_hubs(seed: int) -> list[SimHub]:
+    # A str seed is hashed deterministically (not by PYTHONHASHSEED), and cannot
+    # collide with a buffer's seed + number.
+    return [SimHub(h, random.Random(f"{seed}:{h}")) for h in HUB_IDS]
+
+
+def run_round(fleet: list[SimBuffer], hubs: list[SimHub], up: Uplink, now: float,
+              boot: bool, span: float) -> int:
     """One heartbeat: history first (oldest first, as the firmware flushes), then
     current state. `boot` powers every unit on `span` seconds ago."""
-    rows = []
-    for d in fleet:
+    for d in fleet + hubs:
         if boot:
             d.reboot(now - span)
         d.advance_to(now)
-        rows += d.take_samples(now)
+    rows = [r for d in fleet for r in d.take_samples(now)]  # hubs have no history
     up.post_samples(rows)
-    for d in fleet:
+    for d in fleet + hubs:
         up.patch_status(d.device_id, d.status())
     return len(rows)
 
 
-def run_backfill(fleet: list[SimBuffer], up: Uplink, days: int) -> None:
+def run_backfill(fleet: list[SimBuffer], hubs: list[SimHub], up: Uplink, days: int) -> None:
     """Replays `days` of meal service into weight_samples, positioned by AGE --
     the only time reference the write path has."""
     max_days = AGE_MAX_MS // 86_400_000
@@ -622,6 +806,8 @@ def run_backfill(fleet: list[SimBuffer], up: Uplink, days: int) -> None:
 
     for day_offset in range(days, 0, -1):
         day = now - timedelta(days=day_offset)
+        for h in hubs:
+            h.cut_budget = 1  # at most one power cut per hub per replayed day
         for label, start_min, end_min in SERVICE_WINDOWS:
             start = day.replace(hour=start_min // 60, minute=start_min % 60,
                                 second=0, microsecond=0)
@@ -637,13 +823,17 @@ def run_backfill(fleet: list[SimBuffer], up: Uplink, days: int) -> None:
                 d.reboot(start.timestamp())
                 d.advance_to(end.timestamp())
                 rows += d.take_samples(now.timestamp())
-                d.charge_overnight()
+            # Hubs post no history; they are replayed only so the final PATCH
+            # leaves them where the replay ended.
+            for h in hubs:
+                h.reboot(start.timestamp())
+                h.advance_to(end.timestamp())
             if up.post_samples(rows):
                 total += len(rows)
             print(f"  {day.date()} {label:9s} {len(rows):5d} samples")
 
     # Leave every row's current state consistent with the end of the replay.
-    for d in fleet:
+    for d in fleet + hubs:
         up.patch_status(d.device_id, d.status())
     print(f"  backfilled {total} samples across {days} days")
 
@@ -656,7 +846,8 @@ def in_service_window(at: datetime) -> str | None:
     return None
 
 
-def run_live(fleet: list[SimBuffer], up: Uplink, interval: int, respect_window: bool) -> None:
+def run_live(fleet: list[SimBuffer], hubs: list[SimHub], up: Uplink, interval: int,
+             respect_window: bool) -> None:
     if interval >= OFFLINE_AFTER_S:
         print(f"  WARNING: {interval}s rounds are slower than offline_after() "
               f"({OFFLINE_AFTER_S}s); rows will flap offline")
@@ -675,10 +866,10 @@ def run_live(fleet: list[SimBuffer], up: Uplink, interval: int, respect_window: 
                 time.sleep(interval)
                 continue
 
-            n = run_round(fleet, up, started, boot=not powered, span=interval)
+            n = run_round(fleet, hubs, up, started, boot=not powered, span=interval)
             powered = True
             print(f"  round {round_no} ({window or 'off-hours'}): "
-                  f"{n} samples, {len(fleet)} status rows")
+                  f"{n} samples, {len(fleet) + len(hubs)} status rows")
             time.sleep(max(0.0, interval - (time.time() - started)))
     except KeyboardInterrupt:
         print("\n  stopped")
@@ -734,17 +925,19 @@ def main() -> int:
         print(f"bowlstack fleet sim -> {url}")
 
     fleet = make_fleet(args.ids, args.seed)
-    print(f"  {len(fleet)} buffers: {fleet[0].device_id} .. {fleet[-1].device_id}")
+    hubs = make_hubs(args.seed)
+    print(f"  {len(fleet)} buffers: {fleet[0].device_id} .. {fleet[-1].device_id}, "
+          f"hubs {', '.join(HUB_IDS)}")
 
     up = Uplink(url, key, dry_run=args.dry_run)
     started = time.time()
 
     if args.once:
-        run_round(fleet, up, time.time(), boot=True, span=LIVE_INTERVAL_S)
+        run_round(fleet, hubs, up, time.time(), boot=True, span=LIVE_INTERVAL_S)
     elif args.backfill is not None:
-        run_backfill(fleet, up, args.backfill)
+        run_backfill(fleet, hubs, up, args.backfill)
     else:
-        run_live(fleet, up, args.interval, respect_window=not args.always)
+        run_live(fleet, hubs, up, args.interval, respect_window=not args.always)
 
     print(f"\n  {up.samples_sent} samples, {up.patches_sent} status rows, "
           f"{len(up.errors)} distinct errors, {time.time() - started:.1f}s")

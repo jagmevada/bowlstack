@@ -13,25 +13,39 @@ Every BWL-xxx unit is now a 200 kg load-cell buffer platform
 (`devices.kind = 'buffer'`), not a ToF bowl stack. The simulator writes exactly
 what the LDC-001 panel's buffer channel writes for a real one.
 
+**A platform has no battery.** Power belongs to the area's **hub**, one ESP32 per
+area (D/M/T) on mains with a small backup cell, and each hub has its own
+`device_status` row (`HUB-D`, `HUB-M`, `HUB-T`, `devices.kind = 'hub'`). A
+platform reports **node health** instead. The simulator writes two of the hubs,
+`HUB-M` and `HUB-T`. `HUB-D` is the LDC-001 panel's own row.
+
 ### Why it exists
 
 A stock dashboard is only meaningful with several areas populated, a health view
 only with something unhealthy in it, and a history chart only with history. One
 device on a desk gives none of those.
 
-### Start it only AFTER `supabase/cutover_buffers.sql`
+### Start it only AFTER `cutover_buffers.sql` AND `migrate_hubs.sql`
 
 The rollout order is:
 
 1. `supabase/migrate_buffer.sql`. This is additive. Every BWL row is still `stack`.
 2. Push the web.
 3. `supabase/cutover_buffers.sql`. This re-kinds every BWL row to `buffer`.
-4. **Then** start this simulator.
+4. `supabase/migrate_hubs.sql`. This creates the `HUB-D/M/T` rows and the
+   node-health columns.
+5. **Then** start this simulator.
 
 Before step 3, the database rejects this simulator's writes to `stack` rows. The
 `weight_samples` kind guard refuses them, and so does the device_status kind
-guard. Before step 1 the new columns do not exist at all. Either way it shows up
-as an `ERROR` line with a pointer back here, and the run exits non-zero.
+guard. Before step 1 the new columns do not exist at all. Before step 4 the hub
+rows do not exist (their PATCH matches 0 rows) and `supply_mv`, `crc_errors`,
+`responding` and `no_load_g` are unknown columns, so every platform PATCH fails
+too. Each of these shows up as an `ERROR` line with a pointer back here, and the
+run exits non-zero.
+
+> **Stop any older copy first.** A simulator from before the hubs still sends a
+> battery on every platform. Stop it before step 4, then start this one.
 
 The `esp32dev-fleet` image also writes BWL-002…024, as bowl stacks. It must not
 be running. After the cutover its writes are rejected anyway.
@@ -41,14 +55,17 @@ be running. After the cutover its writes are rejected anyway.
 | Ids | Written? | Why |
 | --- | --- | --- |
 | **BWL-004 … BWL-024** | **yes, the default** | the simulated buffer positions |
+| **HUB-M, HUB-T** | **yes, always** | the simulated hubs for areas M and T |
+| HUB-D | **never** | the LDC-001 panel is area D's hub and PATCHes it itself (`patchHub()` in `scale_telemetry.cpp`) |
 | BWL-001 … BWL-003 | **never** | the LDC-001 panel's buffer bank (B1…B3) owns them. A second writer would interleave two `boot_id`s on one row |
 | BWL-025 … BWL-032 | **never** | reserved, see below |
 | LDC-xxx | **never** | counter scales (`kind = 'scale'`). LDC-001 is real hardware |
 
-`--ids` can narrow the set, e.g. `--ids BWL-004,BWL-010`. It **refuses**
+`--ids` can narrow the platforms, e.g. `--ids BWL-004,BWL-010`. It **refuses**
 BWL-001…003, BWL-025…032 and anything that is not `BWL-NNN`. No flag overrides
 the refusal. If that is ever genuinely needed, edit `PANEL_IDS` /
-`RESERVED_IDS` deliberately.
+`RESERVED_IDS` deliberately. The hubs are the constant `HUB_IDS`, not something
+`--ids` can name, and both are written whatever `--ids` says.
 
 > **Why the reserved ids matter.** `tg_device_status_stamp()` sets
 > `reported := true` on every UPDATE, unconditionally. That is deliberate, so a
@@ -75,13 +92,24 @@ Two calls, the same ones the firmware makes, and nothing else:
   - `cells_online`: 0 or 1.
   - `net_counts`.
   - `counts_per_gram`: 20.7.
-  - `battery_mv`, `battery_level`, `external_power`.
-  - `charging`: always `null`.
+  - `battery_mv`, `battery_level`, `charging`, `external_power`: always
+    **explicit** `null`. Power is the hub's. A PATCH that leaves a column out
+    keeps its old value, and these rows still hold the battery earlier versions
+    wrote.
+  - Node health:
+    - `supply_mv`: the 5 V rail measured at the node. About 5000 mV, minus
+      20 mV per hop along the area's daisy chain, ±10 mV.
+    - `crc_errors`: frames that failed their checksum since the node powered
+      up. Mostly 0, occasionally 1. Back to 0 on every reboot.
+    - `responding`: `false` exactly while the platform is in `no_cells`.
+    - `no_load_g`: the platform's reading the last time it was settled,
+      calibrated and empty (0 bowls), ideally about 0 g.
   - `firmware`: `sim-kg 2.0`, so simulated rows say so.
   - `mac`, `boot_id`, `uptime_s`.
   - `manual_fill_pct` / `manual_fill_age_s`: always `null`.
-- `POST /weight_samples`: the same weight, bowl and battery columns plus
-  `device_id, boot_id, seq, age_ms, reason`. A row is appended:
+- `POST /weight_samples`: the same weight and bowl columns, `battery_mv` /
+  `battery_level` as `null`, plus `device_id, boot_id, seq, age_ms, reason`.
+  No node health, because that lives on `device_status` only. A row is appended:
   - on boot,
   - on a state change,
   - on a `bowls` or `bowls_confirmed` change,
@@ -95,15 +123,37 @@ Two calls, the same ones the firmware makes, and nothing else:
 - `weight_g`, `gross_g` and `bowls` are numbers **only when `weight_state = 'ok'`**.
 - `bowls_confirmed` is null exactly when `bowls` is.
 - `net_counts` is null when there is no reading (`no_cells`, `settling`).
+- `supply_mv` is null while `responding` is false. It is measured at the node,
+  so a silent node has none to give.
+- `no_load_g` is null until the first empty platform since boot. It is always
+  null on an uncalibrated unit, because without a calibration there are no grams.
 
 **Never sent:**
 
 - `stack_count`, `stack_status`, `levels`, `sensors_ok` and `sensors_online`.
 - Anything to `status_events`.
 
+### What it writes: the hub contract
+
+`PATCH /device_status?device_id=eq.HUB-M` (and `HUB-T`) every round. It sends
+exactly these fields and nothing else:
+
+- `boot_id` (from `os.urandom`, like the platforms), `uptime_s`, `mac`.
+- `firmware`: `sim-hub 1.0`.
+- `battery_mv`, `battery_level`: the backup cell. About 4150 mV and `good` on
+  mains. It drains while mains is away.
+- `charging` and `external_power`: both `true` on mains and both `false` on the
+  backup cell. On a hub `charging` means "on the charger", which is what the
+  panel's `patchHub()` sends.
+
+A hub sends no weight, bowls, gross, `stack_*` or node-health field. It never
+posts `weight_samples` or `status_events`.
+
 `check_payload()` asserts all of this, plus the ranges, on **every** payload
-before it is sent or printed. A violation stops the run instead of turning into a
-400 halfway through a backfill.
+before it is sent or printed. That covers both contracts. A platform must carry
+explicit battery nulls and valid node health. A hub must carry exactly the hub
+fields. `HUB-D` is refused outright. A violation stops the run instead of
+turning into a 400 halfway through a backfill.
 
 ### What it deliberately does not do
 
@@ -129,6 +179,7 @@ supabase/assign_devices.sql     -- permanent location/food_slot assignment
 supabase/seed_meal_mapping.sql  -- sample menus, so slots show dish names
 supabase/migrate_buffer.sql     -- then the web push, then:
 supabase/cutover_buffers.sql    -- BWL-% become kind 'buffer'
+supabase/migrate_hubs.sql       -- HUB-D/M/T rows + node-health columns
 supabase/reset_spares.sql       -- restores awaiting_deployment, if ever needed
 ```
 
@@ -166,7 +217,7 @@ python tools/fleet_sim.py --live             # continuous, Ctrl-C to stop
 | `--interval N` | seconds per round in `--live`. The default is 20, the firmware heartbeat. At 40 or more, rows flap `offline` because `offline_after()` is 40 s, and the script warns. The old 60 s default did exactly this. |
 | `--always` | in `--live`, report outside service hours too |
 | `--ids A,B,…` | simulate only these BWL ids (default BWL-004…024; protected ids refused) |
-| `--seed N` | RNG seed. Each id is the same "board" on every run: MAC, serving rate, starting stack. `boot_id` is **not** seeded. |
+| `--seed N` | RNG seed. Each id, hubs included, is the same "board" on every run: MAC, serving rate, starting stack, zero drift. `boot_id` is **not** seeded. |
 | `--dry-run` | print payloads, send nothing |
 
 `--devices` is gone. Use `--ids`.
@@ -219,10 +270,24 @@ plus a row per bowl event and state change). It is posted in chunks of 500.
   - Occasional self-clearing `no_cells` and `over_range`.
   - **BWL-019 permanently `uncalibrated`**, so one slot is always partial
     (`≥ X`) to build against.
-- **Battery** discharge through the service day, recharged overnight. It uses
-  the *same* SoC curve and hysteresis thresholds as `include/battery_soc.h`.
-  About a quarter of the units are on mains (`external_power = true`) and do not
-  drain.
+- **Supply drop along the chain.** Each area's platforms are one daisy chain, in
+  `assign_devices.sql` order, fed from the hub end. The far end of D's
+  fourteen-node chain (BWL-022) reads about 4720 mV. M and T read about
+  4900–4980 mV.
+- **Zero drift.** Every cell's zero random-walks by a few grams an hour, and the
+  drift is in every reading, not only in `no_load_g`. **BWL-014 has drifted to
+  about +600 g**, so the dashboard's drift warning has something to fire on. An
+  empty BWL-014 therefore claims about 0.6 kg of food rather than 0, which is
+  the harm the warning exists to catch. It starts drifted instead of ramping up,
+  because every run starts from the seed.
+- **Hub power.** Mains is present almost always. Now and then a cut of 2–6
+  minutes puts a hub on its backup cell (`charging = false`), which drains
+  about 10 mV a minute and recharges when mains returns. That is roughly one cut
+  per hub every two hours live, and at most one per hub per day in a backfill.
+  The band uses the *same* SoC curve and hysteresis thresholds as
+  `include/battery_soc.h`. A few-minute cut does not move it out of `good`.
+- **Backfill writes no hub history.** Hubs have none. They are replayed only so
+  that the final PATCH leaves them where the replay ended.
 
 ### Reading it back
 
