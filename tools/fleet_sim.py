@@ -1,66 +1,60 @@
 #!/usr/bin/env python3
-"""Bowlstack fleet simulator -- writes plausible telemetry for all 32 devices.
+"""Bowlstack fleet simulator -- load-cell BUFFER platforms, in kilograms.
 
 WHY THIS EXISTS
 ---------------
-The front-end is the next major piece of work, and it cannot be built against a
-single prototype on a bench: a stock dashboard is only meaningful with several
-areas populated, a health view is only meaningful with something unhealthy in
-it, and a history chart is only meaningful with history. This produces all
-three, through the SAME write path the firmware uses.
+The front-end cannot be built against one prototype on a bench: a stock
+dashboard is only meaningful with several areas populated, a health view only
+with something unhealthy in it, and a history chart only with history. This
+produces all three, through the SAME write path the firmware uses.
+
+WHAT IT SIMULATES
+-----------------
+Every BWL-xxx unit is a 200 kg buffer platform (devices.kind = 'buffer') holding
+up to four bowls, each 14-18 kg of food plus the 2.5 kg bowl itself. It reports
+what the LDC-001 panel's buffer channel reports: weight_g is FOOD (gross minus
+bowls x 2500 g), gross_g is everything on the platform, bowls/bowls_confirmed is
+the bowl tracker. It never sends a bowl-stack column and never writes
+status_events -- see tools/README.md for the contract.
 
 WHAT IT DELIBERATELY DOES NOT DO
 --------------------------------
 It does not bypass the schema. Every write goes through PostgREST with the anon
 key, against the same policies, grants, CHECK constraints and triggers as a real
-device. That is the point of the exercise: if this script can write it, a device
-can, and if the schema rejects it the fleet would have been rejected too. Nothing
-here uses the service_role key -- that would prove nothing.
+device. If this script can write it, a device can; if the schema rejects it, the
+device would have been rejected too. A service_role key would prove nothing, so
+one is refused (the JWT's role claim is decoded, not guessed at).
 
-It does not write to `devices`. The registry is human-managed and anon has no
-grant on it, correctly. Deployment (location / food_slot) is applied separately by
-an owner -- see supabase/assign_devices.sql.
+It does not write to `devices`, and it never writes an id somebody else owns:
+BWL-001..003 belong to the LDC-001 panel's buffer bank, and BWL-025..032 are
+reserved (writing one permanently retires it from awaiting_deployment). Those
+ids are refused even when passed with --ids.
+
+It must only run AFTER supabase/cutover_buffers.sql: before that the BWL rows are
+still kind 'stack' and the database rejects every buffer write to them.
 
 CLOCKS
 ------
-`status_events.recorded_at` is computed server-side as `now() - age_ms`, exactly
-as it is for a device with no RTC. Backfill therefore works by sending an AGE,
-not a timestamp, and the server supplies the reference instant. `now()` is
-transaction_timestamp, so every row of one batch shares one reference and their
-relative order is exact.
-
-The server clamps age_ms at 7 days, so that is the hard limit on how far back
-history can be placed.
+`weight_samples.recorded_at` is computed server-side as `now() - age_ms`, exactly
+as for a device with no RTC. Backfill therefore sends an AGE, not a timestamp.
+The server clamps age_ms at 7 days, which is the hard limit on backfill.
 
 USAGE
 -----
-    python tools/fleet_sim.py --once     --devices 24
-    python tools/fleet_sim.py --backfill 5 --devices 24
-    python tools/fleet_sim.py --live     --devices 24
-    python tools/fleet_sim.py --once --dry-run       # payloads only, sends nothing
+    python tools/fleet_sim.py --once --dry-run      # payloads only, no network
+    python tools/fleet_sim.py --once
+    python tools/fleet_sim.py --backfill 5
+    python tools/fleet_sim.py --live
 
-PASS --devices 24, ALWAYS
--------------------------
-It targets BWL-001..024, which is exactly the deployed set. BWL-025..032 are
-reserved and have never been installed, and must stay that way in the data:
-tg_device_status_stamp() sets `reported := true` on every UPDATE -- deliberately,
-so a device cannot pin the flag and hide an outage -- which permanently retires a
-unit from `awaiting_deployment`. That is the state the front-end must tell apart
-from `offline`, and writing to a reserved id destroys it. It is a BEFORE UPDATE
-trigger, so no UPDATE can undo it; supabase/reset_spares.sql repairs it by
-deleting and re-creating the rows.
-
-The default is 32 because that is the fleet size, not because it is the right
-thing to send.
-
-Credentials come from the environment, or from include/secret.h (gitignored) as
-a convenience:
+Credentials come from the environment, or from include/secret.h (gitignored):
     BOWLSTACK_SUPABASE_URL, BOWLSTACK_ANON_KEY
+--dry-run reads neither and opens no connection.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import random
@@ -68,30 +62,70 @@ import re
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
-
-try:
-    import requests
-except ImportError:
-    sys.exit("needs `requests`:  python -m pip install requests")
 
 REPO = Path(__file__).resolve().parent.parent
 
-DEVICE_COUNT = 32
-LEVELS = 4
-FIRMWARE = "0.2.0"
+FIRMWARE = "sim-kg 2.0"  # says "simulated" wherever the dashboard shows firmware
 
-# Server-side clamp in tg_status_events_stamp(). Nothing older than this can be
-# placed, because age_ms is how position in time is expressed.
+# BWL-004..024: the deployed buffer positions minus the three the panel owns.
+DEFAULT_IDS = [f"BWL-{i:03d}" for i in range(4, 25)]
+
+# Never written, even when named with --ids. Two writers on one row interleave two
+# boot_ids, which the stale-write guard and the dashboard both read as nonsense;
+# and a write to a reserved row sets `reported` permanently.
+PANEL_IDS = {"BWL-001", "BWL-002", "BWL-003"}  # buffer_bank.cpp default slots B1..B3
+RESERVED_IDS = {f"BWL-{i:03d}" for i in range(25, 33)}
+
+# --- the platform -------------------------------------------------------------
+# One full bowl: 14-18 kg of food in a 2.5 kg bowl (owner, 2026-10-03) -- the same
+# figures include/load_scale.h's BowlConfig is built on.
+BOWL_DRY_G = 2500
+BOWL_FOOD_G = (14000.0, 18000.0)
+MAX_BOWLS = 4
+NOISE_G = 30.0
+# ~20.7 counts/g is a 200 kg cell on the NAU7802 at the panel's gain.
+CPG = 20.7
+# What a saturated converter returns: the NAU7802's positive full scale.
+SATURATED_COUNTS = 8_388_607
+# One unit is never calibrated, so a permanently partial slot (T3 in
+# assign_devices.sql) exists to build the '>= X' path against.
+UNCALIBRATED_ID = "BWL-019"
+
+# A buffer moves in WHOLE BOWLS (owner, 2026-10-03): full bowls go on, and a FULL
+# bowl is carried to the counter, where the serving -- the gradual drain -- happens.
+# Minutes between bowls leaving, per unit; each bowl is a 16.5-20.5 kg step the
+# real tracker sees (its threshold is 10 kg).
+BOWL_EVERY_MIN = (6.0, 12.0)
+# Per-minute probabilities.
+# With <= 1 bowl left: ~5 min to a restock, against a bowl leaving every 6-12 min,
+# so a platform runs empty now and then (0.0 kg = refill me) but is mostly stocked.
+# 0.05 left it empty for 38% of a 7-day backfill once bowls left whole.
+P_RESTOCK = 0.2
+P_NO_CELLS = 0.002
+P_OVER_RANGE = 0.001
+P_FAULT_CLEARS = 0.15
+
+# --- the firmware's cadence (src/loadcell/scale_telemetry.cpp) ----------------
+STEP_S = 5               # one observation; equal to the 5 s history floor
+LIVE_INTERVAL_S = 20     # the heartbeat
+OFFLINE_AFTER_S = 40     # public.offline_after(); slower than this flaps offline
+SAMPLE_PERIOD_S = 120    # history heartbeat
+WEIGHT_EVENT_G = 250     # a move worth a history row
+
+# Server-side clamp in tg_weight_samples_stamp(). Nothing older can be placed.
 AGE_MAX_MS = 604_800_000
 
 # Matches `check (battery_mv between 0 and 6000)` and the firmware's
 # config::BATTERY_PUBLISH_MAX_MV.
 BATTERY_PUBLISH_MAX_MV = 6000
 
-# Fleet service windows, from schema.sql. Devices are powered ONLY during these,
-# which is why absence of data outside them is normal rather than a fault.
+# ponytail: rows per POST, so a backfill window (~4000 rows) is not one 1 MB body.
+POST_CHUNK = 500
+
+# Fleet service windows, from schema.sql, in LOCAL wall-clock time. Devices are
+# powered ONLY during these, which is why absence of data outside them is normal.
 SERVICE_WINDOWS = [
     ("breakfast", 6 * 60, 9 * 60),
     ("lunch", 11 * 60 + 30, 14 * 60),
@@ -168,6 +202,23 @@ def band_with_hysteresis(soc: float, current: str | None) -> str:
 # ---------------------------------------------------------------------------
 # Credentials
 # ---------------------------------------------------------------------------
+def key_role(key: str) -> str | None:
+    """The role a Supabase key acts as. A legacy key is a JWT whose payload says
+    so in its `role` claim -- base64, which is why searching the raw key for the
+    text "service_role" never matched anything. New-style keys say it in their
+    prefix. None means the format is not one we know."""
+    if key.startswith("sb_secret_"):
+        return "service_role"
+    if key.startswith("sb_publishable_"):
+        return "anon"
+    try:
+        payload = key.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        return claims.get("role")
+    except (IndexError, ValueError):
+        return None
+
+
 def load_credentials() -> tuple[str, str]:
     url = os.environ.get("BOWLSTACK_SUPABASE_URL")
     key = os.environ.get("BOWLSTACK_ANON_KEY")
@@ -199,9 +250,9 @@ def load_credentials() -> tuple[str, str]:
     if url.endswith("/rest/v1"):
         url = url[: -len("/rest/v1")].rstrip("/")
 
-    if "service_role" in key or len(key) > 500:
+    if key_role(key) == "service_role":
         sys.exit(
-            "that looks like a service_role key. Refusing.\n"
+            "that is a service_role key. Refusing.\n"
             "service_role carries BYPASSRLS, so a test using it proves nothing\n"
             "about whether a real device could write."
         )
@@ -209,152 +260,231 @@ def load_credentials() -> tuple[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Simulated device
+# The contract every payload must satisfy -- the database enforces most of it,
+# but a violation here is a simulator bug, and it should fail on the bench
+# (and in --dry-run) rather than as a 400 halfway through a backfill.
 # ---------------------------------------------------------------------------
+BUFFER_STATES = {"ok", "uncalibrated", "untared", "settling", "no_cells", "over_range"}
+STACK_KEYS = {"stack_count", "stack_status", "levels", "sensors_ok", "sensors_online"}
+
+
+def check_payload(p: dict) -> None:
+    ok = p["weight_state"] == "ok"
+    assert p["weight_state"] in BUFFER_STATES, p  # a buffer never sends cells_partial
+    for k in ("weight_g", "gross_g", "bowls"):
+        assert (p[k] is not None) == ok, (k, p)
+    assert (p["bowls_confirmed"] is None) == (p["bowls"] is None), p
+    assert not (STACK_KEYS & p.keys()), p
+    assert p["manual_fill_pct"] is None and p.get("manual_fill_age_s") is None, p
+    assert p.get("charging") is None, p
+    assert p["cells_online"] in (0, 1), p
+    assert 0 <= p["battery_mv"] <= BATTERY_PUBLISH_MAX_MV, p
+    if ok:
+        assert all(type(p[k]) is int for k in ("weight_g", "gross_g", "bowls")), p
+        assert -5000 <= p["weight_g"] <= 250000, p
+        assert -5000 <= p["gross_g"] <= 260000, p
+        assert 0 <= p["bowls"] <= 8, p
+    if "age_ms" in p:
+        assert 0 <= p["age_ms"] <= AGE_MAX_MS and p["seq"] >= 0, p
+
+
+# ---------------------------------------------------------------------------
+# Simulated buffer platform
+# ---------------------------------------------------------------------------
+def new_boot_id() -> int:
+    # From the OS, NOT the seeded RNG. A seeded boot_id repeated on every run with
+    # the same seed: seq restarted at 0 under an old boot_id, every batch hit 23505,
+    # and the stale-write guard silently skipped PATCHes whose uptime went backwards.
+    return int.from_bytes(os.urandom(4), "little") & 0x7FFFFFFF or 1
+
+
 @dataclass
-class SimDevice:
+class SimBuffer:
     device_id: str
     rng: random.Random
 
+    t: float = 0.0            # epoch seconds of the last observation
+    boot_t: float = 0.0
     boot_id: int = 0
     seq: int = 0
     mac: str = ""
-    uptime_s: int = 0
 
-    stack: int = LEVELS
-    sensors_ok: list[bool] = field(default_factory=lambda: [True] * LEVELS)
-    fault: str | None = None  # None | 'degraded' | 'discontiguous'
+    bowls: list[float] = field(default_factory=list)  # food g in each bowl
+    confirmed: bool = False
+    fault: str | None = None  # None | 'no_cells' | 'over_range'
+    settle_until: float = 0.0
+    gross_g: int = 0          # the last reading, noise included
 
+    bowl_every_min: float = 0.0
+    on_mains: bool = False
     cell_mv: int = 4100
     band: str | None = None
-    charging: bool = False
+
+    queue: list[tuple] = field(default_factory=list)
+    last: tuple | None = None  # (state/bowls key, weight_g, t) of the last enqueued sample
 
     def __post_init__(self) -> None:
-        self.boot_id = self.rng.getrandbits(31)
-        self.mac = ":".join(f"{self.rng.randrange(256):02X}" for _ in range(6))
-        self.cell_mv = self.rng.randint(3850, 4150)
+        # Seeded, so the same id is the same "board" on every run: one MAC, one
+        # serving rate, one starting stack.
+        self.mac = ":".join(f"{self.rng.randrange(256):02x}" for _ in range(6))
+        self.bowl_every_min = self.rng.uniform(*BOWL_EVERY_MIN)
+        self.on_mains = self.rng.random() < 0.25
+        self.cell_mv = self.rng.randint(4100, 4159) if self.on_mains else self.rng.randint(3850, 4150)
         self.band = band_with_hysteresis(soc_from_mv(self.cell_mv), None)
+        self.bowls = [self.rng.uniform(*BOWL_FOOD_G) for _ in range(self.rng.randint(1, MAX_BOWLS))]
 
     # -- state evolution ---------------------------------------------------
-    def reboot(self) -> None:
-        """New boot_id resets the sequence. This is what a device does when it
-        is powered on for a service, and it is why (device_id, boot_id, seq) is
-        the idempotency key rather than seq alone."""
-        self.boot_id = self.rng.getrandbits(31)
+    def reboot(self, t: float) -> None:
+        """A power-up: new boot_id, seq from 0, a few seconds of settling. The
+        bowls stay where they are, but the remembered count is UNCONFIRMED until
+        the next load/unload or an empty platform -- the firmware cannot know
+        what was carried on or off while it was off."""
+        self.boot_id = new_boot_id()
         self.seq = 0
-        self.uptime_s = 0
-        self.stack = LEVELS
+        self.t = self.boot_t = t
+        self.settle_until = t + self.rng.uniform(3, 10)
         self.fault = None
-        self.sensors_ok = [True] * LEVELS
+        self.confirmed = not self.bowls
+        self.last = None
+        self.queue.clear()
+        self._measure()
+        self._observe()
 
-    def serve_tick(self, minutes: int) -> bool:
-        """Advance by `minutes` of service. Returns True if anything a server
-        would care about changed -- the same question device_status::differs()
-        answers on the device."""
-        before = self.wire_state()
-        self.uptime_s += minutes * 60
+    def advance_to(self, t_end: float) -> None:
+        while self.t + STEP_S <= t_end:
+            self.t += STEP_S
+            self._step(STEP_S / 60.0)
+            self._observe()
 
-        # Bowls are consumed, and occasionally the counter is restocked.
-        if self.stack > 0 and self.rng.random() < 0.22:
-            self.stack -= 1
-        elif self.stack <= 1 and self.rng.random() < 0.35:
-            self.stack = LEVELS
+    def _step(self, minutes: float) -> None:
+        # A FULL bowl carried to the counter -- the buffer's only way down. A 16.5-20.5
+        # kg step, which the real tracker counts as an unload, so the count stays
+        # confirmed. ponytail: a Poisson departure per unit; a service-shaped rate if
+        # Master's "Empty about" ever needs testing against rush hours.
+        if self.bowls and self.rng.random() < minutes / self.bowl_every_min:
+            self.bowls.pop()
+            self.confirmed = True
 
-        # Faults, rare and self-clearing -- a health view is only useful if
-        # something in it is occasionally unhealthy.
+        if len(self.bowls) <= 1 and self.rng.random() < P_RESTOCK * minutes:
+            n = min(self.rng.randint(1, 3), MAX_BOWLS - len(self.bowls))
+            self.bowls += [self.rng.uniform(*BOWL_FOOD_G) for _ in range(n)]
+            self.confirmed = True
+
         if self.fault is None:
             r = self.rng.random()
-            if r < 0.004:
-                self.fault = "degraded"
-                self.sensors_ok[self.rng.randrange(LEVELS)] = False
-            elif r < 0.005:
-                self.fault = "discontiguous"
-        elif self.rng.random() < 0.15:
+            if r < P_NO_CELLS * minutes:
+                self.fault = "no_cells"
+            elif r < (P_NO_CELLS + P_OVER_RANGE) * minutes:
+                self.fault = "over_range"
+        elif self.rng.random() < P_FAULT_CLEARS * minutes:
+            if self.fault == "no_cells":
+                self.confirmed = False  # the tracker was blind meanwhile
             self.fault = None
-            self.sensors_ok = [True] * LEVELS
 
-        # Discharge. ~8 h of service takes a cell from full to roughly 45%.
-        drop = self.rng.uniform(0.9, 1.4) * minutes
-        self.cell_mv = max(3000, int(self.cell_mv - drop))
-        self.band = band_with_hysteresis(soc_from_mv(self.cell_mv), self.band)
+        if not self.bowls:
+            self.confirmed = True  # an empty platform IS a count, of zero
 
-        return self.wire_state() != before
+        if not self.on_mains:
+            # ~8 h of service takes a cell from full to roughly 45%.
+            self.cell_mv = max(3000, int(self.cell_mv - self.rng.uniform(0.9, 1.4) * minutes))
+            self.band = band_with_hysteresis(soc_from_mv(self.cell_mv), self.band)
+        self._measure()
+
+    def _measure(self) -> None:
+        true_g = sum(self.bowls) + len(self.bowls) * BOWL_DRY_G
+        self.gross_g = round(true_g + self.rng.uniform(-NOISE_G, NOISE_G))
 
     def charge_overnight(self) -> None:
         self.cell_mv = self.rng.randint(4080, 4159)
         self.band = band_with_hysteresis(soc_from_mv(self.cell_mv), self.band)
-        self.charging = False
 
-    # -- payload construction ---------------------------------------------
-    def levels(self) -> list[str]:
-        """Bottom-up f1..f4. A valid stack is contiguous from index 0, because
-        bowls rest on each other and cannot float."""
-        if self.fault == "discontiguous":
-            # Physically impossible on purpose: a bowl above an empty level.
-            # The firmware reports this as a fault and refuses to give a count.
-            out = ["absent"] * LEVELS
-            out[1] = "present"
-            return out
-        out = ["present"] * min(self.stack, LEVELS) + ["absent"] * max(0, LEVELS - self.stack)
-        for i, ok in enumerate(self.sensors_ok):
-            if not ok:
-                out[i] = "unknown"
-        return out
-
-    def stack_status(self) -> str:
-        if self.fault == "discontiguous":
-            return "discontiguous"
-        if self.fault == "degraded" or not all(self.sensors_ok):
-            return "degraded"
+    def state(self) -> str:
+        """The firmware's ladder (load_scale.cpp): the fault nearest the hardware
+        wins, because that is the one somebody can act on."""
+        if self.fault == "no_cells":
+            return "no_cells"
+        if self.t < self.settle_until:
+            return "settling"
+        if self.fault == "over_range":
+            return "over_range"
+        if self.device_id == UNCALIBRATED_ID:
+            return "uncalibrated"
         return "ok"
 
-    def reported_count(self) -> int:
-        # A device that cannot conclude does not guess. discontiguous reports a
-        # fault and no count, which the schema records as 0 alongside the status.
-        return 0 if self.fault == "discontiguous" else min(self.stack, LEVELS)
-
-    def wire_state(self) -> tuple:
-        """Exactly the fields differs() compares -- so a simulated `change`
-        event means the same thing a real one does."""
-        return (
-            self.reported_count(),
-            self.stack_status(),
-            tuple(self.levels()),
-            tuple(self.sensors_ok),
-            self.band,
-            self.charging,
-        )
-
-    def common(self) -> dict:
+    # -- payload construction ---------------------------------------------
+    def fields(self) -> dict:
+        """The columns device_status and weight_samples share. A NUMBER only when
+        the state is ok -- the database's own CHECK -- and gross/bowls follow the
+        same rule, so a dead cell cannot keep claiming three confirmed bowls."""
+        state = self.state()
+        ok = state == "ok"
+        n = len(self.bowls)
+        if state in ("no_cells", "settling"):
+            counts = None  # no window of samples: 0 would be a reading
+        elif state == "over_range":
+            counts = SATURATED_COUNTS
+        else:
+            counts = round(self.gross_g * CPG)
         return {
-            "stack_count": self.reported_count(),
-            "stack_status": self.stack_status(),
-            "levels": self.levels(),
-            "sensors_ok": list(self.sensors_ok),
-            "sensors_online": sum(self.sensors_ok),
+            "weight_state": state,
+            "weight_g": self.gross_g - n * BOWL_DRY_G if ok else None,  # FOOD, always
+            "gross_g": self.gross_g if ok else None,
+            "bowls": n if ok else None,
+            "bowls_confirmed": self.confirmed if ok else None,
+            "cells_online": 0 if state == "no_cells" else 1,
+            "net_counts": counts,
+            "counts_per_gram": None if self.device_id == UNCALIBRATED_ID else CPG,
+            "battery_mv": min(self.cell_mv, BATTERY_PUBLISH_MAX_MV),
             "battery_level": self.band,
-            "charging": self.charging,
+            "manual_fill_pct": None,  # the counter's trial knob; never a buffer's
             "firmware": FIRMWARE,
         }
 
-    def event(self, reason: str, age_ms: int) -> dict:
+    def _observe(self) -> None:
+        """The firmware's history rule: boot; a state or bowl-count change (never
+        throttled); a move of >= 250 g since the last ENQUEUED sample; or 120 s
+        without one. STEP_S is the 5 s floor, so the floor holds by construction."""
+        f = self.fields()
+        key = (f["weight_state"], f["bowls"], f["bowls_confirmed"])
+        w = f["weight_g"]
+        if self.last is None:
+            reason = "boot"
+        else:
+            last_key, last_w, last_t = self.last
+            if key != last_key:
+                reason = "change"
+            elif w is not None and last_w is not None and abs(w - last_w) >= WEIGHT_EVENT_G:
+                reason = "change"
+            elif self.t - last_t >= SAMPLE_PERIOD_S:
+                reason = "periodic"
+            else:
+                return
+        self.last = (key, w, self.t)
+        self.queue.append((self.t, self.seq, reason, f))
         self.seq += 1
-        return {
+
+    def take_samples(self, now: float) -> list[dict]:
+        rows = [{
             "device_id": self.device_id,
             "boot_id": self.boot_id,
-            "seq": self.seq,
-            "age_ms": max(0, min(int(age_ms), AGE_MAX_MS)),
+            "seq": seq,
+            "age_ms": max(0, min(int((now - at) * 1000), AGE_MAX_MS)),
             "reason": reason,
-            **self.common(),
-        }
+            **f,
+        } for at, seq, reason, f in self.queue]
+        self.queue.clear()
+        return rows
 
     def status(self) -> dict:
         return {
             "boot_id": self.boot_id,
-            "uptime_s": self.uptime_s,
-            "battery_mv": min(self.cell_mv, BATTERY_PUBLISH_MAX_MV),
+            "uptime_s": int(self.t - self.boot_t),
             "mac": self.mac,
-            **self.common(),
+            **self.fields(),
+            "external_power": self.on_mains,
+            # NULL, not false: the panel host cannot read its charger.
+            "charging": None,
+            "manual_fill_age_s": None,
         }
 
 
@@ -363,46 +493,59 @@ class SimDevice:
 # ---------------------------------------------------------------------------
 class Uplink:
     def __init__(self, url: str, key: str, dry_run: bool = False):
-        self.base = url
         self.dry_run = dry_run
+        self.samples_sent = 0
+        self.patches_sent = 0
+        self.errors: list[str] = []
+        if dry_run:
+            return  # no session at all, so a dry run cannot reach the network
+        try:
+            import requests
+        except ImportError:
+            sys.exit("needs `requests`:  python -m pip install requests")
+        self.base = url
         self.session = requests.Session()
         self.session.headers.update({
             "apikey": key,
             "Authorization": f"Bearer {key}",
             "Content-Type": "application/json",
         })
-        self.events_sent = 0
-        self.patches_sent = 0
-        self.errors: list[str] = []
 
-    def post_events(self, batch: list[dict]) -> bool:
-        if not batch:
+    def post_samples(self, rows: list[dict]) -> bool:
+        for r in rows:
+            check_payload(r)
+        if not rows:
             return True
         if self.dry_run:
-            print(json.dumps(batch[:2], indent=2))
-            print(f"  ... {len(batch)} events (dry run)")
-            self.events_sent += len(batch)
+            print(json.dumps(rows[:2], indent=2))
+            print(f"  ... {len(rows)} weight_samples (dry run)")
+            self.samples_sent += len(rows)
             return True
 
-        r = self.session.post(
-            f"{self.base}/rest/v1/status_events",
-            headers={"Prefer": "return=minimal"},
-            data=json.dumps(batch),
-            timeout=30,
-        )
-        if 200 <= r.status_code < 300:
-            self.events_sent += len(batch)
-            return True
-
-        # 23505 means these rows are already stored, which is success for an
-        # idempotent retry rather than a failure.
-        if "23505" in r.text:
-            return True
-        self._record("POST status_events", r)
-        return False
+        ok = True
+        for i in range(0, len(rows), POST_CHUNK):
+            chunk = rows[i:i + POST_CHUNK]
+            r = self.session.post(
+                f"{self.base}/rest/v1/weight_samples",
+                headers={"Prefer": "return=minimal"},
+                data=json.dumps(chunk),
+                timeout=30,
+            )
+            if 200 <= r.status_code < 300:
+                self.samples_sent += len(chunk)
+            elif "23505" in r.text:
+                # Already stored -- success for an idempotent retry, exactly as
+                # the firmware treats it.
+                pass
+            else:
+                self._record("POST weight_samples", r)
+                ok = False
+        return ok
 
     def patch_status(self, device_id: str, body: dict) -> bool:
+        check_payload(body)
         if self.dry_run:
+            print(f"  PATCH {device_id} {json.dumps(body)}")
             self.patches_sent += 1
             return True
 
@@ -418,21 +561,22 @@ class Uplink:
             return False
 
         # A PATCH matching no rows is a perfectly successful 204. Without the
-        # count there is no way to tell "reported" from "wrote nothing, forever"
-        # -- which is exactly how an unregistered device looks.
-        rng = r.headers.get("Content-Range", "")
-        if rng.endswith("/0"):
+        # count there is no way to tell "reported" from "wrote nothing, forever".
+        if r.headers.get("Content-Range", "").endswith("/0"):
             self._record(
-                f"PATCH device_status {device_id}: matched 0 rows -- run "
-                f"supabase/register_devices.sql",
+                f"PATCH device_status {device_id}: matched 0 rows -- not registered "
+                f"(supabase/register_devices.sql), or skipped by the stale-write guard",
                 r,
             )
             return False
         self.patches_sent += 1
         return True
 
-    def _record(self, what: str, r: requests.Response) -> None:
+    def _record(self, what: str, r) -> None:
         msg = f"{what} -> {r.status_code} {r.text[:200]}"
+        if "kind" in r.text or "column" in r.text:
+            msg += ("\n      (is supabase/migrate_buffer.sql applied, and "
+                    "cutover_buffers.sql? see tools/README.md)")
         if msg not in self.errors:
             self.errors.append(msg)
         print(f"  ERROR {msg}", file=sys.stderr)
@@ -441,75 +585,67 @@ class Uplink:
 # ---------------------------------------------------------------------------
 # Modes
 # ---------------------------------------------------------------------------
-def make_fleet(seed: int) -> list[SimDevice]:
-    # Seeded so successive runs are reproducible: a front-end developer
-    # comparing two screenshots should not be fighting fresh randomness.
-    return [
-        SimDevice(f"BWL-{i:03d}", random.Random(seed + i))
-        for i in range(1, DEVICE_COUNT + 1)
-    ]
+def make_fleet(ids: list[str], seed: int) -> list[SimBuffer]:
+    # Seeded per device NUMBER, so BWL-010 behaves the same whichever subset is
+    # run: a front-end developer comparing two screenshots should not be fighting
+    # fresh randomness. boot_id is the one thing that is not seeded.
+    return [SimBuffer(i, random.Random(seed + int(i[4:]))) for i in ids]
 
 
-def run_once(fleet: list[SimDevice], up: Uplink) -> None:
-    batch = []
+def run_round(fleet: list[SimBuffer], up: Uplink, now: float, boot: bool, span: float) -> int:
+    """One heartbeat: history first (oldest first, as the firmware flushes), then
+    current state. `boot` powers every unit on `span` seconds ago."""
+    rows = []
     for d in fleet:
-        d.serve_tick(1)
-        batch.append(d.event("periodic", 0))
-    up.post_events(batch)
+        if boot:
+            d.reboot(now - span)
+        d.advance_to(now)
+        rows += d.take_samples(now)
+    up.post_samples(rows)
     for d in fleet:
         up.patch_status(d.device_id, d.status())
+    return len(rows)
 
 
-def run_backfill(fleet: list[SimDevice], up: Uplink, days: int) -> None:
-    """Replays `days` of meal service into status_events.
-
-    Everything is positioned by AGE, because that is the only time reference the
-    write path has -- the device has no clock and the server refuses to take a
-    timestamp from it. Oldest first, so the sequence a dashboard reads back is
-    the sequence in which things happened.
-    """
+def run_backfill(fleet: list[SimBuffer], up: Uplink, days: int) -> None:
+    """Replays `days` of meal service into weight_samples, positioned by AGE --
+    the only time reference the write path has."""
     max_days = AGE_MAX_MS // 86_400_000
     if days > max_days:
         print(f"  age_ms is clamped at {max_days} days server-side; using {max_days}")
         days = max_days
 
-    now = datetime.now(timezone.utc)
+    # LOCAL time, because the service windows are local meal times. This used to
+    # take UTC and place breakfast at 06:00 UTC.
+    now = datetime.now().astimezone()
     total = 0
 
     for day_offset in range(days, 0, -1):
         day = now - timedelta(days=day_offset)
         for label, start_min, end_min in SERVICE_WINDOWS:
-            batch = []
+            start = day.replace(hour=start_min // 60, minute=start_min % 60,
+                                second=0, microsecond=0)
+            if (now - start).total_seconds() * 1000 > AGE_MAX_MS:
+                # Older than the server can place: clamping would pile the whole
+                # window onto one instant seven days ago.
+                continue
+            end = start + timedelta(minutes=end_min - start_min)
+            rows = []
             for d in fleet:
-                # A device is powered on for each service, so each service is a
-                # new boot -- which is what makes seq restart from zero.
-                d.reboot()
-                svc_start = day.replace(
-                    hour=start_min // 60, minute=start_min % 60,
-                    second=0, microsecond=0,
-                )
-                age_at = lambda t: (now - t).total_seconds() * 1000.0
-
-                batch.append(d.event("boot", age_at(svc_start)))
-
-                minutes = end_min - start_min
-                step = 5
-                for m in range(step, minutes, step):
-                    at = svc_start + timedelta(minutes=m)
-                    if age_at(at) < 0:
-                        break  # not yet happened
-                    if d.serve_tick(step):
-                        batch.append(d.event("change", age_at(at)))
+                # A device is powered on for each service, so each one is a new
+                # boot -- which is what makes seq restart from zero.
+                d.reboot(start.timestamp())
+                d.advance_to(end.timestamp())
+                rows += d.take_samples(now.timestamp())
                 d.charge_overnight()
-
-            if up.post_events(batch):
-                total += len(batch)
-            print(f"  {day.date()} {label:9s} {len(batch):5d} events")
+            if up.post_samples(rows):
+                total += len(rows)
+            print(f"  {day.date()} {label:9s} {len(rows):5d} samples")
 
     # Leave every row's current state consistent with the end of the replay.
     for d in fleet:
         up.patch_status(d.device_id, d.status())
-    print(f"  backfilled {total} events across {days} days")
+    print(f"  backfilled {total} samples across {days} days")
 
 
 def in_service_window(at: datetime) -> str | None:
@@ -520,76 +656,97 @@ def in_service_window(at: datetime) -> str | None:
     return None
 
 
-def run_live(fleet: list[SimDevice], up: Uplink, interval: int, respect_window: bool) -> None:
+def run_live(fleet: list[SimBuffer], up: Uplink, interval: int, respect_window: bool) -> None:
+    if interval >= OFFLINE_AFTER_S:
+        print(f"  WARNING: {interval}s rounds are slower than offline_after() "
+              f"({OFFLINE_AFTER_S}s); rows will flap offline")
     print(f"  live, {interval}s per round, Ctrl-C to stop")
     round_no = 0
+    powered = False
     try:
         while True:
             round_no += 1
+            started = time.time()
             window = in_service_window(datetime.now())
             if respect_window and window is None:
+                powered = False  # switched off between services; next one is a boot
                 print(f"  round {round_no}: outside service hours, idle "
                       f"(--always to override)")
                 time.sleep(interval)
                 continue
 
-            batch = []
-            for d in fleet:
-                if d.serve_tick(max(1, interval // 60)):
-                    batch.append(d.event("change", 0))
-            up.post_events(batch)
-            for d in fleet:
-                up.patch_status(d.device_id, d.status())
+            n = run_round(fleet, up, started, boot=not powered, span=interval)
+            powered = True
             print(f"  round {round_no} ({window or 'off-hours'}): "
-                  f"{len(batch)} changes, {len(fleet)} status rows")
-            time.sleep(interval)
+                  f"{n} samples, {len(fleet)} status rows")
+            time.sleep(max(0.0, interval - (time.time() - started)))
     except KeyboardInterrupt:
         print("\n  stopped")
+
+
+def parse_ids(text: str) -> list[str]:
+    # Deduplicated: the same id twice would be two writers on one row.
+    ids = list(dict.fromkeys(s.strip().upper() for s in text.split(",") if s.strip()))
+    if not ids:
+        sys.exit("--ids: no ids given")
+    for i in ids:
+        if not re.fullmatch(r"BWL-\d{3}", i):
+            sys.exit(f"{i}: only BWL-NNN buffer ids can be simulated")
+        if i in PANEL_IDS:
+            sys.exit(f"{i} belongs to the LDC-001 panel's buffer bank. Refusing.")
+        if i in RESERVED_IDS:
+            sys.exit(f"{i} is reserved; writing it permanently retires it from "
+                     f"awaiting_deployment. Refusing.")
+    return ids
 
 
 # ---------------------------------------------------------------------------
 def main() -> int:
     p = argparse.ArgumentParser(
-        description="Simulate the Bowlstack fleet against Supabase.",
+        description="Simulate the Bowlstack buffer fleet (kg) against Supabase.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     mode = p.add_mutually_exclusive_group(required=True)
-    mode.add_argument("--once", action="store_true", help="one round for all devices")
+    mode.add_argument("--once", action="store_true",
+                      help="one heartbeat for all devices, from power-up")
     mode.add_argument("--backfill", type=int, metavar="DAYS",
-                      help="replay DAYS of meal service into status_events (max 7)")
+                      help="replay DAYS of meal service into weight_samples (max 7)")
     mode.add_argument("--live", action="store_true", help="run continuously")
 
-    p.add_argument("--interval", type=int, default=60,
-                   help="seconds per round in --live (default 60)")
+    p.add_argument("--interval", type=int, default=LIVE_INTERVAL_S,
+                   help=f"seconds per round in --live (default {LIVE_INTERVAL_S}; "
+                        f"keep it under {OFFLINE_AFTER_S})")
     p.add_argument("--always", action="store_true",
                    help="in --live, report outside service hours too")
-    p.add_argument("--devices", type=int, default=DEVICE_COUNT,
-                   help=f"how many devices to simulate (default {DEVICE_COUNT})")
+    p.add_argument("--ids", type=parse_ids, default=DEFAULT_IDS,
+                   help="comma-separated BWL ids (default BWL-004..BWL-024)")
     p.add_argument("--seed", type=int, default=20260726,
                    help="RNG seed, for reproducible runs")
     p.add_argument("--dry-run", action="store_true",
-                   help="print payloads, send nothing")
+                   help="print payloads; read no credentials, open no connection")
     args = p.parse_args()
 
-    url, key = load_credentials()
-    print(f"bowlstack fleet sim -> {url}")
     if args.dry_run:
-        print("  DRY RUN -- nothing will be sent")
+        url = key = ""
+        print("bowlstack fleet sim -- DRY RUN, nothing will be sent")
+    else:
+        url, key = load_credentials()
+        print(f"bowlstack fleet sim -> {url}")
 
-    fleet = make_fleet(args.seed)[: args.devices]
-    print(f"  {len(fleet)} devices: {fleet[0].device_id} .. {fleet[-1].device_id}")
+    fleet = make_fleet(args.ids, args.seed)
+    print(f"  {len(fleet)} buffers: {fleet[0].device_id} .. {fleet[-1].device_id}")
 
     up = Uplink(url, key, dry_run=args.dry_run)
     started = time.time()
 
     if args.once:
-        run_once(fleet, up)
+        run_round(fleet, up, time.time(), boot=True, span=LIVE_INTERVAL_S)
     elif args.backfill is not None:
         run_backfill(fleet, up, args.backfill)
     else:
         run_live(fleet, up, args.interval, respect_window=not args.always)
 
-    print(f"\n  {up.events_sent} events, {up.patches_sent} status rows, "
+    print(f"\n  {up.samples_sent} samples, {up.patches_sent} status rows, "
           f"{len(up.errors)} distinct errors, {time.time() - started:.1f}s")
 
     if up.errors:
