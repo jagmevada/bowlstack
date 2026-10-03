@@ -162,7 +162,7 @@ bool Filter::add(int32_t raw, int32_t stepThresholdCounts) {
 // that, minutes of slow consumption would add up to a phantom "unload".
 //
 // HOW MANY BOWLS: round(jump / typical full bowl), at least one. The typical figure
-// is the fixed midpoint of a real full bowl, 18.5 kg (BowlConfig says why it is not
+// is a fixed full bowl, 17 kg (BowlConfig says why that figure and why it is not
 // learned). With learning switched on it is learned from loads that count as exactly
 // one bowl -- only loads, because an unloaded bowl may have had food taken out of it.
 //

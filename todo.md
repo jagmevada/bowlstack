@@ -13,10 +13,11 @@ verification: `C:\Users\jagme\.claude\plans\u-r-aware-right-rustling-lemon.md`
 (owner's machine).
 
 **The bowl rule:** a buffer bowl's dry mass is 2.5 kg. A settled jump of ≥ 10 kg held
-5 s is bowls loaded (or unloaded); how many = round(jump ÷ 18.5 kg) — a full bowl is
-14–18 kg of food + the 2.5 kg bowl, and the fixed midpoint counts every mix of 1–4
-correctly (not learned: learning could only drift it out of the 18.2–18.9 kg band
-that keeps four right). Food = gross − bowls × 2.5 kg.
+5 s is bowls loaded (or unloaded); how many = round(jump ÷ 17 kg) — the owner's
+full-bowl figure (bowls are 14–18 kg of food + the 2.5 kg bowl, nearer the light end).
+One at a time, any 10–25 kg jump is one bowl; four at once count right for 12.4–16.6 kg
+of food each; four is the most a stack holds. Fixed, not learned. Food = gross −
+bowls × 2.5 kg.
 The count survives a power cycle but reads *unconfirmed* until the next event, or until
 the platform reads empty (< 1 kg → 0).
 

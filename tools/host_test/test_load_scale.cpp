@@ -65,7 +65,7 @@ struct Rig {
     p.zero = (int32_t)ZERO;
     p.cpg = (float)CPG;
     p.bowls = 0;
-    p.typicalFullG = 18500;
+    p.typicalFullG = 17000;
     s.restore(p);
     gross = 0;
     run(8000);  // an empty platform settles, which confirms the zero count
@@ -155,12 +155,28 @@ static void doubleLoad() {
   CHECK(std::fabs(r.foodG - 32000) < 80, "food %.0f g (want 32000)", r.foodG);
 }
 
+static void countsOneAtATimeAnyWeight() {
+  section("bowls: four loaded one at a time count four, at either end of the owner's range");
+  // The normal way bowls arrive. Each jump is one bowl whatever the divisor, so the
+  // whole 14-18 kg-of-food range (16.5-20.5 kg on the platform) and lighter fills count.
+  for (double each : {12500.0, 16500.0, 20500.0}) {
+    Rig g;
+    g.commission();
+    for (int n = 1; n <= 4; n++) {
+      g.gross = n * each;
+      g.run(8000);
+    }
+    CHECK(g.r().bowls == 4 && g.r().bowlsConfirmed, "4 x %.1f kg one by one -> 4 (got %u, %d)", each / 1000,
+          g.r().bowls, g.r().bowlsConfirmed);
+  }
+}
+
 static void countsEveryMixOfBowls() {
-  section("bowls: 1..4 bowls of 16.5-20.5 kg each, loaded at once, all lightest or all heaviest");
-  // The owner's range: 14-18 kg of food + the 2.5 kg bowl. The extremes are the hard
-  // cases -- any mix in between rounds to the same count.
+  section("bowls: 1..4 bowls at ONCE, 15-19 kg each (12.5-16.5 kg of food), all lightest or heaviest");
+  // round(jump / 17 kg) counts every n <= 4 right while each bowl is 14.9-19.1 kg on
+  // the platform. The extremes are the hard cases -- any mix in between rounds the same.
   for (int n = 1; n <= 4; n++) {
-    for (double each : {16500.0, 20500.0}) {
+    for (double each : {15000.0, 19000.0}) {
       Rig g;
       g.commission();
       g.gross = n * each;
@@ -172,13 +188,13 @@ static void countsEveryMixOfBowls() {
 }
 
 static void typicalIsFixed() {
-  section("bowls: the full-bowl figure is fixed at 18.5 kg -- not learned, not restored from old firmware");
+  section("bowls: the full-bowl figure is fixed at 17 kg -- not learned, not restored from old firmware");
   Rig g;
   g.commission();
   g.gross = 20500;  // a heavy single bowl: with learning this would move the figure
   g.run(8000);
-  CHECK(std::fabs(g.r().typicalFullG - 18500) < 1, "still 18500 g after a single load (%.0f)", g.r().typicalFullG);
-  CHECK(!g.s.dirty() || g.s.persisted().typicalFullG == 18500, "nothing learned to persist");
+  CHECK(std::fabs(g.r().typicalFullG - 17000) < 1, "still 17000 g after a single load (%.0f)", g.r().typicalFullG);
+  CHECK(!g.s.dirty() || g.s.persisted().typicalFullG == 17000, "nothing learned to persist");
   Rig h;
   Persisted p;
   p.zeroed = true;
@@ -186,7 +202,7 @@ static void typicalIsFixed() {
   p.cpg = (float)CPG;
   p.typicalFullG = 15000;  // what older firmware stored
   h.s.restore(p);
-  CHECK(std::fabs(h.r().typicalFullG - 18500) < 1, "an old stored 15 kg is ignored (%.0f)", h.r().typicalFullG);
+  CHECK(std::fabs(h.r().typicalFullG - 17000) < 1, "an old stored 15 kg is ignored (%.0f)", h.r().typicalFullG);
 }
 
 static void unload() {
@@ -494,6 +510,7 @@ int main() {
   filterNoFalseSteps();
   singleLoad();
   doubleLoad();
+  countsOneAtATimeAnyWeight();
   countsEveryMixOfBowls();
   typicalIsFixed();
   unload();
