@@ -133,6 +133,21 @@ struct ScaleView {
   bool showCells;
 
   uint8_t online;
+
+  // The 200 kg buffer-stock cell. A SEPARATE INSTRUMENT: it is never part of
+  // totalGrams, totalCounts or any share above, and the counter's calibration,
+  // tare and decimals setting do not apply to it. `fitted` is false on every unit
+  // without a module, and the dashboard then draws nothing for it at all.
+  struct BufferView {
+    bool fitted;
+    Cell state;
+    // Kilograms are known only with a stored zero AND a factor, and not saturated.
+    // Zero is a real weight (an empty shelf), so it cannot stand in for unknown.
+    bool kgKnown;
+    float grams;
+    int32_t counts;  // net of the zero when one is stored; what is shown until kgKnown
+    bool overRange;
+  } buffer;
 };
 
 struct State {

@@ -184,7 +184,13 @@ bool Nau7802::read(uint8_t reg, uint8_t *buf, uint8_t len) {
     // to force a re-select on the next attempt rather than to keep talking into
     // a channel nobody enabled. Costs one write per failure; recovers the case
     // that would otherwise leave a healthy cell Offline forever.
-    i2cmux::invalidate();
+    //
+    // ONLY FOR A CELL THAT IS ACTUALLY BEHIND THAT MUX. A converter on a plain bus
+    // (muxChannel_ < 0 -- the 200 kg buffer module, whose mux is on its own bus and
+    // is not this singleton) has nothing to do with the counter's trunk cache, and
+    // without the guard a flapping buffer cell would force a pointless re-select
+    // on the counter's cells with every failed read.
+    if (muxChannel_ >= 0) i2cmux::invalidate();
     if (ioFailures_ < 0xFF) ioFailures_++;
   }
   return ok;
@@ -197,7 +203,7 @@ bool Nau7802::write(uint8_t reg, uint8_t val) {
   // a plain store -- which is what every call below wants.
   const bool ok =
       lgfx::i2c::writeRegister8(port_, board::NAU7802_ADDR, reg, val, 0, freq_).has_value();
-  if (!ok) i2cmux::invalidate();
+  if (!ok && muxChannel_ >= 0) i2cmux::invalidate();  // see read(): not for a plain bus
   return ok;
 }
 

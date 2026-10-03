@@ -174,6 +174,17 @@ void withScale(State &s, float aG, float bG, float cG, bool calibrated, bool tar
   // render BOTH dashboard layouts or the one nobody checked is the one that
   // overlaps.
   s.scale.showCells = false;
+
+  // THE 200 kg BUFFER CELL, fitted and calibrated, so the preview draws the row the
+  // field unit draws. The same fixture feeds every scenario below, which is the
+  // point: the buffer row has to be seen in BOTH dashboard layouts (cells hidden
+  // and shown) or the combination nobody looked at is the one that overlaps.
+  s.scale.buffer.fitted = true;
+  s.scale.buffer.state = Cell::Online;
+  s.scale.buffer.kgKnown = true;
+  s.scale.buffer.grams = 123456.0f;  // 123.5 kg: three digits before the point, the widest it gets
+  s.scale.buffer.counts = 0;
+  s.scale.buffer.overRange = false;
 }
 
 State sEmpty() {

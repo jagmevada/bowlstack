@@ -66,6 +66,17 @@ lv_obj_t *lblTotal;
 //
 // Deliberately small. The total is the number this device exists to show; three
 // supporting figures at 20 px read as what they are without competing with it.
+// The 200 kg buffer line, between the total and the per-cell rows. A separate
+// instrument: nothing here is summed into, or scaled by, the counter's figures.
+lv_obj_t *bufRow_ = nullptr;
+lv_obj_t *weightScr_ = nullptr;  // the page, to close up its row gaps when it is crowded
+bool prevCrowded_ = false;
+int8_t prevBufShown_ = -1;       // -1 = never decided, so the first frame is logged
+lv_obj_t *lblBufVal_ = nullptr;
+char prevBuf_[24] = {0};
+uint32_t prevBufColor_ = 0;
+bool haveBufColor_ = false;
+
 lv_obj_t *cellBox = nullptr;
 lv_obj_t *lblCellVal[CELLS] = {nullptr, nullptr, nullptr};
 char prevCell_[CELLS][20] = {{0}, {0}, {0}};
@@ -298,6 +309,7 @@ void weightOnSwap(void (*cb)(void)) { onSwap_ = cb; }
 
 void buildWeight(lv_obj_t *parent) {
   lv_obj_t *scr = parent ? parent : lv_screen_active();
+  weightScr_ = scr;
   lv_obj_set_style_bg_color(scr, lv_color_hex(C_BG), LV_PART_MAIN);
   lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, LV_PART_MAIN);
   lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
@@ -387,6 +399,42 @@ void buildWeight(lv_obj_t *parent) {
   lv_label_set_long_mode(lblTotal, LV_LABEL_LONG_CLIP);
   lv_label_set_text(lblTotal, "--");
 
+  // --- the 200 kg buffer line ---------------------------------------------
+  // DIRECTLY UNDER THE COUNTER'S TOTAL AND ABOVE THE A/B/C ROWS, where it was
+  // asked for, and independent of the Cells setting -- it is the stock figure, not
+  // a setup aid. Hidden until a module is reported fitted, so a unit without one
+  // draws exactly what it always drew.
+  //
+  // Built like the cell rows beside it: a fixed-width name and a fixed-width,
+  // right-aligned value, never a content-sized label (see the total above for what
+  // that costs on a page redrawn ten times a second). 80 + 4 + 140 = 224, the
+  // page's whole content width. 24 px high, the 20 px figure's line box.
+  bufRow_ = lv_obj_create(scr);
+  styleFlat(bufRow_);
+  lv_obj_set_width(bufRow_, LV_PCT(100));
+  lv_obj_set_height(bufRow_, 24);
+  lv_obj_set_flex_flow(bufRow_, LV_FLEX_FLOW_ROW);
+  lv_obj_set_style_pad_column(bufRow_, 4, LV_PART_MAIN);
+  lv_obj_set_flex_align(bufRow_, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER);
+  lv_obj_add_flag(bufRow_, LV_OBJ_FLAG_HIDDEN);
+
+  lv_obj_t *bufName = lv_label_create(bufRow_);
+  lv_obj_set_style_text_font(bufName, &lv_font_montserrat_16, LV_PART_MAIN);
+  lv_obj_set_style_text_color(bufName, lv_color_hex(C_MUTED), LV_PART_MAIN);
+  lv_obj_set_width(bufName, 80);
+  lv_label_set_long_mode(bufName, LV_LABEL_LONG_CLIP);
+  lv_label_set_text(bufName, "Buffer");
+
+  // 140 holds the widest thing this can print: "-1234567 cts" is 121 px at this
+  // size, and "-123.4 kg" is well under it.
+  lblBufVal_ = lv_label_create(bufRow_);
+  lv_obj_set_style_text_font(lblBufVal_, &lv_font_montserrat_20, LV_PART_MAIN);
+  lv_obj_set_width(lblBufVal_, 140);
+  lv_obj_set_style_text_align(lblBufVal_, LV_TEXT_ALIGN_RIGHT, LV_PART_MAIN);
+  lv_label_set_long_mode(lblBufVal_, LV_LABEL_LONG_CLIP);
+  lv_label_set_text(lblBufVal_, "--");
+
   // --- the per-cell rows --------------------------------------------------
   // Hidden unless the Cells setting is on. Built either way, because building
   // them on demand would mean a layout change on a page that is already redrawn
@@ -470,6 +518,16 @@ void buildWeight(lv_obj_t *parent) {
   styleFlat(gap);
   lv_obj_set_width(gap, LV_PCT(100));
   lv_obj_set_flex_grow(gap, 1);
+
+  // THE SPACER SITS ABOVE THE PER-CELL ROWS, not below the flag chip where it was
+  // built. With it here the slack opens up between the 200 kg buffer line and the
+  // A/B/C rows, so the stock figure sits directly under the counter's total and the
+  // A/B/C rows plus the warning chip ride down against the knob row -- which is the
+  // arrangement asked for, and the buffer line is the one that keeps its room.
+  // Moved by index rather than by building it earlier, so every other child stays
+  // exactly where it was declared. The page's total height is unchanged: the spacer
+  // is the same size, it has only changed seats.
+  lv_obj_move_to_index(gap, lv_obj_get_index(cellBox));
 
   // --- the knob row -------------------------------------------------------
   // Above the buttons, because it is a readout and they are controls, and a
@@ -852,6 +910,81 @@ void updateWeight(const State &st) {
           prevPctColor_[i] = pcol;
           lv_obj_set_style_text_color(lblCellPct[i], lv_color_hex(pcol), LV_PART_MAIN);
         }
+      }
+    }
+  }
+
+  // --- the 200 kg buffer line ---------------------------------------------
+  if (bufRow_) {
+    const ScaleView::BufferView &b = s.buffer;
+
+    // THE STOCK FIGURE IS NEVER HIDDEN TO MAKE ROOM. This used to hide the line
+    // when the per-cell rows were shown AND a flag chip was up, to keep the buttons
+    // on the panel -- and that is precisely the state of a unit with the counter's
+    // lead unplugged and the Cells setting on, so on the bench the one figure that
+    // was wanted vanished. A guard that fires in a common state is not a guard.
+    //
+    // The page's own note records that in that state its children come to within
+    // ~3 px of the content box, and the tile does not scroll, so one more row would
+    // push the bottom of the gear off the panel. The row adds 24 px plus one 4 px
+    // gap; closing the page's seven 4 px row gaps gives back 28. So in exactly that
+    // state the gaps close and nothing is lost -- cramped for as long as the chip
+    // is up, but nothing hidden and no button clipped.
+    const bool flagUp = !lv_obj_has_flag(lblFlag, LV_OBJ_FLAG_HIDDEN);
+    const bool crowded = b.fitted && s.showCells && flagUp;
+    if (crowded != prevCrowded_) {
+      prevCrowded_ = crowded;
+      if (weightScr_) lv_obj_set_style_pad_row(weightScr_, crowded ? 0 : 4, LV_PART_MAIN);
+    }
+
+    const bool want = b.fitted;
+    const bool shown = !lv_obj_has_flag(bufRow_, LV_OBJ_FLAG_HIDDEN);
+    if (want != shown) {
+      if (want) lv_obj_remove_flag(bufRow_, LV_OBJ_FLAG_HIDDEN);
+      else lv_obj_add_flag(bufRow_, LV_OBJ_FLAG_HIDDEN);
+    }
+    // ON A DECISION CHANGE ONLY, and at warn level because that is the lowest this
+    // build prints: it is the one way to see from the console why a line is or is
+    // not on the glass -- the panel itself cannot be read remotely.
+    if (prevBufShown_ != (int8_t)want) {
+      prevBufShown_ = (int8_t)want;
+      LV_LOG_WARN("buffer row %s (fitted %d, cells shown %d, flag up %d, state %d)",
+                  want ? "SHOWN" : "hidden", (int)b.fitted, (int)s.showCells, (int)flagUp,
+                  (int)b.state);
+    }
+
+    if (want) {
+      char bb[24];
+      uint32_t col = C_TEXT;
+      if (b.state == Cell::Offline) {
+        // Said, not shown as a stale or zero figure: the refusal the total makes.
+        snprintf(bb, sizeof(bb), "offline");
+        col = C_CELL_FAULT;
+      } else if (b.state == Cell::Warming) {
+        snprintf(bb, sizeof(bb), "warming");
+        col = C_MUTED;
+      } else if (b.overRange) {
+        snprintf(bb, sizeof(bb), "OVER");  // a saturated cell reports its ceiling, not a mass
+        col = C_CELL_FAULT;
+      } else if (b.kgKnown) {
+        // ONE DECIMAL, FIXED -- not the counter's Precision setting. That setting
+        // exists for a 20 kg cell whose third decimal is a gram; this is a 200 kg
+        // cell whose own noise is several grams, so 000.0 kg is the honest
+        // resolution and 0.000 kg would be digits that will not sit still.
+        formatKg(bb, sizeof(bb), b.grams, 1);
+        const size_t n = strlen(bb);
+        snprintf(bb + n, sizeof(bb) - n, " kg");
+      } else {
+        // No zero or no factor yet: counts, exactly as the counter does until it is
+        // calibrated -- there is no unit behind the number, so none is drawn.
+        snprintf(bb, sizeof(bb), "%ld cts", (long)b.counts);
+        col = C_MUTED;
+      }
+      setIfChanged(lblBufVal_, prevBuf_, sizeof(prevBuf_), bb);
+      if (!haveBufColor_ || prevBufColor_ != col) {
+        haveBufColor_ = true;
+        prevBufColor_ = col;
+        lv_obj_set_style_text_color(lblBufVal_, lv_color_hex(col), LV_PART_MAIN);
       }
     }
   }

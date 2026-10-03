@@ -2,6 +2,12 @@
 // Bowlstack :: load-cell station -- Waveshare ESP32-S3-Touch-LCD-2,
 //              3x NAU7802 behind a TCA9548A
 //
+// Firmware: V1.10 261003
+//
+// Also carries the 200 kg buffer-stock cell on its own bus (IO21/IO16) -- see
+// buffer_scale.h. It is a separate instrument: nothing below sums it into the
+// counter's weight.
+//
 // Same board and the same UI as the touch-ui branch; a different measurement
 // underneath it. Where that branch put four VL53L0X on a pipe and counted
 // bowls, this one puts three 20 kg cells under one platform and weighs what is
@@ -54,6 +60,7 @@
 #include "logo128.h"
 #include "splash_font.h"
 #include "scale.h"
+#include "buffer_scale.h"
 #include <Preferences.h>
 
 #include "inputs.h"
@@ -476,6 +483,23 @@ void publishScale(uint32_t nowMs) {
   s.scale.showCells = sn.showCells;
   s.scale.zeroed = sn.zeroed;
   s.scale.calMassG = sn.calMassG;
+
+  // The 200 kg buffer cell, for the dashboard line under the total. EVERY field is
+  // set, because `s` started life as a copy of the demo fixture -- which now says a
+  // buffer module is fitted and reads 123.5 kg -- and an inherited claim about
+  // hardware is exactly what the ToF block further down warns about. On a unit
+  // with no module `fitted` is false and the line is not drawn.
+  {
+    const bufscale::Snapshot bs = bufscale::snapshot();
+    ui::ScaleView::BufferView &b = s.scale.buffer;
+    b.fitted = bs.fitted;
+    b.state = toUiCell(bs.state);
+    b.kgKnown = bs.kgKnown;
+    b.grams = bs.grams;
+    // Net of the stored zero when there is one, as the counter shows its own.
+    b.counts = bs.zeroed ? bs.counts - bs.zero : bs.counts;
+    b.overRange = bs.overRange;
+  }
 
   int32_t totalCounts = 0;
   for (uint8_t i = 0; i < ui::CELLS; i++) {
@@ -913,8 +937,12 @@ void serviceConsole() {
             "  which the total -- being a sum -- cannot show you. On three cells\n"
             "  that is also how you find the corner the platform is not sitting\n"
             "  on, which is the fault three cells were fitted to remove.\n");
+        bufscale::printHelp();
         break;
       default:
+        // The buffer cell's own keys (b / g / k). Anything else is still ignored:
+        // consoleKey() returns false for a byte that is not one of its own.
+        bufscale::consoleKey(c);
         break;  // newlines and stray bytes from a terminal are not errors
     }
   }
@@ -1015,6 +1043,12 @@ void setup() {
   // under that mutex.
   scale::begin();
   bootMark("load cells");
+
+  // The 200 kg buffer cell, on its own bus and its own task. AFTER the counter's
+  // cells so a fault here cannot delay them, and a no-op on a unit with no module
+  // fitted. It shares no register, mutex or NVS key with scale.cpp.
+  bufscale::begin();
+  bootMark("buffer cell");
 
   // --- lvgl ---------------------------------------------------------------
   Serial.println("\n--- lvgl ---");
@@ -1385,6 +1419,10 @@ void loop() {
       }
       Serial.printf("  total  %ld counts   UNCALIBRATED -- Menu > Settings > Scale\n", (long)net);
     }
+    // The 200 kg buffer cell, directly under the counter's total and kept out of
+    // it: it is a different instrument and is never part of that sum. Prints
+    // nothing on a unit with no module fitted.
+    bufscale::printStatus();
     // THE UPLINK LINE. A station that weighs perfectly and publishes nothing
     // looks, from the panel, exactly like one doing both -- and the dashboard
     // is the only place the difference shows, which is precisely where nobody

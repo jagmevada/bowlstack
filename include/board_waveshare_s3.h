@@ -337,8 +337,9 @@ static const int8_t CAM_SCCB_SCL = 16;
 // entirely on P2, which is the separation the pin audit wanted and could not
 // have while the bus was on the camera pair.
 //
-// IO21 and IO16 are free again, and they are the two most valuable free pins on
-// the board: a complete I2C bus with pull-ups already fitted.
+// IO21 and IO16 were free again here, and they are the two most valuable free pins
+// on the board: a complete I2C bus with pull-ups already fitted. THEY ARE NOW
+// SPENT: section 10 puts the 200 kg buffer module on them.
 static const int8_t CELL_SDA = 12;  // P2-10  -- NO on-board pull-up, fit 4.7k
 static const int8_t CELL_SCL = 11;  // P2-9   -- NO on-board pull-up, fit 4.7k
 
@@ -508,5 +509,53 @@ static const bool STATUS_LED_ACTIVE_HIGH = true;
 // capable, so SW can wake the chip; IO2 and IO4 are too, if turning the knob
 // should also wake it.
 static const bool ENC_SW_IS_WAKE_CAPABLE = true;
+
+// ---------------------------------------------------------------------------
+// 10. The 200 kg buffer-stock module -- a SECOND, separate bus
+// ---------------------------------------------------------------------------
+// One NAU7802 behind its own TCA9548A, built exactly like the counter's three and
+// joined to the board by its own four-wire lead. It does NOT share the cell trunk
+// of section 8, for three reasons that are each sufficient:
+//
+//   * IT IS THE SAME MODULE, so its mux is ALSO at 0x70. Two 0x70s on one trunk
+//     both answer and both drive the bus. Sharing would mean re-strapping one to
+//     0x71 and teaching the (deliberately one-mux) driver about two.
+//   * A cable pulled, or a stub latched low, on the 200 kg lead must not be able
+//     to take the counter's cells down -- or the other way round. The counter's
+//     trunk has an undiagnosed dropout (see todo.md); a second measurement that
+//     must not be lost should not be hanging on it.
+//   * A long lead on a shared 400 kHz trunk eats the rise-time budget of every
+//     cell on it.
+//
+// IO21/IO16 is the camera's SCCB pair, with R4/R5 (4.7k to 3V3) already fitted and
+// nothing on J1 -- section 7 calls them the two most valuable free pins on the
+// board, and this is what they were saved for. They are broken out on P1: SDA on
+// P1-7, SCL on P1-4.
+//
+// IT IS BIT-BANGED, and that is forced rather than chosen. The S3 has two I2C
+// controllers: port 0 is LovyanGFX's (touch + IMU), port 1 is the cell trunk.
+// Port -1 is lgfx's first software slot -- the one the original two-cell build
+// ran cell B on, at 100 kHz, so the mechanism is proven on this very board. One
+// converter at 10 SPS asks very little of it.
+//
+// WIRING, CONFIRMED ON THE BENCH 2026-10-03 with a scan that tried both
+// orientations: SDA=IO21 / SCL=IO16 answers (mux at 0x70, a NAU7802 at 0x2A on
+// channel 0, revision register 0x0F); the swapped pair shows nothing. As with the
+// trunk, a swap is silent rather than noisy, so that check is worth repeating
+// after any rewiring.
+//
+// P1 HAS NO 3V3. The lead's VCC has to come from P2-1 (and GND from P2-2 or
+// P1-13), so this lead splits across both headers -- the very thing section 8's
+// move onto P2 was meant to end for the counter's. Accepted: the alternative was
+// the trunk.
+//
+// The pull-ups are the board's R4/R5 PLUS the mux breakout's own, ~2.35k in
+// parallel. That is ~1.4 mA of sink current, inside the 3 mA I2C allows, and a
+// non-issue at 100 kHz.
+static const int8_t BUF_SDA = CAM_SCCB_SDA;  // IO21, P1-7
+static const int8_t BUF_SCL = CAM_SCCB_SCL;  // IO16, P1-4
+static const int BUF_PORT = -1;              // lgfx bit-banged slot 0
+static const uint8_t BUF_MUX_ADDR = 0x70;    // A0/A1/A2 grounded -- own bus, so no clash
+static const int8_t BUF_MUX_CH = 0;          // the one cell is on channel 0
 
 }  // namespace board

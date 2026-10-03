@@ -30,7 +30,12 @@ NAU7802 bridge converters under one platform instead of four VL53L0X up a pipe.
 > the direction that costs somebody an afternoon with a scope. What is true at
 > HEAD: GPIO47/48 carries the touch chip and the IMU, GPIO11/12 is the cell
 > trunk and needs its pull-ups from the mux breakout, and GPIO21/16 — the SCCB
-> pair with R4/R5 fitted — is the one that is now free.
+> pair with R4/R5 fitted — carries the **200 kg buffer-stock module**: its own
+> NAU7802 behind its own TCA9548A at 0x70, bit-banged (both hardware ports are
+> spent), SDA on P1-7 and SCL on P1-4. It is a separate instrument from the
+> counter — `src/loadcell/buffer_scale.cpp`, console keys `z`/`g`/`k`, nothing
+> summed into the counter's weight. `include/board_waveshare_s3.h` section 10 is
+> the authority. There is no panel page or upload for it yet.
 
 The ToF branch is `touch-ui` and is untouched; the discrete ToF product is
 `main`. `src/bringup/bringup_display.cpp` and `bringup_sensors.cpp` were removed
@@ -163,6 +168,48 @@ PATH="/c/msys64/mingw64/bin:$PATH" ./.pio/build/sim/program.exe
 without it the process exits instantly, which is easy to misread as a crash in
 the UI -- it has been misread that way once already. Backgrounding it from a
 shell that then exits produces the same false alarm, reported as a segfault.
+
+---
+
+## Every flash bumps the version. Mandatory, no exceptions.
+
+**Before any build that is going to be flashed, bump `BOWLSTACK_FW_VERSION`.** It
+is the last line under the logo on the splash, it is printed at boot
+(`device LDC-001, fw …`), and it is published in telemetry. It is the only thing
+that tells anyone which code is on a unit without reading its flash back.
+
+> This rule exists because it was not followed. A unit came back from the field
+> with `V1.2 260901` on its logo page while running code from 4 September, two
+> commits later. Nothing on the board could say so; proving what it ran took an
+> esptool flash digest compared against a rebuild.
+
+**Format `V<major>.<minor> <YYMMDD>`**, e.g. `V1.3 261003`. Every flash: minor
+goes up by one and the date becomes the flash date. Several flashes in a day are
+exactly what the minor number is for, so a string is never reused. The major
+number moves only when the user says so.
+
+**The same string, character for character, goes in four places:**
+
+| Where | Why |
+| --- | --- |
+| `platformio.ini`, `[env:ws-s3-loadcell]`, `-DBOWLSTACK_FW_VERSION` | the source of truth — the splash, the console and telemetry all read this flag |
+| `platformio.ini`, `[env:sim]`, same flag | the simulator defines it separately; if the two differ, one commit shows two versions |
+| `src/loadcell/loadcell_main.cpp`, a `// Firmware: …` line in the header comment | this image's entry point names its version in the source (`src/main.cpp` is the discrete ToF image — leave it, and `version.h`'s fallback, alone) |
+| the commit message, a `Firmware: …` line in the body, above the Co-Authored-By | so `git log --grep "Firmware: V1.3"` finds the code behind a version seen on a unit |
+
+**The bump is committed with the code that was flashed**, not in a later commit.
+If the flash came first, commit straight after, with the same string.
+
+Before flashing:
+
+```
+grep -n "BOWLSTACK_FW_VERSION" platformio.ini      # [env:ws-s3-loadcell] and [env:sim] lines must be identical
+grep -n "Firmware:" src/loadcell/loadcell_main.cpp # must show the same string (add the line on the first bump if absent)
+```
+
+After flashing, **look at the device**: the logo page or the boot line on the
+console must show the new string. If it shows the old one, the flash did not
+take, whatever `pio` reported. Say the version in the done message.
 
 ---
 
