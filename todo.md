@@ -47,7 +47,7 @@ A/B/C cell rows leave the main page (Diagnose keeps them).
 | V1.16 | Set platform zero goes home to confirm, and waits for a full window instead of being dropped |
 | V1.17 | counter vessel offset applies only while a vessel is on (gross ≥ half the offset) — `lscale::netOfVessel()`, host-tested; panel and weight_g share it |
 | V1.18 | Settings › Precision back: 0.0 / 0.00 kg for every figure, `bowlscale/dec`, console `d` |
-| V1.19 | Settings › Vessel correction on/off for C1 **and** every buffer (`bowlscale/vesOn`, console `v`); off = gross everywhere, weight_g included |
+| V1.19 | Settings › Vessel correction on/off for C1 **and** every buffer (`bowlscale/vesOn`, console `v`); off = gross on the panel. (V1.23: weight_g is always food — the owner chose "dashboard always food") |
 
 **Calibration state.** C1 = 106.857 counts/g (the old 2-cell figure — never verified on
 three cells; the owner's own 3-cell calibrations gave 108.9 / 109.2, i.e. C1 likely reads

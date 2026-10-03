@@ -223,11 +223,11 @@ const char *const ST_UNCALIBRATED  = "uncalibrated";
 const char *const ST_UNTARED       = "untared";
 const char *const ST_OK            = "ok";
 
-// What goes in weight_g: the panel's C1 figure exactly -- the vessel rule, and the
-// vessel correction switch (off sends the gross, as the panel then shows it).
-float netGrams(const scale::Snapshot &s) {
-  return lscale::netOfVessel(s.totalGrams, s.vesselOn ? s.vesselOffsetG : 0.0f);
-}
+// What goes in weight_g: FOOD, net of the vessel by its rule -- ALWAYS. The panel's
+// Vessel correction switch changes only what the PANEL shows (owner, 2026-10-03):
+// slot stock and burn rate sum weight_g as food, so a gross figure sent while the
+// switch was off read as 2.5 kg of phantom food and a refill whenever it flipped.
+float netGrams(const scale::Snapshot &s) { return lscale::netOfVessel(s.totalGrams, s.vesselOffsetG); }
 
 const char *weightState(const scale::Snapshot &s) {
   // No converter is answering. This is also what a missing or unpowered mux

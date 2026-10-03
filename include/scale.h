@@ -227,7 +227,9 @@ float setVesselOffset(float grams);
 
 // THE VESSEL CORRECTION, ON OR OFF FOR EVERY PLATFORM AT ONCE: the counter's
 // vessel offset above AND each buffer's bowls x dry mass. Off, C1 and B1..B3 all
-// read their gross load -- for checking a known mass or running without vessels.
+// read their gross load ON THE PANEL -- for checking a known mass or running
+// without vessels. The database always gets food (scale_telemetry netGrams()):
+// stock and burn rate are food, whatever this switch says.
 // The offset and the bowl counts are kept, not cleared, so switching back on
 // needs no re-entry. Lives here because this namespace already holds the
 // panel's display settings; default on; persisted; queued like every setting
@@ -315,7 +317,7 @@ struct Snapshot {
   // feature is off. Never applied to taring or to the per-cell figures -- see
   // the note where it is used.
   float vesselOffsetG;
-  bool vesselOn;   // the correction switch -- see vesselOn(); off = gross everywhere
+  bool vesselOn;   // the correction switch -- see vesselOn(); off = gross on the panel only
   bool overRange;  // at least one cell is saturated -- the total is not a weight
 
   // Increments on every publish. Lets a reader tell a fresh snapshot from a

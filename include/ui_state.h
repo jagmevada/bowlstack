@@ -106,8 +106,8 @@ struct ScaleView {
   bool platformZeroed;
   // Empty-vessel mass to subtract from what is shown and sent. 0 = off.
   float vesselOffsetG;
-  // THE VESSEL CORRECTION SWITCH, for every platform: off, C1 drops its vessel
-  // offset and the buffers show gross instead of food. Use vesselAppliedG().
+  // THE VESSEL CORRECTION SWITCH, for every platform, ON THE PANEL: off, C1 drops its
+  // vessel offset and the buffers show gross instead of food. Use vesselAppliedG().
   bool vesselOn;
   bool overRange;  // at least one cell saturated -- the total is not a weight
 
@@ -138,8 +138,9 @@ struct ScaleView {
   uint8_t online;
 };
 
-// The counter's offset as it is APPLIED: the stored mass while the correction is
-// on, nothing while it is off. The one place both the panel and the device read it.
+// The counter's offset as the PANEL applies it: the stored mass while the correction
+// is on, nothing while it is off. The uplink does not use it -- the database always
+// gets food (scale_telemetry.cpp netGrams()).
 inline float vesselAppliedG(const ScaleView &s) { return s.vesselOn ? s.vesselOffsetG : 0.0f; }
 
 // --- the weighing platforms ---------------------------------------------------
