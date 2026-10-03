@@ -516,7 +516,11 @@ function weightCard(dev) {
   const detail = [];
   if (dev.counts_per_gram != null) {
     detail.push(kv('Calibration', `${Number(dev.counts_per_gram).toFixed(3)} counts/g`));
-  } else if (dev.reported) {
+  } else if (dev.weight_state === 'uncalibrated') {
+    // Only when the device says so. A NULL factor alone is also every row
+    // that never sent weight fields at all -- BWL-001's last row is the old
+    // ToF board's -- and calling that "never calibrated" claims a fact
+    // nobody measured.
     detail.push(kv('Calibration', 'never calibrated'));
   }
   if (dev.net_counts != null) {
