@@ -36,8 +36,13 @@ A/B/C cell rows leave the main page (Diagnose keeps them).
 | 4 | upload: per-device channel refactor of `scale_telemetry` (counter JSON must stay byte-identical); buffer channel sends FOOD as weight_g always (owner: "dashboard always food"), plus gross_g / bowls / bowls_confirmed, NULL unless ok | **next after the cut-over** — until then BWL-001 is blank on the dashboard |
 | 5 | `cutover_buffers.sql` / rollback: re-kind **every** BWL-001..032 to `buffer`, NULL their stack_* | **RUN LIVE 2026-10-04**: 32 BWL now `buffer`, 0 stacks left, BWL updated_at untouched |
 | 6 | web front end, version 1.42 (kg for buffers, works before and after the migration) | **LIVE 2026-10-04** (pushed 179d094..e0db892, Pages deploy ok, site serves 1.42) |
-| 7 | `tools/fleet_sim.py` to kg for BWL-004..024 (001..003 are the panel's), whole-bowl steps | **RUNNING** since the cut-over (`--live --always`, 21 buffers fresh, 0 errors) — on the owner's PC, stops with that session |
+| 7 | `tools/fleet_sim.py` to kg for BWL-004..024 (001..003 are the panel's), whole-bowl steps; HUB-M/HUB-T heartbeats, node health, no platform battery | done; **stopped** at the owner's request — restart only when wanted |
+| 7b | area hubs: `migrate_hubs.sql` (kind `hub`, HUB-D/M/T carry battery + on-charger; platforms carry node health — supply mV, checksum errors, responding, no-load g); panel **V1.25 261004** PATCHes HUB-D; dashboard **1.43** (hub rows with active/mapped node counts, Hub MAC on platform pages, Master hall line opens that hall's Stock) | **LIVE 2026-10-04**: dry run digest bfb6a893…/20 == tested, applied, 25 platform battery rows trimmed; V1.25 flashed; pushed e0db892..4fc8248, site serves 1.43. Hub/LDC upload **not verified live** — bench panel has no WiFi |
 | 8–9 | docs; remove dormant bowl code | |
+
+**Local Supabase:** `bash tools/localdb.sh up|load|env|down` — Docker stack built from
+this repo's SQL (workdir `tools/localdb/`, gitignored). Point `fleet_sim.py` and a
+locally served dashboard at it for corner cases without touching foodcount.
 
 **Done on the bench, 2026-10-03 evening (V1.14–V1.19, `3ca63ba`..`295cbe0`, not pushed):**
 
@@ -61,11 +66,13 @@ B1 — deferred, no mass available.**
 **Open:**
 - `bowlscale/cpg` was found cleared **twice** (field trial, and again during V1.18) —
   each time an explicit 0.0, which only the single-tap *Clear calibration* row (or `x`)
-  writes. Two-tap arming like the buffer pages' Zero/Clear was offered, not yet decided.
+  writes. Now two-tap ("Clear cal", "tap again").
+- Breakfast window is a DEBUG 01:00 on live — restore before the real trial:
+  `update public.service_windows set starts_at='06:30' where id=1;`
 - NAU7802 first transaction after an ESP reset sometimes fails / reads rev 0x00 —
   contained by verify + retry, root cause not found.
 - `logBowls` wording on an empty reset reads "count reset to 0 +0 (step -0.0 kg)".
-- None of V1.12–V1.19 has had an independent review (ask before running one).
+- None of V1.12–V1.25 has had an independent review (ask before running one).
 
 ---
 

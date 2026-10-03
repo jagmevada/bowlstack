@@ -55,3 +55,6 @@ supabase/.temp/
 # Python bytecode (fleet_sim.py is run and compile-checked locally).
 __pycache__/
 *.pyc
+
+# Local Supabase workdir (tools/localdb.sh): CLI project, outputs, local keys.
+tools/localdb/
