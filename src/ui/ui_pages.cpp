@@ -326,7 +326,55 @@ bool built_[9] = {false, false, false, false, false, false, false, false, false}
 // below because it is part of the navigation rather than of construction.
 void back();
 
+// --- Settings > Buffers, built on first open ----------------------------------------
+// A list of the platforms, then one page each. Rows rather than a bespoke screen for
+// the reason the Scale page gives: adding a setting is adding a row. Per-slot pages
+// rather than one page with a selector, because a selector that is easy to leave on
+// the wrong platform is how B1 gets zeroed with B2's stock on it.
+template <uint8_t I> void openBufT();
+template <uint8_t I> void openBufCalT();
+
+void buildBuffersMenu() {
+  buffersMenu_ = menuCreate(detailBuffers_, "Buffers", back);
+  menuAddRow(buffersMenu_, "B1", nullptr, openBufT<0>);
+  menuAddRow(buffersMenu_, "B2", nullptr, openBufT<1>);
+  menuAddRow(buffersMenu_, "B3", nullptr, openBufT<2>);
+}
+
+void buildBufMenu(uint8_t i) {
+  static void (*const ZERO[BUFFERS])(void) = {bufZeroT<0>, bufZeroT<1>, bufZeroT<2>};
+  static void (*const CLEAR[BUFFERS])(void) = {bufClearT<0>, bufClearT<1>, bufClearT<2>};
+  static void (*const UP[BUFFERS])(void) = {bufUpT<0>, bufUpT<1>, bufUpT<2>};
+  static void (*const DOWN[BUFFERS])(void) = {bufDownT<0>, bufDownT<1>, bufDownT<2>};
+  static void (*const CAL[BUFFERS])(void) = {openBufCalT<0>, openBufCalT<1>, openBufCalT<2>};
+  static const char *const TITLE[BUFFERS] = {"Buffer B1", "Buffer B2", "Buffer B3"};
+  bufMenu_[i] = menuCreate(detailBuf_[i], TITLE[i], back);
+  // Order: what it is and what it reads, then the everyday correction, then the
+  // commissioning actions, then the outcome. Indices are the ROW_BUF_* above.
+  menuAddRow(bufMenu_[i], "Platform", nullptr, nullptr);
+  menuAddRow(bufMenu_[i], "Reading", nullptr, nullptr);
+  menuAddRow(bufMenu_[i], "Bowls", nullptr, nullptr);
+  menuAddRow(bufMenu_[i], "Bowls +1", nullptr, UP[i]);
+  menuAddRow(bufMenu_[i], "Bowls -1", nullptr, DOWN[i]);
+  menuAddRow(bufMenu_[i], "Zero (empty)", nullptr, ZERO[i]);
+  menuAddRow(bufMenu_[i], "Calibrate", nullptr, CAL[i]);
+  menuAddRow(bufMenu_[i], "Clear cal", nullptr, CLEAR[i]);
+  menuAddRow(bufMenu_[i], "Last", nullptr, nullptr);
+}
+
 void ensureBuilt(lv_obj_t *page) {
+  // The buffer pages: their menus are the hints' targets, and pagesTick() already
+  // skips a menu that is still null, so a page nobody has opened costs nothing.
+  if (page == detailBuffers_ && !buffersMenu_) {
+    buildBuffersMenu();
+    return;
+  }
+  for (uint8_t i = 0; i < BUFFERS; i++) {
+    if (page == detailBuf_[i] && !bufMenu_[i]) {
+      buildBufMenu(i);
+      return;
+    }
+  }
   if (page == detailBufCal_ && !built_[8]) {
     built_[8] = true;
     buildBufCalPage(detailBufCal_);
@@ -604,37 +652,12 @@ void buildPages() {
   menuAddRow(scaleMenu_, "Restore default", nullptr, doRestore);
 
   // --- Settings > Buffers -----------------------------------------------------
-  // A list of the platforms, then one page each. Rows rather than a bespoke screen
-  // for the reason the Scale page gives: adding a setting is adding a row. Per-slot
-  // pages rather than one page with a selector, because a selector that is easy to
-  // leave on the wrong platform is how B1 gets zeroed with B2's stock on it.
+  // CONTAINERS ONLY, like every detail page: the menus are built on first open (see
+  // buildBuffersMenu() / buildBufMenu()). Building all four here -- thirty rows --
+  // took buildPages() from ~2.0 s to ~8.5 s on the panel (V1.12/V1.13 boot lines):
+  // the same trade the note above ensureBuilt() makes, re-learned.
   detailBuffers_ = makeDetail(scr);
-  buffersMenu_ = menuCreate(detailBuffers_, "Buffers", back);
-  menuAddRow(buffersMenu_, "B1", nullptr, openBufT<0>);
-  menuAddRow(buffersMenu_, "B2", nullptr, openBufT<1>);
-  menuAddRow(buffersMenu_, "B3", nullptr, openBufT<2>);
-
-  static void (*const ZERO[BUFFERS])(void) = {bufZeroT<0>, bufZeroT<1>, bufZeroT<2>};
-  static void (*const CLEAR[BUFFERS])(void) = {bufClearT<0>, bufClearT<1>, bufClearT<2>};
-  static void (*const UP[BUFFERS])(void) = {bufUpT<0>, bufUpT<1>, bufUpT<2>};
-  static void (*const DOWN[BUFFERS])(void) = {bufDownT<0>, bufDownT<1>, bufDownT<2>};
-  static void (*const CAL[BUFFERS])(void) = {openBufCalT<0>, openBufCalT<1>, openBufCalT<2>};
-  static const char *const TITLE[BUFFERS] = {"Buffer B1", "Buffer B2", "Buffer B3"};
-  for (uint8_t i = 0; i < BUFFERS; i++) {
-    detailBuf_[i] = makeDetail(scr);
-    bufMenu_[i] = menuCreate(detailBuf_[i], TITLE[i], back);
-    // Order: what it is and what it reads, then the everyday correction, then the
-    // commissioning actions, then the outcome. Indices are the ROW_BUF_* above.
-    menuAddRow(bufMenu_[i], "Platform", nullptr, nullptr);
-    menuAddRow(bufMenu_[i], "Reading", nullptr, nullptr);
-    menuAddRow(bufMenu_[i], "Bowls", nullptr, nullptr);
-    menuAddRow(bufMenu_[i], "Bowls +1", nullptr, UP[i]);
-    menuAddRow(bufMenu_[i], "Bowls -1", nullptr, DOWN[i]);
-    menuAddRow(bufMenu_[i], "Zero (empty)", nullptr, ZERO[i]);
-    menuAddRow(bufMenu_[i], "Calibrate", nullptr, CAL[i]);
-    menuAddRow(bufMenu_[i], "Clear cal", nullptr, CLEAR[i]);
-    menuAddRow(bufMenu_[i], "Last", nullptr, nullptr);
-  }
+  for (uint8_t i = 0; i < BUFFERS; i++) detailBuf_[i] = makeDetail(scr);
 
   // CONTAINERS ONLY. Each page's contents are built the first time it is
   // opened -- see ensureBuilt() above for the measurements that moved them.
@@ -724,6 +747,13 @@ void pagesPreviewOpen(const char *name) {
     push(detailBuf_[0]);
     push(detailBufCal_);
   } else if (!strcmp(name, "diagnose")) { push(detailSettings_); push(detailDevice_); }
+}
+
+void pagesBuildAll() {
+  lv_obj_t *const all[] = {detailBuffers_, detailBuf_[0], detailBuf_[1], detailBuf_[2],
+                           detailBufCal_,  detailCalib_,  detailVessel_, detailWifi_,
+                           detailBatt_,    detailSensor_, detailDevice_};
+  for (lv_obj_t *p : all) ensureBuilt(p);
 }
 
 void pagesTick(uint32_t nowMs) {

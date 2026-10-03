@@ -100,6 +100,11 @@ void pagesOnBufferClear(void (*cb)(uint8_t slot));
 // calls it.
 void pagesPreviewOpen(const char *name);
 
+// DIAGNOSTIC: builds every lazily built page now, without showing any. Pages are
+// never freed once built, so the LVGL pool after this is the most a session can ask
+// of it -- the number to check whenever a page is added.
+void pagesBuildAll();
+
 // TRIAL HARNESS. Cycles which page the device settles on -- weight or knob.
 // The UI does not persist it: src/ui/ has no NVS and no business having one, so
 // the platform stores the choice and hands it back through State::defaultPage.

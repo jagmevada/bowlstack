@@ -2,7 +2,7 @@
 // Bowlstack :: load-cell station -- Waveshare ESP32-S3-Touch-LCD-2,
 //              3x NAU7802 behind a TCA9548A
 //
-// Firmware: V1.13 261003
+// Firmware: V1.14 261003
 //
 // Also carries the 200 kg buffer-stock cell on its own bus (IO21/IO16) -- see
 // buffer_bank.h. It is a separate instrument: nothing below sums it into the
@@ -989,6 +989,23 @@ void serviceConsole() {
       case 'D':
         Serial.printf("\n> reading -> %u decimals\n", scale::cycleDecimals());
         break;
+      case 'p':
+      case 'P': {
+        // An exhausted pool does not fail politely: LV_ASSERT_MALLOC spins forever,
+        // which is how V1.13 froze on opening Calibrate (78k of 85k used at boot).
+        lv_mem_monitor_t m;
+        lv_mem_monitor(&m);
+        Serial.printf("\n> build every page: lvgl %luk used, %luk free, frag %u%%",
+                      (unsigned long)((m.total_size - m.free_size) / 1024),
+                      (unsigned long)(m.free_size / 1024), m.frag_pct);
+        ui::pagesBuildAll();
+        lv_mem_monitor(&m);
+        Serial.printf(" -> %luk used, %luk free, biggest %luk, frag %u%%\n",
+                      (unsigned long)((m.total_size - m.free_size) / 1024),
+                      (unsigned long)(m.free_size / 1024),
+                      (unsigned long)(m.free_biggest_size / 1024), m.frag_pct);
+        break;
+      }
       case '?':
         Serial.println(
             "\n  t      tare EVERY cell at whatever is on the platform NOW\n"
@@ -1010,6 +1027,8 @@ void serviceConsole() {
             "  w      step the moving average 8 -> 16 -> 32 -> 64 -> 128 -> 8\n"
             "  d      step the reading 0.0 -> 0.00 -> 0.000 kg -> 0.0 (display\n"
             "         only; Diagnose keeps all three places whatever this says)\n"
+            "  p      build every settings page now and print the LVGL pool before\n"
+            "         and after -- the most a session can ask of it\n"
             "\n  Order matters: tare on an EMPTY platform, then put the mass on,\n"
             "  wait for the reading to settle, then calibrate.\n"
             "\n  1/2/3 are the SETUP tools: zeroing one corner against the others\n"
@@ -1138,6 +1157,18 @@ void setup() {
   // timer and input read period sees zero elapsed time, which presents as a
   // screen that draws once and never updates.
   lv_tick_set_cb(reinterpret_cast<lv_tick_get_cb_t>(millis));
+
+  // A SECOND WIDGET POOL, IN PSRAM. Pages are built on first open and never freed,
+  // so the pool has to hold every page at once, and the internal 96k could not:
+  // V1.13 opened Calibrate with 78k used and LVGL's default assert handler, while(1),
+  // froze the panel for good. PSRAM because internal RAM is kept for WiFi and TLS;
+  // the same size as the first pool because TLSF's bins are sized from LV_MEM_SIZE
+  // and refuse a bigger one. A failure leaves the panel as it was, and says so.
+  // ponytail: one fixed pool; free pages on close if this is ever outgrown.
+  if (void *more = heap_caps_malloc(LV_MEM_SIZE, MALLOC_CAP_SPIRAM))
+    lv_mem_add_pool(more, LV_MEM_SIZE);
+  else
+    Serial.println("  PSRAM widget pool not allocated -- opening every page may exhaust LVGL");
 
   buf1 = (uint8_t *)heap_caps_malloc(LV_BUF_BYTES, MALLOC_CAP_DMA);
   buf2 = (uint8_t *)heap_caps_malloc(LV_BUF_BYTES, MALLOC_CAP_DMA);

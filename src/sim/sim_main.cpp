@@ -71,6 +71,9 @@ int main(int, char **) {
   if (shotPath) SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");
 
   lv_init();
+  // A second pool, as the device adds one: every page once opened stays built, and
+  // with one pool the preview froze (LVGL's assert is while(1)) at about the seventh.
+  lv_mem_add_pool(malloc(LV_MEM_SIZE), LV_MEM_SIZE);
 
   // SDL_GetTicks rather than anything of our own: LVGL 9 takes its tick source
   // at runtime, and without one every timer and animation sees zero elapsed
