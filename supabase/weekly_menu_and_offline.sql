@@ -6,10 +6,11 @@
 --  Run as owner in the Supabase SQL editor. schema.sql has been updated to
 --  produce the same result on a fresh rebuild, so nothing here can drift.
 --
---  ORDERING: RUN migrate_bowl_weight.sql AND migrate_loadcell.sql FIRST.
---  This file carries full copies of device_overview and slot_overview, and
---  those bodies now read devices.kind and device_status.weight_*, which only
---  exist after the load-cell migration. It also recreates
+--  ORDERING: RUN migrate_bowl_weight.sql AND apply_loadcell.sql (which ends
+--  with migrate_buffer.sql) FIRST. This file carries full copies of
+--  device_overview and slot_overview, and those bodies now read devices.kind,
+--  device_status.weight_* and the buffer columns (bowls, bowls_confirmed,
+--  gross_g), which only exist after those migrations. It also recreates
 --  meal_mapping_preload with the bowl_weight_g column the weight migration
 --  added. Run out of order it aborts on a missing column -- so section 0
 --  below checks first and says which file to run, rather than leaving a
@@ -103,6 +104,14 @@ begin
     raise exception
       'Run supabase/migrate_bowl_weight.sql before this file: '
       'meal_mapping_preload below returns bowl_weight_g, which it adds.';
+  end if;
+  if not exists (select 1 from information_schema.columns
+                  where table_schema = 'public' and table_name = 'device_status'
+                    and column_name = 'bowls') then
+    raise exception
+      'Run supabase/migrate_buffer.sql (the last part of apply_loadcell.sql) '
+      'before this file: the view bodies below read device_status.bowls, '
+      'bowls_confirmed and gross_g, which it adds.';
   end if;
 end $$;
 
@@ -613,7 +622,14 @@ select d.device_id,
        s.weight_state,
        s.cells_online,
        s.counts_per_gram,
-       s.net_counts
+       s.net_counts,
+
+       -- The buffer half (migrate_buffer.sql), appended last for the same
+       -- reason. NULL on every scale and stack, and on a buffer whenever
+       -- weight_state is not 'ok'.
+       s.bowls,
+       s.bowls_confirmed,
+       s.gross_g
   from public.devices d
   left join public.device_status s using (device_id)
   left join public.meal_food_mapping m
@@ -630,87 +646,116 @@ select d.device_id,
 -- while the header two hundred lines up promised it was safe on live. Second
 -- time this file has broken that promise by holding a stale copy of something
 -- schema.sql also defines; verify.mjs case 11 now fingerprints it.
+--
+-- RESYNCED for migrate_buffer.sql: kind-filtered stack terms, the measured
+-- buffer, weight_g NULL (never 0) when nothing is known, and six appended
+-- buffer columns. See migrate_buffer.sql section 9 for each rule.
 create or replace view public.slot_overview
 with (security_invoker = true) as
-select d.location,
-       d.food_slot,
-       max(m.food_name)                                        as current_food,
-       public.current_meal_type(max(d.timezone))               as current_meal,
-       count(*) filter (where d.kind = 'stack')                as devices,
-       count(*) filter (where d.kind = 'stack'
-                          and coalesce(s.reported, false))     as devices_reported,
-
-       (count(*) filter (where d.kind = 'stack') * 4)::bigint  as bowls_capacity,
-
-       sum(s.stack_count) filter (where s.stack_status = 'ok') as bowls_trusted,
-       sum(s.stack_count)                                      as bowls_reported,
-
-       bool_or(s.stack_status = 'discontiguous')               as any_fault,
-       bool_or(s.stack_status = 'degraded')                    as any_degraded,
-       -- Battery and liveness are NOT filtered by kind. A load cell has a
-       -- battery and can go dark exactly like a stack, and a slot whose scale
-       -- is flat is a slot that needs somebody -- so these keep meaning "any
-       -- device here", which is what they already said.
-       bool_or(s.battery_level in ('low','critical'))          as any_battery_warn,
-       bool_or(coalesce(s.reported, false)
-               and public.in_service_window(now(), d.timezone, d.device_id)
-               and s.updated_at < now() - public.offline_after()) as any_offline,
-       min(s.updated_at)                                       as oldest_update,
-
-       bool_or(coalesce(coalesce(s.reported, false)
-               and d.location in ('D','M','T')
-               and d.food_slot is not null
-               and s.updated_at <
-                   public.last_service_window_end(d.timezone, d.device_id)
-                     - public.offline_after(),
-               false))                                         as any_missed_service,
-
-       -- Appended: what the scales at this position say. NULL rather than 0
-       -- when none of them has a usable weight -- sum() over an empty filter
-       -- is NULL, which is the answer we want.
-       count(*) filter (where d.kind = 'scale')                as scales,
-       count(*) filter (where d.kind = 'scale'
-                          and s.weight_state = 'ok')           as scales_ok,
-       sum(s.weight_g) filter (where d.kind = 'scale'
-                                 and s.weight_state = 'ok')    as measured_weight_g,
-       -- Why any scale here is NOT contributing a weight, so the screen can
-       -- name the fault instead of showing a silently smaller total. 'ok' is
-       -- removed because it is not an issue.
-       array_remove(array_agg(distinct s.weight_state)
-                    filter (where d.kind = 'scale'), 'ok')     as scale_issues,
-
-       -- THE SAME ARITHMETIC slot_quantity DOES, one grouping down. Stock is
-       -- per HALL per position where Master is per position across halls, and
-       -- both screens must answer "how much food is here" with the same
-       -- number -- so the sum is computed once per row here rather than in the
-       -- client, which is the rule slot_overview already follows for bowls.
-       max(m.bowl_weight_g)                                    as bowl_weight_g,
-       (sum(s.stack_count) filter (where s.stack_status = 'ok'))
-         * max(m.bowl_weight_g)                                as buffer_g,
-       -- coalesce per TERM, never on the sum: a position with a counter and no
-       -- valued buffer has a real total, and so does the reverse. NULL only
-       -- when neither term exists -- which for this view means the dish has no
-       -- per-bowl weight AND no scale is reporting, and the card falls back to
-       -- showing bowls.
-       case when max(m.bowl_weight_g) is null
-                 and sum(s.weight_g) filter (where d.kind = 'scale'
-                                               and s.weight_state = 'ok') is null
-            then null
-            else coalesce((sum(s.stack_count) filter (where s.stack_status = 'ok'))
-                            * max(m.bowl_weight_g), 0)
-               + coalesce(sum(s.weight_g) filter (where d.kind = 'scale'
-                                                    and s.weight_state = 'ok'), 0)
-       end                                                     as weight_g
-  from public.devices d
-  left join public.device_status s using (device_id)
-  left join public.meal_food_mapping m
-         on m.location  = d.location
-        and m.food_slot = d.food_slot
-        and m.meal_date = public.current_meal_date(d.timezone)
-        and m.meal_type = public.current_meal_type(d.timezone)
- where d.location is not null
-   and d.food_slot is not null
- group by d.location, d.food_slot;
+with a as (
+  select d.location,
+         d.food_slot,
+         max(m.food_name)                                        as current_food,
+         public.current_meal_type(max(d.timezone))               as current_meal,
+         count(*) filter (where d.kind = 'stack')                as devices,
+         count(*) filter (where d.kind = 'stack'
+                            and coalesce(s.reported, false))     as devices_reported,
+         (count(*) filter (where d.kind = 'stack') * 4)::bigint  as bowls_capacity,
+         sum(s.stack_count) filter (where d.kind = 'stack'
+                                      and s.stack_status = 'ok') as bowls_trusted,
+         sum(s.stack_count) filter (where d.kind = 'stack')      as bowls_reported,
+         bool_or(s.stack_status = 'discontiguous')
+           filter (where d.kind = 'stack')                       as any_fault,
+         bool_or(s.stack_status = 'degraded')
+           filter (where d.kind = 'stack')                       as any_degraded,
+         -- Battery and liveness are NOT filtered by kind: any device here that
+         -- is flat or dark is a position that needs somebody.
+         bool_or(s.battery_level in ('low','critical'))          as any_battery_warn,
+         bool_or(coalesce(s.reported, false)
+                 and public.in_service_window(now(), d.timezone, d.device_id)
+                 and s.updated_at < now() - public.offline_after()) as any_offline,
+         min(s.updated_at)                                       as oldest_update,
+         bool_or(coalesce(coalesce(s.reported, false)
+                 and d.location in ('D','M','T')
+                 and d.food_slot is not null
+                 and s.updated_at <
+                     public.last_service_window_end(d.timezone, d.device_id)
+                       - public.offline_after(),
+                 false))                                         as any_missed_service,
+         count(*) filter (where d.kind = 'scale')                as scales,
+         count(*) filter (where d.kind = 'scale'
+                            and s.weight_state = 'ok')           as scales_ok,
+         sum(s.weight_g) filter (where d.kind = 'scale'
+                                   and s.weight_state = 'ok')    as measured_weight_g,
+         array_remove(array_agg(distinct s.weight_state)
+                      filter (where d.kind = 'scale'
+                                and s.weight_state is not null), 'ok')
+                                                                 as scale_issues,
+         max(m.bowl_weight_g)                                    as bowl_weight_g,
+         (sum(s.stack_count) filter (where d.kind = 'stack'
+                                       and s.stack_status = 'ok'))
+           * max(m.bowl_weight_g)                                as stack_est_g,
+         count(*) filter (where d.kind = 'buffer')               as buffers,
+         count(*) filter (where d.kind = 'buffer'
+                            and s.weight_state = 'ok')           as buffers_ok,
+         sum(s.weight_g) filter (where d.kind = 'buffer'
+                                   and s.weight_state = 'ok')    as buffer_measured_g,
+         sum(s.bowls)    filter (where d.kind = 'buffer'
+                                   and s.weight_state = 'ok')    as buffer_bowls,
+         coalesce(bool_or(not s.bowls_confirmed)
+                    filter (where d.kind = 'buffer'
+                              and s.weight_state = 'ok'), false) as buffer_unconfirmed,
+         count(*) filter (where d.kind = 'buffer'
+                            and s.weight_state <> 'ok')          as buffer_issues
+    from public.devices d
+    left join public.device_status s using (device_id)
+    left join public.meal_food_mapping m
+           on m.location  = d.location
+          and m.food_slot = d.food_slot
+          and m.meal_date = public.current_meal_date(d.timezone)
+          and m.meal_type = public.current_meal_type(d.timezone)
+   where d.location is not null
+     and d.food_slot is not null
+   group by d.location, d.food_slot
+),
+b as (
+  select a.*,
+         case when a.buffer_measured_g is null and a.stack_est_g is null then null
+              else coalesce(a.buffer_measured_g, 0) + coalesce(a.stack_est_g, 0)
+         end                                                     as buffer_g
+    from a
+)
+select b.location,
+       b.food_slot,
+       b.current_food,
+       b.current_meal,
+       b.devices,
+       b.devices_reported,
+       b.bowls_capacity,
+       b.bowls_trusted,
+       b.bowls_reported,
+       b.any_fault,
+       b.any_degraded,
+       b.any_battery_warn,
+       b.any_offline,
+       b.oldest_update,
+       b.any_missed_service,
+       b.scales,
+       b.scales_ok,
+       b.measured_weight_g,
+       b.scale_issues,
+       b.bowl_weight_g,
+       b.buffer_g,
+       case when b.buffer_g is null and b.measured_weight_g is null then null
+            else coalesce(b.buffer_g, 0) + coalesce(b.measured_weight_g, 0)
+       end                                                       as weight_g,
+       b.buffers,
+       b.buffers_ok,
+       b.buffer_measured_g,
+       b.buffer_bowls,
+       b.buffer_unconfirmed,
+       b.buffer_issues
+  from b;
 
 -- The views are new objects as far as fresh grants are concerned only on a
 -- rebuild; on REPLACE the existing grants survive. Restated anyway so this

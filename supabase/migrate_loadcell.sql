@@ -4,8 +4,9 @@
 --  Run as owner in the Supabase SQL editor, ONCE, on a database already
 --  built by schema.sql (and by migrate_bowl_weight.sql, which this builds
 --  on). Idempotent and NON-destructive: it adds one column to `devices`,
---  five to `device_status`, and rewrites three views in place. No table is
---  dropped and no existing row is rewritten, so it is safe to run mid-trial.
+--  five to `device_status`, and rewrites three views (dropped and recreated,
+--  with their grants -- see section 4). No table is dropped and no existing
+--  row is rewritten, so it is safe to run mid-trial.
 --
 --  schema.sql carries the same changes for a from-scratch rebuild. The two
 --  must agree; this file exists only because a live trial database cannot be
@@ -280,8 +281,25 @@ grant update (weight_g, weight_state, cells_online, counts_per_gram, net_counts)
 -- both. It has been updated in step with this migration. If you add a column
 -- here and not there, running it again silently reverts you -- which is the
 -- fork its own header warns about.
+--
+-- DROPPED AND RECREATED, not replaced -- this view and slot_overview below.
+-- migrate_buffer.sql appends columns to both, and so does schema.sql, so a
+-- database that has them would refuse this file's CREATE OR REPLACE with
+-- 42P16 "cannot drop columns from view": a re-run of apply_loadcell.sql, or a
+-- fresh rebuild from schema.sql followed by it, would abort at part 2. Nothing
+-- in the database reads either view, so dropping them is free, and
+-- migrate_buffer.sql -- the last part of apply_loadcell.sql -- appends its
+-- columns again in the same transaction. The grants are restated below
+-- because a dropped view takes its privileges with it.
+--
+-- The price: run ON ITS OWN after migrate_buffer.sql, this file now removes
+-- the buffer columns from both views (and from slot_quantity, which it always
+-- dropped) until migrate_buffer.sql runs again. Re-run apply_loadcell.sql
+-- instead, which ends with it.
 -- ---------------------------------------------------------------------
-create or replace view public.device_overview
+drop view if exists public.device_overview;
+
+create view public.device_overview
 with (security_invoker = true) as
 select d.device_id,
        d.location,
@@ -350,8 +368,12 @@ select d.device_id,
 --
 -- The filters are what keep "how many bowl counters serve this dish position"
 -- answering that question rather than "how many boxes are bolted here".
+--
+-- Dropped and recreated for the reason given above device_overview.
 -- ---------------------------------------------------------------------
-create or replace view public.slot_overview
+drop view if exists public.slot_overview;
+
+create view public.slot_overview
 with (security_invoker = true) as
 select d.location,
        d.food_slot,
@@ -432,6 +454,13 @@ select d.location,
  where d.location is not null
    and d.food_slot is not null
  group by d.location, d.food_slot;
+
+-- Restated because both views were dropped above, and a dropped view takes
+-- its grants with it. Same posture as schema.sql section 9.
+revoke all on public.device_overview from anon, authenticated, public;
+revoke all on public.slot_overview   from anon, authenticated, public;
+grant select on public.device_overview to authenticated;
+grant select on public.slot_overview   to authenticated;
 
 -- ---------------------------------------------------------------------
 -- 6. weight_mismatch_tolerance -- one threshold, one place.

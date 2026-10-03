@@ -11,7 +11,7 @@
 --      3. assign_devices.sql    permanent location/food_slot assignment
 --      4. seed_meal_mapping.sql sample menus, for the front-end test bed
 --      5. reset_spares.sql      only after a stray write; see that file
---      6. smoke_test.sql        25 assertions; expect ALL PASS
+--      6. smoke_test.sql        40 assertions; expect ALL PASS
 --
 --  diagnose.sql is read-only and can be run at any time.
 --
@@ -90,6 +90,8 @@ drop function if exists public.last_served_meal(text, timestamptz) cascade;
 -- Without this entry a second run of schema.sql leaves the previous definition
 -- in place, which is the one way this file stops being idempotent.
 drop function if exists public.weight_mismatch_tolerance() cascade;
+drop function if exists public.tg_device_status_kind() cascade;
+drop function if exists public.tg_status_events_kind() cascade;
 
 -- ---------------------------------------------------------------------
 -- 1. devices -- human-managed registry. No device ever writes here.
@@ -128,13 +130,17 @@ create table public.devices (
   -- WHAT THIS INSTALLATION MEASURES, and therefore which half of
   -- device_status is a measurement and which half is simply absent.
   --
-  --   stack  four VL53L0X up a pipe, reporting a bowl COUNT. Leaves every
-  --          weight_* column NULL.
-  --   scale  three NAU7802 under a platform, reporting GRAMS. Leaves every
-  --          stack_* column NULL.
+  --   stack   four VL53L0X up a pipe, reporting a bowl COUNT. Leaves every
+  --           weight_* column NULL.
+  --   scale   three NAU7802 under the serving-counter platform (LDC),
+  --           reporting GRAMS. Leaves every stack_* column NULL.
+  --   buffer  one 200 kg cell under a buffer platform (BWL, since
+  --           cutover_buffers.sql), reporting grams of FOOD plus the bowls
+  --           it stands in. Leaves every stack_* column NULL.
   --
   -- A hardware fact fixed at registration, never a setting. No device writes
-  -- it -- `devices` has no anon policy at all.
+  -- it -- `devices` has no anon policy at all -- and device_status_kind
+  -- (section 4) refuses a write to the half of device_status it does not own.
   --
   -- DEFAULT 'stack' so the 24 bowl counters already registered are correct
   -- the moment the column appears, which is what makes migrate_loadcell.sql
@@ -144,7 +150,7 @@ create table public.devices (
   -- and a migrated one have the same column order and `select *` cannot tell
   -- them apart.
   kind        text not null default 'stack'
-                constraint devices_kind_ck check (kind in ('stack','scale'))
+                constraint devices_kind_ck check (kind in ('stack','scale','buffer'))
 );
 
 comment on column public.devices.location is
@@ -259,21 +265,55 @@ create table public.device_status (
     check (weight_state is null
            or (weight_state = 'ok') = (weight_g is not null)),
 
-  -- Sanity rails, the role bowl_weight_g's 100..50000 plays. Three 20 kg cells
-  -- is 60 kg of rating, so 100 kg is unreachable and identifies a units mix-up
-  -- or a wild calibration factor. The negative floor exists because a tared
-  -- platform legitimately drifts a few grams below zero, and because removing
-  -- something present at tare time is a real thing to do.
+  -- Sanity rails, the role bowl_weight_g's 100..50000 plays. 250 kg because a
+  -- 200 kg buffer cell under a full platform reads ~190 kg of food; the
+  -- COUNTER's tighter rail -- three 20 kg cells is 60 kg of rating, so 100 kg
+  -- identifies a units mix-up or a wild calibration factor -- is held per
+  -- kind by device_status_kind (section 4), since a CHECK cannot see kind.
+  -- The negative floor exists because a tared platform legitimately drifts a
+  -- few grams below zero, and because removing something present at tare
+  -- time is a real thing to do.
   --
   -- COUPLED TO FIRMWARE exactly as battery_mv's 0..6000 bound is: a value the
   -- device can produce but this rejects is not a rejected weight, it is a 400
   -- that fails the whole PATCH -- so the station stops reporting anything at
   -- all, including the state that would have explained why.
   constraint device_status_weight_range_ck
-    check (weight_g is null or weight_g between -5000 and 100000),
+    check (weight_g is null or weight_g between -5000 and 250000),
 
   constraint device_status_cells_online_ck
-    check (cells_online is null or cells_online between 0 and 8)
+    check (cells_online is null or cells_online between 0 and 8),
+
+  -- --- the buffer half (kind = 'buffer') -----------------------------------
+  -- weight_g above is the FOOD on a buffer: gross_g less 2500 g per bowl,
+  -- always, whatever the panel displays -- every view sums weight_g as food.
+  -- bowls and gross_g follow weight_g's honesty rule: present only when the
+  -- state is 'ok', because a bowl count beside 'no_cells' is the firmware's
+  -- memory, not a measurement. bowls_confirmed = false means the count was
+  -- remembered across a power cycle, or is in doubt.
+  --
+  -- 'is not distinct from' because weight_state is NULL before a device first
+  -- reports, and a CHECK evaluating to NULL passes. 0..8 is headroom over the
+  -- four bowls a platform holds today; gross_g's ceiling is the food ceiling
+  -- plus four bowls of dish. See migrate_buffer.sql section 3.
+  --
+  -- LAST, after the load-cell half, because that is where migrate_buffer.sql
+  -- appends them on a live database. (manual_fill_* and external_power come
+  -- from migrations this file does not carry, so a rebuilt row is not
+  -- column-for-column the live one either way; the views name their columns.)
+  bowls           smallint,
+  bowls_confirmed boolean,
+  gross_g         integer,
+
+  constraint device_status_bowls_range_ck
+    check (bowls is null or bowls between 0 and 8),
+  constraint device_status_bowls_confirmed_ck
+    check ((bowls is null) = (bowls_confirmed is null)),
+  constraint device_status_gross_range_ck
+    check (gross_g is null or gross_g between -5000 and 260000),
+  constraint device_status_bowls_ok_ck
+    check ((bowls is null and gross_g is null)
+           or weight_state is not distinct from 'ok')
 );
 
 -- Columns are nullable because the row exists before the device has ever
@@ -417,6 +457,110 @@ end $$;
 create trigger status_events_stamp
   before insert on public.status_events
   for each row execute function public.tg_status_events_stamp();
+
+-- Which half of device_status a device may write, by its kind. The anon grant
+-- is per COLUMN and the policy per ROW; neither knows what the device is, and
+-- the BWL ids change product at the buffer cut-over -- so a stack firmware or
+-- simulator still pointed at a buffer's id would otherwise write a bowl count
+-- into a row the views read as kilograms.
+--
+-- Tests only columns that CHANGED to a non-null value: NEW carries every
+-- column a PATCH did not mention at its OLD value, so testing NEW alone would
+-- reject a buffer whose row still held its last stack_count.
+--
+-- Fires before device_status_stamp because row triggers run in name order.
+-- SECURITY DEFINER because it reads devices, which anon cannot -- without it
+-- every device PATCH would fail 42501. Same body as migrate_buffer.sql
+-- section 6.
+create or replace function public.tg_device_status_kind()
+returns trigger language plpgsql security definer set search_path = '' as $$
+declare v_kind text;
+begin
+  select kind into v_kind from public.devices where device_id = new.device_id;
+
+  if v_kind = 'stack' then
+    if (new.weight_g        is not null and new.weight_g        is distinct from old.weight_g)
+    or (new.weight_state    is not null and new.weight_state    is distinct from old.weight_state)
+    or (new.cells_online    is not null and new.cells_online    is distinct from old.cells_online)
+    or (new.counts_per_gram is not null and new.counts_per_gram is distinct from old.counts_per_gram)
+    or (new.net_counts      is not null and new.net_counts      is distinct from old.net_counts)
+    or (new.bowls           is not null and new.bowls           is distinct from old.bowls)
+    or (new.bowls_confirmed is not null and new.bowls_confirmed is distinct from old.bowls_confirmed)
+    or (new.gross_g         is not null and new.gross_g         is distinct from old.gross_g) then
+      raise exception
+        '% is a stack: it reports stack_* and never a weight, bowls or gross_g',
+        new.device_id using errcode = 'check_violation';
+    end if;
+
+  elsif v_kind in ('scale','buffer') then
+    if (new.stack_count    is not null and new.stack_count    is distinct from old.stack_count)
+    or (new.stack_status   is not null and new.stack_status   is distinct from old.stack_status)
+    or (new.levels         is not null and new.levels         is distinct from old.levels)
+    or (new.sensors_ok     is not null and new.sensors_ok     is distinct from old.sensors_ok)
+    or (new.sensors_online is not null and new.sensors_online is distinct from old.sensors_online) then
+      raise exception
+        '% is a %: it never reports stack_count, stack_status, levels, '
+        'sensors_ok or sensors_online', new.device_id, v_kind
+        using errcode = 'check_violation';
+    end if;
+
+    if v_kind = 'scale' then
+      if (new.bowls           is not null and new.bowls           is distinct from old.bowls)
+      or (new.bowls_confirmed is not null and new.bowls_confirmed is distinct from old.bowls_confirmed)
+      or (new.gross_g         is not null and new.gross_g         is distinct from old.gross_g) then
+        raise exception
+          '% is a scale: it has no bowls and no gross_g -- those are buffer columns',
+          new.device_id using errcode = 'check_violation';
+      end if;
+      -- The counter's 100 kg rail; the table CHECK is 250 kg for the buffers.
+      if new.weight_g > 100000 and new.weight_g is distinct from old.weight_g then
+        raise exception
+          '% is a scale reporting % g; above 100 kg on the counter is a units '
+          'mix-up or a wild calibration factor, not food', new.device_id, new.weight_g
+          using errcode = 'check_violation';
+      end if;
+    end if;
+  end if;
+
+  return new;
+end $$;
+
+comment on function public.tg_device_status_kind() is
+  'Guard on device_status: a stack writes only stack_*, a scale or buffer '
+  'never writes stack_*, a scale never writes bowls/gross_g and stays under '
+  '100 kg. Tests only columns that changed to a non-null value. SECURITY '
+  'DEFINER because it reads devices, which anon cannot.';
+
+create trigger device_status_kind
+  before update on public.device_status
+  for each row execute function public.tg_device_status_kind();
+
+-- Only stacks append bowl history. Five NOT NULL bowl-shaped columns kept
+-- scales out by construction; a BWL re-kinded to 'buffer' could still be
+-- written by stack firmware still pointed at its id. An unregistered id is
+-- let through to the foreign key, whose 23503 is the provisioning gate the
+-- firmware latches on (smoke assertion 8).
+create or replace function public.tg_status_events_kind()
+returns trigger language plpgsql security definer set search_path = '' as $$
+declare v_kind text;
+begin
+  select kind into v_kind from public.devices where device_id = new.device_id;
+  if v_kind is not null and v_kind <> 'stack' then
+    raise exception
+      'status_events accepts only devices.kind = ''stack''; % is a %',
+      new.device_id, v_kind
+      using errcode = 'check_violation';
+  end if;
+  return new;
+end $$;
+
+comment on function public.tg_status_events_kind() is
+  'Guard on status_events: only stacks append bowl history. An unregistered '
+  'id passes through to the foreign key, which answers 23503.';
+
+create trigger status_events_kind
+  before insert on public.status_events
+  for each row execute function public.tg_status_events_kind();
 
 -- ---------------------------------------------------------------------
 -- 5. Service windows.
@@ -1055,6 +1199,10 @@ grant update (boot_id, uptime_s, stack_count, stack_status, levels, sensors_ok,
 grant update (weight_g, weight_state, cells_online, counts_per_gram, net_counts)
   on public.device_status to anon;
 
+-- The buffer half, a third accumulating grant -- still no SELECT.
+grant update (bowls, bowls_confirmed, gross_g)
+  on public.device_status to anon;
+
 -- Plain INSERT; no SELECT of any kind. A duplicate raises 23505, which is the
 -- idempotency mechanism.
 grant insert (device_id, boot_id, seq, age_ms, reason, stack_count,
@@ -1088,6 +1236,8 @@ revoke all on function public.tg_device_status_stamp()   from public, anon, auth
 revoke all on function public.tg_status_events_stamp()   from public, anon, authenticated;
 revoke all on function public.tg_devices_create_status() from public, anon, authenticated;
 revoke all on function public.tg_meal_food_mapping_touch() from public, anon, authenticated;
+revoke all on function public.tg_device_status_kind()    from public, anon, authenticated;
+revoke all on function public.tg_status_events_kind()    from public, anon, authenticated;
 revoke all on function public.in_service_window(timestamptz, text, text, interval)
   from public, anon;
 revoke all on function public.offline_after() from public, anon;
@@ -1200,7 +1350,14 @@ select d.device_id,
        s.weight_state,
        s.cells_online,
        s.counts_per_gram,
-       s.net_counts
+       s.net_counts,
+
+       -- The buffer half, appended after the load-cell half for the same
+       -- reason. NULL on every scale and stack, and on a buffer whenever
+       -- weight_state is not 'ok'.
+       s.bowls,
+       s.bowls_confirmed,
+       s.gross_g
   from public.devices d
   left join public.device_status s using (device_id)
   left join public.meal_food_mapping m
@@ -1222,87 +1379,131 @@ select d.device_id,
 -- discontiguous one is not a count at all, so folding them into the total would
 -- silently overstate confidence. The flags say what is wrong; the number says
 -- what can be relied on.
+--
+-- THREE INSTRUMENTS, THREE POOLS OF COLUMNS, every one filtered on kind:
+-- stacks give bowls (devices .. any_degraded), scales give the counter
+-- (scales .. scale_issues), buffers give the buffer platforms (buffers ..
+-- buffer_issues). buffer_g is the measured buffer food plus the bowls x
+-- kg-per-bowl estimate of any stack still a stack; weight_g is buffer_g plus
+-- the counter, and NULL -- never 0 -- when none of them is known, because 0
+-- is a real weight (a tared, empty platform) and must not stand in for
+-- "nobody has measured this". buffer_issues counts only buffers that have
+-- REPORTED A STATE that is not ok: one registered and never fitted -- or
+-- re-kinded and not yet weighing -- is awaiting deployment, not a fault.
+-- Same body as migrate_buffer.sql section 9, which explains each rule.
 create view public.slot_overview
 with (security_invoker = true) as
-select d.location,
-       d.food_slot,
-       max(m.food_name)                                        as current_food,
-       public.current_meal_type(max(d.timezone))               as current_meal,
-       count(*) filter (where d.kind = 'stack')                as devices,
-       count(*) filter (where d.kind = 'stack'
-                          and coalesce(s.reported, false))     as devices_reported,
+with a as (
+  select d.location,
+         d.food_slot,
+         max(m.food_name)                                        as current_food,
+         public.current_meal_type(max(d.timezone))               as current_meal,
+         count(*) filter (where d.kind = 'stack')                as devices,
+         count(*) filter (where d.kind = 'stack'
+                            and coalesce(s.reported, false))     as devices_reported,
+         (count(*) filter (where d.kind = 'stack') * 4)::bigint  as bowls_capacity,
+         sum(s.stack_count) filter (where d.kind = 'stack'
+                                      and s.stack_status = 'ok') as bowls_trusted,
+         sum(s.stack_count) filter (where d.kind = 'stack')      as bowls_reported,
+         bool_or(s.stack_status = 'discontiguous')
+           filter (where d.kind = 'stack')                       as any_fault,
+         bool_or(s.stack_status = 'degraded')
+           filter (where d.kind = 'stack')                       as any_degraded,
+         -- Battery and liveness are NOT filtered by kind: any device here that
+         -- is flat or dark is a position that needs somebody.
+         bool_or(s.battery_level in ('low','critical'))          as any_battery_warn,
+         bool_or(coalesce(s.reported, false)
+                 and public.in_service_window(now(), d.timezone, d.device_id)
+                 and s.updated_at < now() - public.offline_after()) as any_offline,
+         min(s.updated_at)                                       as oldest_update,
+         bool_or(coalesce(coalesce(s.reported, false)
+                 and d.location in ('D','M','T')
+                 and d.food_slot is not null
+                 and s.updated_at <
+                     public.last_service_window_end(d.timezone, d.device_id)
+                       - public.offline_after(),
+                 false))                                         as any_missed_service,
+         count(*) filter (where d.kind = 'scale')                as scales,
+         count(*) filter (where d.kind = 'scale'
+                            and s.weight_state = 'ok')           as scales_ok,
+         sum(s.weight_g) filter (where d.kind = 'scale'
+                                   and s.weight_state = 'ok')    as measured_weight_g,
+         -- Never-reported scales excluded, so every element is a reported,
+         -- non-ok state -- see migrate_buffer.sql section 9.
+         array_remove(array_agg(distinct s.weight_state)
+                      filter (where d.kind = 'scale'
+                                and s.weight_state is not null), 'ok')
+                                                                 as scale_issues,
+         max(m.bowl_weight_g)                                    as bowl_weight_g,
+         (sum(s.stack_count) filter (where d.kind = 'stack'
+                                       and s.stack_status = 'ok'))
+           * max(m.bowl_weight_g)                                as stack_est_g,
+         count(*) filter (where d.kind = 'buffer')               as buffers,
+         count(*) filter (where d.kind = 'buffer'
+                            and s.weight_state = 'ok')           as buffers_ok,
+         sum(s.weight_g) filter (where d.kind = 'buffer'
+                                   and s.weight_state = 'ok')    as buffer_measured_g,
+         sum(s.bowls)    filter (where d.kind = 'buffer'
+                                   and s.weight_state = 'ok')    as buffer_bowls,
+         coalesce(bool_or(not s.bowls_confirmed)
+                    filter (where d.kind = 'buffer'
+                              and s.weight_state = 'ok'), false) as buffer_unconfirmed,
+         count(*) filter (where d.kind = 'buffer'
+                            and s.weight_state <> 'ok')          as buffer_issues
+    from public.devices d
+    left join public.device_status s using (device_id)
+    left join public.meal_food_mapping m
+           on m.location  = d.location
+          and m.food_slot = d.food_slot
+          and m.meal_date = public.current_meal_date(d.timezone)
+          and m.meal_type = public.current_meal_type(d.timezone)
+   where d.location is not null
+     and d.food_slot is not null
+   group by d.location, d.food_slot
+),
+-- coalesce per TERM, never on the sum: a position with an ok buffer and no
+-- stack estimate has a real buffer figure, and so does the reverse.
+b as (
+  select a.*,
+         case when a.buffer_measured_g is null and a.stack_est_g is null then null
+              else coalesce(a.buffer_measured_g, 0) + coalesce(a.stack_est_g, 0)
+         end                                                     as buffer_g
+    from a
+)
+select b.location,
+       b.food_slot,
+       b.current_food,
+       b.current_meal,
+       b.devices,
+       b.devices_reported,
+       b.bowls_capacity,
+       b.bowls_trusted,
+       b.bowls_reported,
+       b.any_fault,
+       b.any_degraded,
+       b.any_battery_warn,
+       b.any_offline,
+       b.oldest_update,
+       b.any_missed_service,
+       b.scales,
+       b.scales_ok,
+       b.measured_weight_g,
+       b.scale_issues,
+       b.bowl_weight_g,
+       b.buffer_g,
+       case when b.buffer_g is null and b.measured_weight_g is null then null
+            else coalesce(b.buffer_g, 0) + coalesce(b.measured_weight_g, 0)
+       end                                                       as weight_g,
 
-       (count(*) filter (where d.kind = 'stack') * 4)::bigint  as bowls_capacity,
-
-       sum(s.stack_count) filter (where s.stack_status = 'ok') as bowls_trusted,
-       sum(s.stack_count)                                      as bowls_reported,
-
-       bool_or(s.stack_status = 'discontiguous')               as any_fault,
-       bool_or(s.stack_status = 'degraded')                    as any_degraded,
-       -- Battery and liveness are NOT filtered by kind. A load cell has a
-       -- battery and can go dark exactly like a stack, and a slot whose scale
-       -- is flat is a slot that needs somebody -- so these keep meaning "any
-       -- device here", which is what they already said.
-       bool_or(s.battery_level in ('low','critical'))          as any_battery_warn,
-       bool_or(coalesce(s.reported, false)
-               and public.in_service_window(now(), d.timezone, d.device_id)
-               and s.updated_at < now() - public.offline_after()) as any_offline,
-       min(s.updated_at)                                       as oldest_update,
-
-       bool_or(coalesce(coalesce(s.reported, false)
-               and d.location in ('D','M','T')
-               and d.food_slot is not null
-               and s.updated_at <
-                   public.last_service_window_end(d.timezone, d.device_id)
-                     - public.offline_after(),
-               false))                                         as any_missed_service,
-
-       -- Appended: what the scales at this position say. NULL rather than 0
-       -- when none of them has a usable weight -- sum() over an empty filter
-       -- is NULL, which is the answer we want.
-       count(*) filter (where d.kind = 'scale')                as scales,
-       count(*) filter (where d.kind = 'scale'
-                          and s.weight_state = 'ok')           as scales_ok,
-       sum(s.weight_g) filter (where d.kind = 'scale'
-                                 and s.weight_state = 'ok')    as measured_weight_g,
-       -- Why any scale here is NOT contributing a weight, so the screen can
-       -- name the fault instead of showing a silently smaller total. 'ok' is
-       -- removed because it is not an issue.
-       array_remove(array_agg(distinct s.weight_state)
-                    filter (where d.kind = 'scale'), 'ok')     as scale_issues,
-
-       -- THE SAME ARITHMETIC slot_quantity DOES, one grouping down. Stock is
-       -- per HALL per position where Master is per position across halls, and
-       -- both screens must answer "how much food is here" with the same
-       -- number -- so the sum is computed once per row here rather than in the
-       -- client, which is the rule slot_overview already follows for bowls.
-       max(m.bowl_weight_g)                                    as bowl_weight_g,
-       (sum(s.stack_count) filter (where s.stack_status = 'ok'))
-         * max(m.bowl_weight_g)                                as buffer_g,
-       -- coalesce per TERM, never on the sum: a position with a counter and no
-       -- valued buffer has a real total, and so does the reverse. NULL only
-       -- when neither term exists -- which for this view means the dish has no
-       -- per-bowl weight AND no scale is reporting, and the card falls back to
-       -- showing bowls.
-       case when max(m.bowl_weight_g) is null
-                 and sum(s.weight_g) filter (where d.kind = 'scale'
-                                               and s.weight_state = 'ok') is null
-            then null
-            else coalesce((sum(s.stack_count) filter (where s.stack_status = 'ok'))
-                            * max(m.bowl_weight_g), 0)
-               + coalesce(sum(s.weight_g) filter (where d.kind = 'scale'
-                                                    and s.weight_state = 'ok'), 0)
-       end                                                     as weight_g
-  from public.devices d
-  left join public.device_status s using (device_id)
-  left join public.meal_food_mapping m
-         on m.location  = d.location
-        and m.food_slot = d.food_slot
-        and m.meal_date = public.current_meal_date(d.timezone)
-        and m.meal_type = public.current_meal_type(d.timezone)
- where d.location is not null
-   and d.food_slot is not null
- group by d.location, d.food_slot;
+       -- Appended, in the order migrate_buffer.sql appends them on a live
+       -- database.
+       b.buffers,
+       b.buffers_ok,
+       b.buffer_measured_g,
+       b.buffer_bowls,
+       b.buffer_unconfirmed,
+       b.buffer_issues
+  from b;
 
 -- ---------------------------------------------------------------------
 --  last_served_meal -- which meal's menu describes what is on the stations
@@ -1482,7 +1683,8 @@ with per_area as (
          -- discontiguous one is not a count at all. Folding either into a
          -- WEIGHT would dress an unreliable number up as kilograms, which
          -- reads far more precise than it is.
-         sum(s.stack_count) filter (where s.stack_status = 'ok') as bowls_trusted,
+         sum(s.stack_count) filter (where d.kind = 'stack'
+                                      and s.stack_status = 'ok') as bowls_trusted,
 
          -- What the load cells here actually weighed. NULL, never 0, when none
          -- has a usable figure -- sum() over an empty filter is NULL, which is
@@ -1505,8 +1707,28 @@ with per_area as (
                                 and s.weight_state is not null), 'ok')
                                                                  as scale_issues,
 
-         bool_or(s.stack_status = 'discontiguous')               as any_fault,
-         bool_or(s.stack_status = 'degraded')                    as any_degraded,
+         -- The buffer platforms (kind 'buffer'): measured food, NULL -- never
+         -- 0 -- when none has an ok weight. weighers_not_ok counts scales and
+         -- buffers that have reported a state and it is not ok, which is what
+         -- makes the slot figure a lower bound; one that has never reported a
+         -- state is awaiting deployment, not missing food.
+         count(*) filter (where d.kind = 'buffer')               as buffers,
+         count(*) filter (where d.kind = 'buffer'
+                            and s.weight_state = 'ok')           as buffers_ok,
+         sum(s.weight_g) filter (where d.kind = 'buffer'
+                                   and s.weight_state = 'ok')    as buffer_measured_g,
+         sum(s.bowls)    filter (where d.kind = 'buffer'
+                                   and s.weight_state = 'ok')    as buffer_bowls,
+         coalesce(bool_or(not s.bowls_confirmed)
+                    filter (where d.kind = 'buffer'
+                              and s.weight_state = 'ok'), false) as buffer_unconfirmed,
+         count(*) filter (where d.kind in ('scale','buffer')
+                            and s.weight_state <> 'ok')          as weighers_not_ok,
+
+         bool_or(s.stack_status = 'discontiguous')
+           filter (where d.kind = 'stack')                       as any_fault,
+         bool_or(s.stack_status = 'degraded')
+           filter (where d.kind = 'stack')                       as any_degraded,
          bool_or(s.battery_level in ('low','critical'))          as any_battery_warn,
          bool_or(coalesce(s.reported, false)
              and public.in_service_window(now(), d.timezone, d.device_id)
@@ -1540,50 +1762,52 @@ with per_area as (
 -- hall's own LINE shows a dash, because "no reading" is not "an empty
 -- counter". slot_quantity already drew that distinction before load cells
 -- existed, and the precedence rule has to preserve both halves of it.
+--
+-- ADDED, NOT CHOSEN. The buffer and the counter are DIFFERENT FOOD IN
+-- DIFFERENT PLACES -- food held in reserve and food on the serving line -- so
+-- the hall's figure is their sum, never one picked over the other. Measured on
+-- the live database the evening this was found: D/1 held two buffered bowls at
+-- 18 kg each and an empty counter, and a "measured beats estimated" rule
+-- reported 18.0 kg instead of 54.0 kg. A kitchen reading that orders more rice
+-- it already has.
+--
+-- THE BUFFER TERM is the food weighed on the buffer platforms plus the old
+-- bowls x kg-per-bowl estimate -- which now exists only where a STACK does
+-- (devices > 0). Before, a hall with a per-bowl weight and no stack at all got
+-- an estimate of 0, harmless beside a reporting stack and exactly wrong once
+-- the stacks are gone: every hall would be "known, and empty".
+--
+-- NULL only when EVERY term is unknown. coalesce per TERM rather than on the
+-- sum, so a hall with a counter and no buffer figure still has a total, and so
+-- does the reverse.
 per_area_w as (
   select p.*,
-         case when p.bowl_weight_g is not null
-              then coalesce(p.bowls_trusted, 0)::bigint * p.bowl_weight_g
-         end                                                     as est_total_g,
-         case when p.bowl_weight_g is not null
-               and p.bowls_trusted is not null
-              then p.bowls_trusted::bigint * p.bowl_weight_g
-         end                                                     as est_line_g,
-         -- ADDED, NOT CHOSEN, and this replaced a precedence rule that was
-         -- simply wrong about the hardware.
-         --
-         -- The two terms are DIFFERENT FOOD IN DIFFERENT PLACES: the stack
-         -- counts bowls held in reserve, the platform weighs what is on the
-         -- serving counter. Neither substitutes for the other, so picking one
-         -- discards the other.
-         --
-         -- Measured on the live database the evening this was found: D/1 held
-         -- two buffered bowls at 18 kg each and an empty counter, and Master
-         -- reported 18.0 kg for the slot instead of 54.0 kg -- because a scale
-         -- was present and reading zero, so "measured beats estimated" threw
-         -- away 36 kg of real food. A kitchen reading that number orders more
-         -- rice it already has.
-         --
-         -- NULL only when NEITHER term exists. coalesce per TERM rather than
-         -- on the sum, so a hall with a counter and no valued buffer still has
-         -- a total, and so does the reverse.
-         case when p.measured_weight_g is null and p.bowl_weight_g is null
-              then null
-              else coalesce(p.measured_weight_g, 0)
-                 + coalesce(case when p.bowl_weight_g is not null
-                                 then coalesce(p.bowls_trusted, 0)::bigint * p.bowl_weight_g
-                            end, 0)
+         e.est_total_g, e.est_line_g,
+         b.buffer_total_g, b.buffer_line_g,
+         case when b.buffer_total_g is null and p.measured_weight_g is null then null
+              else coalesce(b.buffer_total_g, 0) + coalesce(p.measured_weight_g, 0)
          end                                                     as weight_total_g,
-         case when p.measured_weight_g is null
-               and (p.bowl_weight_g is null or p.bowls_trusted is null)
-              then null
-              else coalesce(p.measured_weight_g, 0)
-                 + coalesce(case when p.bowl_weight_g is not null
-                                  and p.bowls_trusted is not null
-                                 then p.bowls_trusted::bigint * p.bowl_weight_g
-                            end, 0)
+         case when b.buffer_line_g is null and p.measured_weight_g is null then null
+              else coalesce(b.buffer_line_g, 0) + coalesce(p.measured_weight_g, 0)
          end                                                     as weight_line_g
     from per_area p
+   cross join lateral (
+     select case when p.devices > 0 and p.bowl_weight_g is not null
+                 then coalesce(p.bowls_trusted, 0)::bigint * p.bowl_weight_g
+            end                                                  as est_total_g,
+            case when p.bowl_weight_g is not null
+                  and p.bowls_trusted is not null
+                 then p.bowls_trusted::bigint * p.bowl_weight_g
+            end                                                  as est_line_g
+   ) e
+   cross join lateral (
+     select case when p.buffer_measured_g is null and e.est_total_g is null then null
+                 else coalesce(p.buffer_measured_g, 0) + coalesce(e.est_total_g, 0)
+            end                                                  as buffer_total_g,
+            case when p.buffer_measured_g is null and e.est_line_g is null then null
+                 else coalesce(p.buffer_measured_g, 0) + coalesce(e.est_line_g, 0)
+            end                                                  as buffer_line_g
+   ) b
 ),
 -- THE MISMATCH CHECK IS GONE, and its removal is the point worth recording.
 --
@@ -1695,7 +1919,15 @@ per_slot as (
            'measured_weight_g', p.measured_weight_g,
            'scales',            p.scales,
            'capacity_weight_g', case when p.bowl_weight_g is not null
-                                     then p.bowls_capacity * p.bowl_weight_g end
+                                     then p.bowls_capacity * p.bowl_weight_g end,
+           -- The hall's buffer platforms: its buffer figure (measured, plus
+           -- any stack estimate; NULL when neither), bowls, and whether any
+           -- of those bowl counts is only remembered.
+           'buffers',            p.buffers,
+           'buffers_ok',         p.buffers_ok,
+           'buffer_g',           p.buffer_line_g,
+           'buffer_bowls',       p.buffer_bowls,
+           'buffer_unconfirmed', p.buffer_unconfirmed
          ) order by p.location)                                  as areas,
 
          bool_or(p.any_fault)                                    as any_fault,
@@ -1713,9 +1945,24 @@ per_slot as (
 
          -- The two pools, kept separate as well as summed, so a screen can
          -- say "36 kg buffered, nothing on the counter" rather than only the
-         -- total. weight_g above is their sum.
-         sum(p.est_total_g)                                      as buffer_g,
-         sum(p.measured_weight_g)                                as counter_g
+         -- total. weight_g above is their sum. buffer_g is the measured
+         -- buffer plus any stack estimate; counter_g is the scales.
+         sum(p.buffer_total_g)                                   as buffer_g,
+         sum(p.measured_weight_g)                                as counter_g,
+
+         sum(p.buffers)                                          as buffers,
+         sum(p.buffers_ok)                                       as buffers_ok,
+         sum(p.buffer_measured_g)                                as buffer_measured_g,
+         sum(p.buffer_bowls)                                     as buffer_bowls,
+         bool_or(p.buffer_unconfirmed)                           as buffer_unconfirmed,
+         -- A LOWER BOUND, printed ">=": the slot has a figure and some scale
+         -- or buffer there reports a state that is not ok -- or a hall is
+         -- short a per-bowl weight (est_is_partial's rule).
+         (sum(p.weight_total_g) is not null
+            and sum(p.weighers_not_ok) > 0)
+           or bool_or(p.weight_total_g is null
+                      and coalesce(p.bowls_trusted, 0) > 0
+                      and p.food_name is not null)               as weight_is_partial
     from per_area_w p
    group by p.food_slot
   having bool_or(p.any_reported)
@@ -1753,7 +2000,16 @@ select q.food_slot,
        q.counter_g,
        -- LEFT joined, one row per slot, so it cannot multiply anything. NULL
        -- when every scale here is healthy, which is the common case.
-       si.scale_issues
+       si.scale_issues,
+
+       -- The buffer platforms, appended in the order migrate_buffer.sql
+       -- appends them.
+       q.buffers,
+       q.buffers_ok,
+       q.buffer_measured_g,
+       q.buffer_bowls,
+       q.buffer_unconfirmed,
+       q.weight_is_partial
   from per_slot q
   left join slot_issues si on si.food_slot = q.food_slot
  order by q.food_slot;
@@ -1761,13 +2017,11 @@ select q.food_slot,
 
 comment on view public.slot_quantity is
   'Master Dashboard source: quantity per dish position across every serving '
-  'area, in grams. weight_g is the authoritative figure and is a SUM: '
-  'buffer_g (bowls waiting, counted x per-bowl weight) plus counter_g (food '
-  'on the scales), because those are different food in different places. It '
-  'was once measured-beats-estimated per area, which discarded a hall''s '
-  'whole buffer whenever a scale there happened to read empty. est_weight_g '
-  'and measured_weight_g are the two inputs, kept so a screen can say which '
-  'part it is showing.';
+  'area, in grams. weight_g is a SUM: buffer_g (food held in reserve -- '
+  'measured on the buffer platforms, plus bowls x per-bowl weight for any '
+  'remaining ToF stack) plus counter_g (food on the serving-counter scales). '
+  'NULL, never 0, when nothing at the slot has a figure; weight_is_partial '
+  'marks a figure that omits a reported instrument with no usable weight.';
 
 revoke all on public.device_overview from anon, authenticated, public;
 revoke all on public.slot_overview   from anon, authenticated, public;
@@ -1784,16 +2038,20 @@ commit;
 --       assign_devices.sql      the permanent location/food_slot assignment
 --       seed_meal_mapping.sql   sample menus, for the front-end test bed
 --       reset_spares.sql        restores awaiting_deployment for the reserved 8
---       smoke_test.sql          32 assertions; expect ALL PASS
+--       smoke_test.sql          40 assertions; expect ALL PASS
 --
---     Then, for the load cells at the serving counter:
+--     Then, for the load cells at the serving counter and under the buffers:
 --       apply_loadcell.sql      every load-cell migration in ONE
 --                               self-verifying transaction -- it snapshots
 --                               every device, status row and slot_overview
 --                               figure first and RAISES if one moved
---     or separately, in this order: migrate_loadcell.sql,
---     register_loadcells.sql, assign_loadcells.sql,
---     migrate_weight_samples.sql, migrate_burn_rate.sql
+--     or separately, in the order tools/build_apply_loadcell.mjs lists them,
+--     ending with migrate_buffer.sql.
+--
+--     This file already carries what migrate_buffer.sql adds, so on a
+--     rebuild that part converges without changing anything. The BWL rows
+--     stay kind 'stack' until cutover_buffers.sql -- run that on its own,
+--     after the web that reads buffers is live.
 --
 --     whats_installed.sql says which of those a database already has.
 -- ---------------------------------------------------------------------

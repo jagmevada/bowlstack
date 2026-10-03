@@ -1,5 +1,5 @@
 -- =====================================================================
---  Bowlstack -- schema smoke test.  32 assertions.
+--  Bowlstack -- schema smoke test.  40 assertions.
 --
 --  Run after schema.sql, and BEFORE flashing any device. Paste the whole file
 --  into the Supabase SQL editor; it returns one table of PASS/FAIL rows plus a
@@ -30,6 +30,14 @@
 --           were added and nothing else -- a scale inflating bowl capacity,
 --           and the two pools being ADDED rather than one chosen over
 --           the other -- a scale reading empty must not erase a full buffer
+--    32-39  BUFFER PLATFORMS -- BWL ids weighing in kg (migrate_buffer.sql).
+--           The kind and its write path; the guard keeping each kind to its
+--           own half of device_status; the counter's 100 kg rail surviving
+--           the 250 kg CHECK; a slot with nothing measured reading NULL, not
+--           0; buffer and counter ADDED; a slot missing a platform marked
+--           partial; history into weight_samples and never status_events;
+--           and the stock series dropping a platform the moment it stops
+--           being ok instead of carrying its last weight forward
 --
 --  Several assertions are SUPPOSED to fail: a device must NOT be able to read
 --  your data. Each is wrapped in an exception handler so the run continues, and
@@ -39,8 +47,10 @@
 --  Fixtures: BWL-SMOKETEST at location 'R' with no slot, BWL-SMOKE2 and
 --  BWL-SMOKE3 both at R/8 so the aggregation has something to aggregate, and menu
 --  rows on an absurd date. 'R' is reserved and slot 8 is outside the deployed
---  1-5, so nothing can merge with live data. Everything is deleted afterwards, so
---  this is safe to re-run and safe against a populated database.
+--  1-5, so nothing can merge with live data. The buffer fixtures sit at slot 6
+--  -- also undeployed, and apart from slot 8 so the figures 29-31 assert are
+--  untouched. Everything is deleted afterwards, so this is safe to re-run and
+--  safe against a populated database.
 -- =====================================================================
 
 drop table if exists smoke_results;
@@ -96,6 +106,20 @@ declare
   -- you are looking at". Six red rows on a database that is simply older sends
   -- somebody hunting for a fault instead of to the SQL editor.
   v_lc  boolean;
+  -- BUFFER PLATFORMS. BUF1 and BUF3 at D/6 beside a scale (BSC), BUF2 at M/6:
+  -- slot 6, so the slot-8 figures above stay exactly what they assert.
+  BUF1  constant text := 'BWL-SMOKEBUF1';
+  BUF2  constant text := 'BWL-SMOKEBUF2';
+  BUF3  constant text := 'BWL-SMOKEBUF3';
+  BSC   constant text := 'LDC-SMOKEBUF';
+  -- Whether migrate_buffer.sql has been applied; 32-39 SKIP without it, as
+  -- 25-31 do without migrate_loadcell.sql.
+  v_buf boolean;
+  v_w   bigint;
+  v_bg  bigint;
+  v_cg  bigint;
+  v_bw  bigint;
+  v_part boolean;
   -- Menu fixtures live at location 'R' on an absurd date, so they cannot collide
   -- with a real menu even if this runs against a populated database.
   MDAY  constant date := date '1999-01-01';
@@ -107,12 +131,27 @@ begin
   -- cleanup would otherwise leave SDEV3 sitting at D/8, where the next run's
   -- capacity assertion would count it and fail for a reason that has nothing
   -- to do with the code.
-  delete from public.status_events where device_id in (DEV, DEV2, DEV3, DEV4, DEV5, DEV6);
+  --
+  -- weight_samples FIRST: its foreign key to devices is ON DELETE RESTRICT,
+  -- so a leftover buffer sample would block the devices delete below and
+  -- abort the whole run. Dynamic, because the table does not exist before
+  -- migrate_weight_samples.sql.
+  if to_regclass('public.weight_samples') is not null then
+    execute 'delete from public.weight_samples where device_id = any($1)'
+      using array[BUF1, BUF2, BUF3, BSC, SDEV2, SDEV3, SDEV4];
+  end if;
+  -- The buffer ids too: if assertion 38 ever FAILS, a bowl-count event for
+  -- BUF2 got in, and its restrict key would abort this run's successor.
+  delete from public.status_events
+   where device_id in (DEV, DEV2, DEV3, DEV4, DEV5, DEV6, BUF1, BUF2, BUF3, BSC);
   delete from public.device_status
-   where device_id in (DEV, DEV2, DEV3, DEV4, DEV5, DEV6, SDEV1, SDEV2, SDEV3, SDEV4);
+   where device_id in (DEV, DEV2, DEV3, DEV4, DEV5, DEV6, SDEV1, SDEV2, SDEV3, SDEV4,
+                       BUF1, BUF2, BUF3, BSC);
   delete from public.devices
    where device_id in (DEV, DEV2, DEV3, DEV4, DEV5, DEV6, SDEV1, SDEV2, SDEV3, SDEV4,
-                       'BWL-SMOKEBAD');
+                       BUF1, BUF2, BUF3, BSC, 'BWL-SMOKEBAD');
+  delete from public.meal_food_mapping
+   where location = 'D' and food_slot = 6 and food_name = 'Smoke-Buffer';
 
   -- 'R' (reserved) with no food_slot. A transient fixture must not claim a real
   -- serving position, and location is a D/M/T/R enum, so a descriptive string
@@ -1060,18 +1099,368 @@ begin
   end if;   -- v_lc: the load-cell schema is present
 
   ------------------------------------------------------------------
+  -- 32-39. BUFFER PLATFORMS -- see supabase/migrate_buffer.sql.
+  ------------------------------------------------------------------
+  execute 'reset role';
+  select exists (select 1 from information_schema.columns
+                  where table_schema = 'public' and table_name = 'device_status'
+                    and column_name = 'bowls')
+    into v_buf;
+
+  if not v_buf then
+    for v_n in 32..39 loop
+      res := res || jsonb_build_object('n', v_n, 'r','SKIP',
+               'c','buffers: ' || case v_n
+                     when 32 then 'a buffer registers and may write a 200 kg reading'
+                     when 33 then 'each kind may write only its own half of the row'
+                     when 34 then 'the counter keeps its 100 kg rail and has no bowls'
+                     when 35 then 'a slot with nothing measured reads NULL, not 0'
+                     when 36 then 'buffer and counter are ADDED'
+                     when 37 then 'a reported platform with no weight marks the slot partial'
+                     when 38 then 'a buffer appends to weight_samples, never status_events'
+                     else         'the stock series drops a platform that stops being ok'
+                   end,
+               'd','migrate_buffer.sql has not been run on this database');
+    end loop;
+  else
+
+  -- 32. The kind, and the device write path at the top of the range. 190 kg
+  --     of food in four bowls is a full buffer; the old 100 kg CHECK would
+  --     have answered 400 and the platform would have gone silent.
+  st := 'OK';
+  begin
+    insert into public.devices (device_id, location, food_slot, kind)
+    values (BUF1, 'D', 6, 'buffer');
+    begin
+      execute 'set local role anon';
+      update public.device_status
+         set boot_id = 7, uptime_s = 30, weight_state = 'ok', weight_g = 190000,
+             gross_g = 200000, bowls = 4, bowls_confirmed = true,
+             cells_online = 1, counts_per_gram = 20.7, net_counts = 4140000,
+             battery_mv = 4000, battery_level = 'good', firmware = 'smoke'
+       where device_id = BUF1;
+      get diagnostics v_n = row_count;
+      if v_n <> 1 then st := 'buffer PATCH matched ' || v_n || ' rows, want 1'; end if;
+    exception when others then
+      st := 'buffer PATCH refused: ' || sqlstate || ' ' || sqlerrm;
+    end;
+    execute 'reset role';
+    -- bowls and bowls_confirmed travel together, or not at all.
+    if st = 'OK' then
+      begin
+        update public.device_status set bowls = 3, bowls_confirmed = null
+         where device_id = BUF1;
+        st := 'bowls without bowls_confirmed was ACCEPTED';
+      exception when check_violation then null;
+      end;
+    end if;
+  exception when others then st := sqlstate || ' ' || sqlerrm;
+  end;
+  res := res || jsonb_build_object('n',32,
+           'r', case when st = 'OK' then 'PASS' else 'FAIL' end,
+           'c','a buffer registers and may write a 200 kg reading',
+           'd', case when st = 'OK'
+                     then 'kind buffer, 190 kg food / 4 bowls written by anon; '
+                          'bowls without bowls_confirmed refused'
+                     else st end);
+
+  -- 33. THE GUARD, both directions. Neither write breaks a CHECK -- 2 is a
+  --     valid stack_count and 1000 g beside 'ok' is a valid weight -- so only
+  --     device_status_kind can refuse them. That is the point: after the
+  --     cut-over a stack simulator still aimed at a BWL id writes perfectly
+  --     well-formed bowl counts into a row the views read as kilograms.
+  st := 'OK';
+  begin
+    execute 'set local role anon';
+    update public.device_status set stack_count = 2 where device_id = BUF1;
+    st := 'stack_count written to a buffer was ACCEPTED';
+  exception when check_violation then null;
+  when others then st := sqlstate || ' ' || sqlerrm;
+  end;
+  if st = 'OK' then
+    begin
+      execute 'set local role anon';
+      update public.device_status set weight_state = 'ok', weight_g = 1000
+       where device_id = DEV;
+      st := 'a weight written to a stack was ACCEPTED';
+    exception when check_violation then null;
+    when others then st := sqlstate || ' ' || sqlerrm;
+    end;
+  end if;
+  execute 'reset role';
+  res := res || jsonb_build_object('n',33,
+           'r', case when st = 'OK' then 'PASS' else 'FAIL' end,
+           'c','each kind may write only its own half of the row',
+           'd', case when st = 'OK'
+                     then 'stack_* on a buffer and weight on a stack both 23514'
+                     else st end);
+
+  -- 34. The CHECK went to 250 kg for the buffers; the COUNTER's 100 kg rail
+  --     moved into the guard and must still hold there. And a counter has no
+  --     bowls -- a scale row carrying them would be a buffer filed wrong.
+  st := 'OK';
+  begin
+    execute 'set local role anon';
+    update public.device_status set weight_state = 'ok', weight_g = 150000
+     where device_id = SDEV2;
+    st := 'a 150 kg counter reading was ACCEPTED';
+  exception when check_violation then null;
+  when others then st := sqlstate || ' ' || sqlerrm;
+  end;
+  if st = 'OK' then
+    begin
+      execute 'set local role anon';
+      update public.device_status
+         set weight_state = 'ok', weight_g = 1000, bowls = 1,
+             bowls_confirmed = true, gross_g = 3500
+       where device_id = SDEV2;
+      st := 'bowls written to a scale were ACCEPTED';
+    exception when check_violation then null;
+    when others then st := sqlstate || ' ' || sqlerrm;
+    end;
+  end if;
+  execute 'reset role';
+  res := res || jsonb_build_object('n',34,
+           'r', case when st = 'OK' then 'PASS' else 'FAIL' end,
+           'c','the counter keeps its 100 kg rail and has no bowls',
+           'd', case when st = 'OK'
+                     then '150 kg on a scale and bowls on a scale both 23514'
+                     else st end);
+
+  -- 35. NOTHING MEASURED IS NULL, NOT 0. D/6 gets a per-bowl weight on the
+  --     menu and its only platform is still settling. Before this migration
+  --     the per-bowl weight alone made the hall "known" -- an estimate of 0
+  --     bowls x 5 kg -- so the slot read 0.0 kg: empty, go and refill it,
+  --     about a position nothing had weighed. With no stack there is no
+  --     estimate, and with no ok platform there is no figure.
+  --
+  --     The menu row goes in through last_served_meal(), which slot_quantity
+  --     reads and which always answers, so this needs no service window.
+  st := 'OK';
+  begin
+    execute 'reset role';
+    insert into public.meal_food_mapping
+           (location, meal_type, meal_date, food_slot, food_name, bowl_weight_g)
+    select 'D', lm.meal_type, lm.meal_date, 6, 'Smoke-Buffer', 5000
+      from public.last_served_meal('Asia/Kolkata') lm
+    on conflict (location, meal_date, meal_type, food_slot) do nothing;
+    update public.device_status
+       set weight_state = 'settling', weight_g = null, gross_g = null,
+           bowls = null, bowls_confirmed = null
+     where device_id = BUF1;
+    select weight_g, buffer_g into v_w, v_bg
+      from public.slot_quantity where food_slot = 6;
+    if not found then
+      st := 'slot 6 is missing from slot_quantity';
+    elsif v_w is not null or v_bg is not null then
+      st := 'slot_quantity weight_g=' || coalesce(v_w::text,'null')
+         || ' buffer_g=' || coalesce(v_bg::text,'null') || ', want NULL/NULL';
+    else
+      select weight_g into v_w from public.slot_overview
+       where location = 'D' and food_slot = 6;
+      if v_w is not null then
+        st := 'slot_overview weight_g=' || v_w || ', want NULL';
+      end if;
+    end if;
+  exception when others then st := sqlstate || ' ' || sqlerrm;
+  end;
+  res := res || jsonb_build_object('n',35,
+           'r', case when st = 'OK' then 'PASS' else 'FAIL' end,
+           'c','a slot with nothing measured reads NULL, not 0',
+           'd', case when st = 'OK'
+                     then 'settling buffer + menu kg/bowl, no stack: NULL in both views'
+                     else st end);
+
+  -- 36. BUFFER PLUS COUNTER, ADDED. D/6: a buffer with 30 kg of food in two
+  --     bowls and a counter scale at 12 kg; M/6: a buffer with 45 kg in three.
+  --     Slot 87 kg = 75 kg buffered + 12 kg on the counter, 5 bowls, exact --
+  --     and D's own row 42 kg on the Stock screen. The menu's 5 kg per bowl
+  --     must NOT be applied to buffer bowls: they are weighed, not estimated.
+  st := 'OK';
+  begin
+    execute 'reset role';
+    insert into public.devices (device_id, location, food_slot, kind)
+    values (BUF2, 'M', 6, 'buffer'),
+           (BSC,  'D', 6, 'scale');
+    update public.device_status
+       set weight_state = 'ok', weight_g = 30000, gross_g = 35000,
+           bowls = 2, bowls_confirmed = true, cells_online = 1
+     where device_id = BUF1;
+    update public.device_status
+       set weight_state = 'ok', weight_g = 45000, gross_g = 52500,
+           bowls = 3, bowls_confirmed = true, cells_online = 1
+     where device_id = BUF2;
+    update public.device_status
+       set weight_state = 'ok', weight_g = 12000, cells_online = 3
+     where device_id = BSC;
+    select weight_g, buffer_g, counter_g, buffer_bowls, weight_is_partial
+      into v_w, v_bg, v_cg, v_bw, v_part
+      from public.slot_quantity where food_slot = 6;
+    if v_w is distinct from 87000 or v_bg is distinct from 75000
+       or v_cg is distinct from 12000 or v_bw is distinct from 5 then
+      st := 'weight=' || coalesce(v_w::text,'null')
+         || ' buffer=' || coalesce(v_bg::text,'null')
+         || ' counter=' || coalesce(v_cg::text,'null')
+         || ' bowls=' || coalesce(v_bw::text,'null') || ', want 87000/75000/12000/5';
+    elsif v_part then
+      st := 'every platform is ok, yet weight_is_partial is true';
+    else
+      select weight_g, buffer_g, measured_weight_g into v_w, v_bg, v_cg
+        from public.slot_overview where location = 'D' and food_slot = 6;
+      if v_w is distinct from 42000 or v_bg is distinct from 30000
+         or v_cg is distinct from 12000 then
+        st := 'slot_overview D/6 weight=' || coalesce(v_w::text,'null')
+           || ' buffer=' || coalesce(v_bg::text,'null')
+           || ' counter=' || coalesce(v_cg::text,'null') || ', want 42000/30000/12000';
+      end if;
+    end if;
+  exception when others then st := sqlstate || ' ' || sqlerrm;
+  end;
+  res := res || jsonb_build_object('n',36,
+           'r', case when st = 'OK' then 'PASS' else 'FAIL' end,
+           'c','buffer and counter are ADDED',
+           'd', case when st = 'OK'
+                     then 'slot 6: 30000 + 45000 buffered + 12000 counter = 87000; '
+                          'D/6 row 42000'
+                     else st end);
+
+  -- 37. PARTIAL. A third platform at D/6 reports no_cells: the 87 kg is now a
+  --     lower bound, because food is standing on a platform nothing can weigh.
+  --     The figure must stay (it is all real food) and say ">=". And a bowl
+  --     count only remembered across a power cycle is flagged, not hidden.
+  st := 'OK';
+  begin
+    execute 'reset role';
+    insert into public.devices (device_id, location, food_slot, kind)
+    values (BUF3, 'D', 6, 'buffer');
+    update public.device_status
+       set weight_state = 'no_cells', cells_online = 0
+     where device_id = BUF3;
+    update public.device_status set bowls_confirmed = false where device_id = BUF1;
+    select weight_g, weight_is_partial, buffer_unconfirmed into v_w, v_part, v_saved
+      from public.slot_quantity where food_slot = 6;
+    if v_w is distinct from 87000 then
+      st := 'weight_g=' || coalesce(v_w::text,'null') || ', want 87000 (kept, not dropped)';
+    elsif v_part is not true then
+      st := 'a reported no_cells buffer did not make the slot partial';
+    elsif v_saved is not true then
+      st := 'an unconfirmed bowl count was not flagged';
+    else
+      select buffer_issues into v_n from public.slot_overview
+       where location = 'D' and food_slot = 6;
+      if v_n is distinct from 1 then
+        st := 'slot_overview D/6 buffer_issues=' || coalesce(v_n::text,'null') || ', want 1';
+      end if;
+    end if;
+  exception when others then st := sqlstate || ' ' || sqlerrm;
+  end;
+  res := res || jsonb_build_object('n',37,
+           'r', case when st = 'OK' then 'PASS' else 'FAIL' end,
+           'c','a reported platform with no weight marks the slot partial',
+           'd', case when st = 'OK'
+                     then '87000 kept, weight_is_partial, buffer_unconfirmed, '
+                          'buffer_issues 1'
+                     else st end);
+
+  -- 38. HISTORY: a buffer appends to weight_samples, as anon, with its bowls
+  --     and gross -- and status_events, the bowl-count history, refuses it.
+  st := 'OK';
+  begin
+    execute 'set local role anon';
+    insert into public.weight_samples
+      (device_id, boot_id, seq, age_ms, reason, weight_state, weight_g,
+       cells_online, net_counts, counts_per_gram, battery_mv, battery_level,
+       firmware, bowls, bowls_confirmed, gross_g)
+    values (BUF2, 7, 1, 0, 'boot', 'ok', 45000, 1, 931500, 20.7, 4000, 'good',
+            'smoke', 3, true, 52500);
+  exception when others then
+    st := 'buffer sample refused: ' || sqlstate || ' ' || sqlerrm;
+  end;
+  if st = 'OK' then
+    begin
+      execute 'set local role anon';
+      insert into public.status_events
+        (device_id, boot_id, seq, age_ms, reason, stack_count, stack_status,
+         levels, sensors_ok, sensors_online, battery_level, charging, firmware)
+      values (BUF2, 7, 1, 0, 'boot', 2, 'ok',
+              array['present','present','absent','absent'],
+              array[true,true,true,true], 4, 'good', false, 'smoke');
+      st := 'a bowl-count event for a buffer was ACCEPTED';
+    exception when check_violation then null;
+    when others then st := sqlstate || ' ' || sqlerrm;
+    end;
+  end if;
+  execute 'reset role';
+  res := res || jsonb_build_object('n',38,
+           'r', case when st = 'OK' then 'PASS' else 'FAIL' end,
+           'c','a buffer appends to weight_samples, never status_events',
+           'd', case when st = 'OK'
+                     then 'weight_samples insert accepted; status_events 23514'
+                     else st end);
+
+  -- 39. NO FROZEN CARRY-FORWARD. BUF1 reported 30 kg twenty minutes ago and
+  --     no_cells one minute ago. The series must carry 30 kg up to the
+  --     no_cells sample and then STOP, marking the point partial -- not keep
+  --     contributing the last good figure, which is food nothing is
+  --     measuring. Timestamps come from age_ms, so this needs no clock.
+  st := 'OK';
+  begin
+    execute 'reset role';
+    insert into public.weight_samples
+      (device_id, boot_id, seq, age_ms, reason, weight_state, weight_g,
+       cells_online, firmware, bowls, bowls_confirmed, gross_g)
+    values (BUF1, 9, 1, 1200000, 'boot',   'ok',       30000, 1, 'smoke', 2, true, 35000),
+           (BUF1, 9, 2,   60000, 'change', 'no_cells', null,  0, 'smoke', null, null, null);
+    select buffer_g, buffer_is_partial into v_bg, v_part
+      from public.slot_stock_series
+     where location = 'D' and food_slot = 6
+     order by at_ts desc limit 1;
+    select buffer_g into v_w
+      from public.slot_stock_series
+     where location = 'D' and food_slot = 6
+     order by at_ts desc offset 1 limit 1;
+    if v_bg is not null or v_part is not true then
+      st := 'latest point buffer_g=' || coalesce(v_bg::text,'null')
+         || ' partial=' || coalesce(v_part::text,'null') || ', want NULL/true';
+    elsif v_w is distinct from 30000 then
+      st := 'point before the no_cells sample buffer_g='
+         || coalesce(v_w::text,'null') || ', want 30000';
+    end if;
+  exception when others then st := sqlstate || ' ' || sqlerrm;
+  end;
+  res := res || jsonb_build_object('n',39,
+           'r', case when st = 'OK' then 'PASS' else 'FAIL' end,
+           'c','the stock series drops a platform that stops being ok',
+           'd', case when st = 'OK'
+                     then '30000 until the no_cells sample, then NULL and partial'
+                     else st end);
+
+  end if;   -- v_buf: the buffer schema is present
+
+  ------------------------------------------------------------------
   -- Cleanup. Deliberately no enclosing ROLLBACK: that would discard the
   -- results along with the test data.
   ------------------------------------------------------------------
   execute 'reset role';
-  delete from public.status_events where device_id in (DEV, DEV2, DEV3, DEV4, DEV5, DEV6);
+  -- weight_samples before devices -- the foreign key is ON DELETE RESTRICT.
+  if to_regclass('public.weight_samples') is not null then
+    execute 'delete from public.weight_samples where device_id = any($1)'
+      using array[BUF1, BUF2, BUF3, BSC, SDEV2, SDEV3, SDEV4];
+  end if;
+  delete from public.status_events
+   where device_id in (DEV, DEV2, DEV3, DEV4, DEV5, DEV6, BUF1, BUF2, BUF3, BSC);
   delete from public.device_status
-   where device_id in (DEV, DEV2, DEV3, DEV4, DEV5, DEV6, SDEV1, SDEV2, SDEV3, SDEV4);
+   where device_id in (DEV, DEV2, DEV3, DEV4, DEV5, DEV6, SDEV1, SDEV2, SDEV3, SDEV4,
+                       BUF1, BUF2, BUF3, BSC);
   delete from public.devices
    where device_id in (DEV, DEV2, DEV3, DEV4, DEV5, DEV6, SDEV1, SDEV2, SDEV3, SDEV4,
-                       'BWL-SMOKEBAD');
+                       BUF1, BUF2, BUF3, BSC, 'BWL-SMOKEBAD');
   delete from public.meal_food_mapping
    where location = 'R' and meal_date in (MDAY, MDAY + 1);
+  -- Assertion 35's menu row, by its name, so a real dish at D/6 (which the
+  -- insert left alone) is never touched.
+  delete from public.meal_food_mapping
+   where location = 'D' and food_slot = 6 and food_name = 'Smoke-Buffer';
   -- Assertion 24 writes into TODAY's real menu at slot 8 to exercise the
   -- weight arithmetic. Slot 8 is not deployed so nothing reads it, but it is
   -- a real location and date -- leaving it behind would put two invented

@@ -66,6 +66,12 @@ with present as (
     (select count(*) from information_schema.columns
       where table_schema='public' and table_name='device_status'
         and column_name='external_power')                           > 0 as c_extpwr,
+    -- migrate_buffer.sql: the columns and the guard. Both, because a firmware
+    -- buffer PATCH needs the columns and the cut-over needs the guard.
+    (select count(*) from information_schema.columns
+      where table_schema='public' and table_name='device_status'
+        and column_name='bowls')                                    > 0 as c_bowls,
+    to_regprocedure('public.tg_device_status_kind()') is not null       as f_kindguard,
     -- Registration.
     (select count(*) from public.devices where device_id like 'BWL-%') as n_stacks
 ),
@@ -77,6 +83,15 @@ scales as (
               then (select count(*) from public.devices
                      where device_id like 'LDC-%')
          end as n_scales
+),
+-- What the BWL ids are now. Read through to_jsonb() so the query parses on a
+-- database with no kind column at all -- there every BWL is a stack, which is
+-- what the coalesce says.
+bwl as (
+  select count(*) filter (where coalesce(to_jsonb(d) ->> 'kind', 'stack') = 'buffer') as n_buffer,
+         count(*) filter (where coalesce(to_jsonb(d) ->> 'kind', 'stack') = 'stack')  as n_stack
+    from public.devices d
+   where d.device_id like 'BWL-%'
 )
 select item as step, name as run_this, status, note from (
   values
@@ -128,7 +143,21 @@ select item as step, name as run_this, status, note from (
         case when (select c_extpwr from present) then 'installed'
              else 'MISSING' end,
         'device_status.external_power -- FIRMWARE PATCHES THIS COLUMN; '
-        'absent means 400 on every post and the scale goes silent')
+        'absent means 400 on every post and the scale goes silent'),
+    (11, 'migrate_buffer.sql',
+        case when (select c_bowls and f_kindguard from present) then 'installed'
+             when (select c_bowls or f_kindguard from present) then 'PARTIAL'
+             else 'MISSING' end,
+        'kind buffer, bowls/gross_g, the kind guards, measured buffer kg in the '
+        'views -- a buffer PATCH answers 400 without it'),
+    (12, 'cutover_buffers.sql',
+        case when not (select c_bowls from present) then 'blocked by 11'
+             when (select n_buffer from bwl) = 0 then 'not run'
+             when (select n_stack from bwl) = 0 then 'done'
+             else 'PARTIAL' end,
+        (select n_buffer from bwl)::text || ' buffer, '
+          || (select n_stack from bwl)::text || ' stack among BWL-* -- run it '
+          || 'only once the web that reads buffers is live')
 ) as t(item, name, status, note)
 order by item;
 
@@ -145,10 +174,17 @@ order by item;
 --    6. migrate_burn_rate.sql       <- reads weight_samples, so after 5
 --    7. migrate_manual_fill.sql     <- the trial's manual estimate
 --    8. migrate_vbus_sense.sql      <- mains presence; refuses unless 2 has run
---    9. smoke_test.sql              <- 32 assertions; expect ALL PASS
+--    9. migrate_buffer.sql          <- BWL buffer platforms; refuses unless 6
+--                                      has run. Additive: no bowl figure
+--                                      moves, every BWL stays a stack
+--   10. smoke_test.sql              <- 40 assertions; expect ALL PASS
 --
---  Steps 5-8 are what apply_loadcell.sql fuses together with 1-4, so running
+--  Steps 5-9 are what apply_loadcell.sql fuses together with 1-4, so running
 --  that one file instead is the shorter route and the one the docs point at.
+--
+--  cutover_buffers.sql is NOT in that sequence. It re-kinds every BWL to
+--  'buffer' -- the one step that changes the dashboard -- and goes only after
+--  the web that reads buffers has been pushed. Then the kg fleet simulator.
 --
 --  weekly_menu_and_offline.sql, if it has never been run, goes AFTER 2 --
 --  it carries its own copies of two views whose bodies now read devices.kind,

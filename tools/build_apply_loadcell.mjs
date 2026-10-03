@@ -2,17 +2,18 @@
 // ONE file, in ONE transaction, that refuses to commit if it changed anything
 // about the bowl counters.
 //
-// WHY GENERATE IT rather than write it. The six source files are the ones that
-// get maintained, reviewed and rolled back individually; a hand-written fifth
-// copy of their contents would be a second definition of the same migration and
-// would drift from them the first time one was touched. This script fuses them
-// mechanically, so the combined file cannot say anything the parts do not.
+// WHY GENERATE IT rather than write it. The source files listed in PARTS are
+// the ones that get maintained, reviewed and rolled back individually; a
+// hand-written extra copy of their contents would be a second definition of the
+// same migration and would drift from them the first time one was touched. This
+// script fuses them mechanically, so the combined file cannot say anything the
+// parts do not.
 //
 // Re-run it after editing any of them:
 //     node tools/build_apply_loadcell.mjs
 //
 // WHAT THE FUSION CHANGES, and it is only this: each source file's own
-// `begin;`/`commit;` is removed so the six become one transaction, and the
+// `begin;`/`commit;` is removed so the parts become one transaction, and the
 // per-file verification SELECTs that trail each `commit;` are dropped in favour
 // of one consolidated report at the end. Nothing else is rewritten.
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -53,6 +54,19 @@ const PARTS = [
   // After migrate_loadcell.sql, necessarily: migrate_vbus_sense.sql raises
   // unless device_status.weight_state already exists.
   ['migrate_vbus_sense.sql', 'mains presence, from the VBUS divider', 'rollback_vbus_sense.sql'],
+  // LAST, AND IT HAS TO BE. It appends columns to views that migrate_loadcell
+  // and migrate_burn_rate (re)create with their own, older bodies -- so on a
+  // re-run it is what puts the buffer columns, the guards and the measured
+  // buffer series back. Anywhere earlier, a re-run would end with those
+  // reverted. Last here also makes its rollback the FIRST undo, which it must
+  // be: rollback_buffer.sql recreates the burn-rate views, and the undos
+  // after it drop what those read.
+  //
+  // cutover_buffers.sql is deliberately NOT a part. It re-kinds every BWL and
+  // clears its stack_* -- exactly what checks #1 and #4 below exist to
+  // refuse -- and it is the one rollout step that changes the dashboard, so
+  // it is run on its own, by decision.
+  ['migrate_buffer.sql', 'BWL buffer platforms: kind buffer, bowls, kg views', 'rollback_buffer.sql'],
 ];
 
 // Reverse of the apply order, skipping the parts that have no rollback. This
@@ -86,8 +100,9 @@ const ROLLBACKS = PARTS.map(([, , r]) => r).filter(Boolean).reverse();
 // symptom points at the network rather than at a missing column.
 //
 // ORDER IS LOAD-BEARING. weight_samples needs devices.kind from
-// migrate_loadcell; burn_rate reads weight_samples. They go last, in this
-// order, and the fusion refuses to reorder them.
+// migrate_loadcell; burn_rate reads weight_samples; migrate_buffer rewrites
+// what all of them made. They go in exactly the order of PARTS, and the fusion
+// never reorders them.
 
 
 /** The transactional body of one migration: everything strictly between its own
@@ -114,7 +129,7 @@ const out = `-- ================================================================
 --  Bowlstack -- apply the load-cell augmentation.  GENERATED FILE.
 --
 --  Regenerate with:  node tools/build_apply_loadcell.mjs
---  Do not edit by hand -- edit the six files it fuses and re-run that.
+--  Do not edit by hand -- edit the files it fuses and re-run that.
 --
 --  ---------------------------------------------------------------------
 --  WHAT THIS IS FOR
@@ -137,6 +152,10 @@ ${ROLLBACKS.map((f) => `--      ${f}`).join('\n')}
 --  (part 1) has NO rollback and does not need one: it predates the load
 --  cells and the bowl counters depend on it.
 --
+--  If supabase/cutover_buffers.sql has ever run, run
+--  rollback_cutover_buffers.sql BEFORE all of them: rollback_buffer.sql
+--  refuses while any device is still a buffer.
+--
 --  ---------------------------------------------------------------------
 --  WHY IT IS SAFE TO RUN MID-SERVICE
 --  ---------------------------------------------------------------------
@@ -153,7 +172,13 @@ ${ROLLBACKS.map((f) => `--      ${f}`).join('\n')}
 --  check the database performs rather than a claim in a comment.
 --
 --  IT ADDS AND NEVER REMOVES. No table is dropped, no row is rewritten, no
---  existing column changes name, type, nullability or default.
+--  existing column changes name, type, nullability or default, and the only
+--  CHECKs it changes, it widens.
+--
+--  IT IS SAFE TO RE-RUN, before or after the buffer cut-over: no device's
+--  kind may change (check #4), and every view ends on its newest body because
+--  migrate_buffer.sql runs last. The cut-over itself is NOT in here -- it is
+--  supabase/cutover_buffers.sql, run on its own.
 --
 --  ---------------------------------------------------------------------
 --  TO REHEARSE FIRST
@@ -177,8 +202,14 @@ begin;
 --  anything. Captured INSIDE the transaction, so what they record is
 --  precisely the state this transaction started from.
 -- ---------------------------------------------------------------------
+-- kind through to_jsonb() rather than by name: on a database that predates
+-- migrate_loadcell.sql the column does not exist, and naming it would be a
+-- parse error. Such a row is a bowl counter, which is what the column's
+-- default will call it -- so 'stack' is the honest snapshot.
 create temp table _before_devices on commit drop as
-  select device_id, location, food_slot, label, timezone from public.devices;
+  select device_id, location, food_slot, label, timezone,
+         coalesce(to_jsonb(d) ->> 'kind', 'stack') as kind
+    from public.devices d;
 
 create temp table _before_status on commit drop as
   select device_id, reported, boot_id, uptime_s, stack_count, stack_status,
@@ -264,10 +295,17 @@ begin
     raise exception 'ABORTED: a table gained or lost rows it should not have';
   end if;
 
-  -- 4. Every pre-existing device is still classified as a bowl counter.
+  -- 4. No pre-existing device changed what it measures.
+  --
+  --    COMPARED TO THE SNAPSHOT, not to 'stack'. This used to assert that
+  --    every pre-existing device was a bowl counter, which was true until the
+  --    buffer cut-over made every BWL a 'buffer' -- after which a re-run of
+  --    this file would abort on a database that was exactly right. What the
+  --    check is for is "applying this did not reclassify anything", and that
+  --    is a comparison, whatever the kinds happen to be.
   select count(*) into v_n from public.devices d
     join _before_devices b using (device_id)
-   where d.kind <> 'stack';
+   where d.kind is distinct from b.kind;
   if v_n > 0 then
     raise exception 'ABORTED: % pre-existing device(s) were reclassified', v_n;
   end if;
@@ -306,9 +344,14 @@ end $$;
 -- ---------------------------------------------------------------------
 select item as step, name as detail, status from (
   values
-    (1, 'bowl counters (BWL-*)',
-        (select count(*)::text from public.devices where kind = 'stack')
-          || ' registered, unchanged'),
+    -- BWL-* by kind rather than "kind = 'stack'": after the cut-over they are
+    -- buffers, and a report reading "0 registered" would look like a wiped
+    -- registry.
+    (1, 'BWL-* (bowl counters / buffer platforms)',
+        (select count(*) filter (where kind = 'stack') || ' stack, '
+                || count(*) filter (where kind = 'buffer') || ' buffer'
+           from public.devices where device_id like 'BWL-%')
+          || ' -- no kind changed'),
     (2, 'load cells (LDC-*)',
         (select count(*)::text from public.devices where kind = 'scale')
           || ' registered, '
@@ -325,7 +368,8 @@ select item as step, name as detail, status from (
     (5, 'measured weight',
         'no station has reported one yet -- expected until a scale is flashed'),
     (6, 'next',
-        'run supabase/smoke_test.sql -- expect 32 assertions, 0 FAIL')
+        'run supabase/smoke_test.sql -- expect 40 assertions, 0 FAIL; then, '
+        'when the web is live, supabase/cutover_buffers.sql')
 ) as t(item, name, status)
 order by item;
 

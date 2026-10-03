@@ -37,8 +37,9 @@
 --  Only devices with `location = 'R'` (reserved/future) or no location at all --
 --  BWL-025..032 after assign_devices.sql. A deployed unit in D, M or T is never
 --  affected, so live telemetry from the prototype or from the simulated fleet
---  survives. It DOES delete history for the spares, which is the intent: a unit
---  that has never been installed should have nothing to show.
+--  survives. It DOES delete history for the spares -- status_events and
+--  weight_samples both -- which is the intent: a unit that has never been
+--  installed should have nothing to show.
 -- =====================================================================
 
 begin;
@@ -46,6 +47,20 @@ begin;
 -- Report first, so the operation is visible before it happens.
 select count(*) as spares_to_reset
   from public.devices where location = 'R' or location is null;
+
+-- The weighed history too -- a spare BWL is a buffer platform since the
+-- cut-over, and a stray kg write leaves rows here, not in status_events.
+-- Without this a "reset" spare would still carry a weight curve on its device
+-- page. Dynamic and gated, because the table does not exist on a database
+-- built only from schema.sql.
+do $$
+begin
+  if to_regclass('public.weight_samples') is not null then
+    execute $q$delete from public.weight_samples
+                where device_id in (select device_id from public.devices
+                                    where location = 'R' or location is null)$q$;
+  end if;
+end $$;
 
 delete from public.status_events
  where device_id in (select device_id from public.devices
