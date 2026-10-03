@@ -162,8 +162,9 @@ bool Filter::add(int32_t raw, int32_t stepThresholdCounts) {
 // that, minutes of slow consumption would add up to a phantom "unload".
 //
 // HOW MANY BOWLS: round(jump / typical full bowl), at least one. The typical figure
-// starts at 15 kg and is LEARNED from loads that count as exactly one bowl -- only
-// loads, because an unloaded bowl may have had food taken out of it.
+// is the fixed midpoint of a real full bowl, 18.5 kg (BowlConfig says why it is not
+// learned). With learning switched on it is learned from loads that count as exactly
+// one bowl -- only loads, because an unloaded bowl may have had food taken out of it.
 //
 // WHAT IT REFUSES TO CLAIM: after a power cycle the count is remembered but marked
 // unconfirmed, because the stack may have changed while the unit was off. It is
@@ -181,7 +182,10 @@ void BowlTracker::configure(const BowlConfig &c) {
 void BowlTracker::restore(uint8_t bowls, float typicalFullG) {
   bowls_ = bowls > cfg_.maxBowls ? cfg_.maxBowls : bowls;
   confirmed_ = false;
-  if (typicalFullG >= cfg_.typicalFullMinG && typicalFullG <= cfg_.typicalFullMaxG)
+  // Only a LEARNED figure is worth restoring. With learning off the configured one
+  // stands -- otherwise the 15 kg that older firmware stored would outlive its config.
+  if (cfg_.learnAlpha > 0.0f && typicalFullG >= cfg_.typicalFullMinG &&
+      typicalFullG <= cfg_.typicalFullMaxG)
     typical_ = typicalFullG;
   running_ = false;
   haveRef_ = false;

@@ -68,10 +68,15 @@ struct BowlConfig {
   float eventMinG = 10000.0f;     // a jump this size or more is bowls, not food
   uint32_t stableMs = 5000;       // and it must hold this long before it counts
   float stableBandG = 300.0f;     // "holding": the settled reading stays inside this band
-  float typicalFullDefaultG = 15000.0f;  // one full bowl, until learned
-  float typicalFullMinG = 10000.0f;      // learning is clamped to a believable range
-  float typicalFullMaxG = 60000.0f;
-  float learnAlpha = 0.3f;        // weight of a new single-bowl load in the learned figure
+  // ONE FULL BOWL ON THE PLATFORM: 14-18 kg of food + the 2.5 kg bowl = 16.5-20.5 kg
+  // (owner, 2026-10-03). Counted against the MIDPOINT, FIXED: round(jump / 18.5 kg) is
+  // right for every mix of 1..4 such bowls -- the worst, 4 x 20.5 = 82 kg, is 4.43 --
+  // and the band of figures that keeps four bowls right is only 18.2-18.9 kg. So
+  // learning from single loads, which range 16.5-20.5, could only make it worse: off.
+  float typicalFullDefaultG = 18500.0f;
+  float typicalFullMinG = 16500.0f;  // a figure outside one real bowl is never used
+  float typicalFullMaxG = 20500.0f;
+  float learnAlpha = 0.0f;  // > 0 learns from single loads; see above for why it is off
   uint8_t maxBowls = 4;
   float emptyBelowG = 1000.0f;    // a settled reading below this IS an empty platform
   float inconsistentG = 1000.0f;  // food below -this means the count cannot be right

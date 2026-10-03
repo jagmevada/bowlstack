@@ -65,7 +65,7 @@ struct Rig {
     p.zero = (int32_t)ZERO;
     p.cpg = (float)CPG;
     p.bowls = 0;
-    p.typicalFullG = 15000;
+    p.typicalFullG = 18500;
     s.restore(p);
     gross = 0;
     run(8000);  // an empty platform settles, which confirms the zero count
@@ -132,50 +132,70 @@ static void singleLoad() {
   section("bowls: one bowl loaded is counted after it holds 5 s, food = gross - 2.5 kg");
   Rig g;
   g.commission();
-  g.gross = 15000;  // a 2.5 kg bowl with 12.5 kg of food
+  g.gross = 18500;  // a 2.5 kg bowl with 16 kg of food
   g.run(4500);
   CHECK(g.events.empty(), "no event before the load has held 5 s (got %zu)", g.events.size());
   g.run(3000);
   CHECK(g.count(BowlEvent::Loaded) == 1, "exactly one Loaded event (got %d)", g.count(BowlEvent::Loaded));
   const Reading r = g.r();
   CHECK(r.bowls == 1 && r.bowlsConfirmed, "1 bowl, confirmed (got %u, %d)", r.bowls, r.bowlsConfirmed);
-  CHECK(std::fabs(r.foodG - 12500) < 60, "food %.0f g (want 12500 +/- 60)", r.foodG);
-  CHECK(std::fabs(r.grossG - 15000) < 60, "gross %.0f g (want 15000 +/- 60)", r.grossG);
+  CHECK(std::fabs(r.foodG - 16000) < 60, "food %.0f g (want 16000 +/- 60)", r.foodG);
+  CHECK(std::fabs(r.grossG - 18500) < 60, "gross %.0f g (want 18500 +/- 60)", r.grossG);
 }
 
 static void doubleLoad() {
   section("bowls: two bowls at once are counted by size");
   Rig g;
   g.commission();
-  g.gross = 30000;
+  g.gross = 37000;
   g.run(8000);
   const Reading r = g.r();
   CHECK(r.bowls == 2, "2 bowls (got %u)", r.bowls);
   CHECK(g.events.size() == 1 && g.events[0].delta == 2, "one event of +2 (got %zu events)", g.events.size());
-  CHECK(std::fabs(r.foodG - 25000) < 80, "food %.0f g (want 25000)", r.foodG);
+  CHECK(std::fabs(r.foodG - 32000) < 80, "food %.0f g (want 32000)", r.foodG);
 }
 
-static void learnsTypicalBowl() {
-  section("bowls: the typical full bowl is learned from single loads only");
+static void countsEveryMixOfBowls() {
+  section("bowls: 1..4 bowls of 16.5-20.5 kg each, loaded at once, all lightest or all heaviest");
+  // The owner's range: 14-18 kg of food + the 2.5 kg bowl. The extremes are the hard
+  // cases -- any mix in between rounds to the same count.
+  for (int n = 1; n <= 4; n++) {
+    for (double each : {16500.0, 20500.0}) {
+      Rig g;
+      g.commission();
+      g.gross = n * each;
+      g.run(8000);
+      CHECK(g.r().bowls == n && g.r().bowlsConfirmed, "%d x %.1f kg -> %d bowls (got %u, %d)", n, each / 1000, n,
+            g.r().bowls, g.r().bowlsConfirmed);
+    }
+  }
+}
+
+static void typicalIsFixed() {
+  section("bowls: the full-bowl figure is fixed at 18.5 kg -- not learned, not restored from old firmware");
   Rig g;
   g.commission();
-  g.gross = 18000;
+  g.gross = 20500;  // a heavy single bowl: with learning this would move the figure
   g.run(8000);
-  const Reading r = g.r();
-  CHECK(std::fabs(r.typicalFullG - 15900) < 40, "typical %.0f g (want 0.7*15000 + 0.3*18000 = 15900)", r.typicalFullG);
-  CHECK(g.s.dirty(), "learning marks the persisted state dirty");
-  g.gross = 18000 - 16000;  // unload a bowl: must NOT teach the typical figure
-  g.run(8000);
-  CHECK(std::fabs(g.r().typicalFullG - 15900) < 1, "an unload does not change the typical figure (%.0f)", g.r().typicalFullG);
+  CHECK(std::fabs(g.r().typicalFullG - 18500) < 1, "still 18500 g after a single load (%.0f)", g.r().typicalFullG);
+  CHECK(!g.s.dirty() || g.s.persisted().typicalFullG == 18500, "nothing learned to persist");
+  Rig h;
+  Persisted p;
+  p.zeroed = true;
+  p.zero = (int32_t)ZERO;
+  p.cpg = (float)CPG;
+  p.typicalFullG = 15000;  // what older firmware stored
+  h.s.restore(p);
+  CHECK(std::fabs(h.r().typicalFullG - 18500) < 1, "an old stored 15 kg is ignored (%.0f)", h.r().typicalFullG);
 }
 
 static void unload() {
   section("bowls: one bowl taken off");
   Rig g;
   g.commission();
-  g.gross = 30000;
+  g.gross = 37000;
   g.run(8000);
-  g.gross = 15000;
+  g.gross = 18500;
   g.run(8000);
   const Reading r = g.r();
   CHECK(r.bowls == 1 && r.bowlsConfirmed, "1 bowl left, confirmed (got %u)", r.bowls);
@@ -198,11 +218,11 @@ static void unstableThenStable() {
   Rig g;
   g.commission();
   for (int k = 0; k < 20; k++) {  // a bowl being shuffled about for 20 s
-    g.gross = (k % 2) ? 17000 : 13000;
+    g.gross = (k % 2) ? 20500 : 16500;
     g.run(1000);
   }
   CHECK(g.events.empty(), "no event while moving (got %zu)", g.events.size());
-  g.gross = 15000;
+  g.gross = 18500;
   g.run(8000);
   CHECK(g.count(BowlEvent::Loaded) == 1 && g.r().bowls == 1, "counted once it holds (bowls %u)", g.r().bowls);
 }
@@ -211,18 +231,18 @@ static void slowConsumption() {
   section("bowls: food taken slowly over 10 min is never mistaken for an unload");
   Rig g;
   g.commission();
-  g.gross = 30000;
+  g.gross = 37000;
   g.run(8000);
   g.events.clear();
   for (int i = 1; i <= 600; i++) {  // 6 kg taken off over 600 s
-    g.gross = 30000 - 6000.0 * i / 600.0;
+    g.gross = 37000 - 6000.0 * i / 600.0;
     g.run(1000);
   }
   g.run(8000);
   const Reading r = g.r();
   CHECK(g.events.empty(), "no event (got %zu)", g.events.size());
   CHECK(r.bowls == 2, "still 2 bowls (got %u)", r.bowls);
-  CHECK(std::fabs(r.foodG - 19000) < 80, "food %.0f g (want 30000 - 6000 - 2x2500 = 19000)", r.foodG);
+  CHECK(std::fabs(r.foodG - 26000) < 80, "food %.0f g (want 37000 - 6000 - 2x2500 = 26000)", r.foodG);
 }
 
 static void restoreAndEmptyReset() {
@@ -252,10 +272,10 @@ static void restoreLoadedThenEvent() {
   p.cpg = (float)CPG;
   p.bowls = 2;
   g.s.restore(p);
-  g.gross = 30000;
+  g.gross = 37000;
   g.run(15000);
   CHECK(g.r().bowls == 2 && !g.r().bowlsConfirmed, "2 bowls, still unconfirmed with nothing happening");
-  g.gross = 45000;
+  g.gross = 55500;
   g.run(8000);
   CHECK(g.r().bowls == 3 && g.r().bowlsConfirmed, "a load confirms: 3 bowls (got %u, %d)", g.r().bowls, g.r().bowlsConfirmed);
 }
@@ -303,10 +323,10 @@ static void clampAtMax() {
   section("bowls: a fifth bowl is refused, not invented");
   Rig g;
   g.commission();
-  g.gross = 60000;  // four bowls in one go
+  g.gross = 74000;  // four bowls in one go
   g.run(8000);
   CHECK(g.r().bowls == 4 && g.r().bowlsConfirmed, "4 bowls (got %u)", g.r().bowls);
-  g.gross = 75000;
+  g.gross = 92500;
   g.run(8000);
   CHECK(g.r().bowls == 4 && !g.r().bowlsConfirmed, "still 4, unconfirmed (got %u, %d)", g.r().bowls, g.r().bowlsConfirmed);
   CHECK(g.count(BowlEvent::Clamped) == 1, "one Clamped event (got %d)", g.count(BowlEvent::Clamped));
@@ -474,7 +494,8 @@ int main() {
   filterNoFalseSteps();
   singleLoad();
   doubleLoad();
-  learnsTypicalBowl();
+  countsEveryMixOfBowls();
+  typicalIsFixed();
   unload();
   belowThreshold();
   unstableThenStable();
