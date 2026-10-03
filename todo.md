@@ -25,20 +25,44 @@ A/B/C cell rows leave the main page (Diagnose keeps them).
 | Phase | | State |
 | --- | --- | --- |
 | 0 | cleanup; V1.10 field-trial code committed as a baseline (`9909e20`) | done |
-| 1 | `include/load_scale.h`, `src/loadcell/load_scale.cpp` — Arduino-free core (filter + step detection, bowl tracker, zero/calibrate, weight_state) with host tests: `bash tools/host_test/run.sh` | 61/61 pass |
+| 1 | `include/load_scale.h`, `src/loadcell/load_scale.cpp` — Arduino-free core (filter + step detection, bowl tracker, zero/calibrate, weight_state) with host tests: `bash tools/host_test/run.sh` | 73/73 pass (incl. the vessel rule) |
 | 2a | buffer bank (`src/loadcell/buffer_bank.cpp`, replaces `buffer_scale.*`): B1..B3 from a config table (`:buf` console), bus clear + verified bring-up, B1 calibration imported — V1.11, `0e3a152` | done; 1000/1000 reads, 5/5 resets up (one on attempt 2 — post-reset fault contained, cause not found) |
-| 2b | panel: total = counter + buffers, rows `C1`/`B1..B3`, A/B/C off the main page; Settings › Buffers (zero / calibrate / bowls); sim screenshots (`BOWLSTACK_SIM_SHOT`) — V1.13, `b01a82e` | done in sim + console; **not yet seen on the glass**; bowls-on-empty bug found on bench and fixed (65/65 host tests) |
-| 2c | on-glass check by the user; real bowl test (≥10 kg load/unload, power cycle with bowls on); recalibrate B1 with ≥20 kg | next |
-| 3 | Supabase `migrate_buffer.sql` / rollback (kind `buffer`, 250 kg rail, kind guard, views) | |
-| 4 | upload: per-device channel refactor of `scale_telemetry` (counter JSON must stay byte-identical) | |
+| 2b | panel: total = counter + buffers, rows `C1`/`B1..B3`, A/B/C off the main page; Settings › Buffers (zero / calibrate / bowls); sim screenshots (`BOWLSTACK_SIM_SHOT`) — V1.13, `b01a82e` | done; bowls-on-empty bug found on bench and fixed |
+| 2c | on-glass use by the owner (V1.14–V1.19, below); B1 linearity test; real bowl test with real bowls; known-mass span calibration | mostly done — **known mass and real-bowl test outstanding** |
+| 3 | Supabase `migrate_buffer.sql` / rollback (kind `buffer`, 250 kg rail, kind guard, views) | **next** |
+| 4 | upload: per-device channel refactor of `scale_telemetry` (counter JSON must stay byte-identical); the buffer channel must follow the Vessel correction switch (food on, gross off) as C1's weight_g already does | |
 | 5 | cut-over of BWL-001 (stop other writers, re-kind, enable upload) | |
 | 6 | web front end (kg for buffers); **ask before pushing — a push deploys** | |
 | 7 | `tools/fleet_sim.py` to kg; re-kind BWL-002..024 together | |
 | 8–9 | docs; remove dormant bowl code | |
 
-**Open:** the counter's stored factor was found cleared during the field trial
-(`bowlscale/cpg = 0.0`, boot says "no calibration stored") — restore with Settings ›
-Scale › Restore default.
+**Done on the bench, 2026-10-03 evening (V1.14–V1.19, `3ca63ba`..`295cbe0`, not pushed):**
+
+| | |
+| --- | --- |
+| V1.14 | panel froze opening Calibrate: LVGL pool exhausted (78k/85k at boot) and its assert is `while(1)`. Buffer pages built on first open (boot 8.5 s → 2.5 s); a second 96k widget pool in PSRAM. Console `p` builds every page and prints the pool — **128k of 186k worst case; re-run it whenever a page is added** |
+| V1.15 | console `r` = Restore default (106.857) |
+| V1.16 | Set platform zero goes home to confirm, and waits for a full window instead of being dropped |
+| V1.17 | counter vessel offset applies only while a vessel is on (gross ≥ half the offset) — `lscale::netOfVessel()`, host-tested; panel and weight_g share it |
+| V1.18 | Settings › Precision back: 0.0 / 0.00 kg for every figure, `bowlscale/dec`, console `d` |
+| V1.19 | Settings › Vessel correction on/off for C1 **and** every buffer (`bowlscale/vesOn`, console `v`); off = gross everywhere, weight_g included |
+
+**Calibration state.** C1 = 106.857 counts/g (the old 2-cell figure — never verified on
+three cells; the owner's own 3-cell calibrations gave 108.9 / 109.2, i.e. C1 likely reads
+~2 % high). B1 = 20.675, **matched to C1** (`:buf 1 cal 4.53`), not to a known mass.
+B1 linearity, 4.53 kg steps on unknown bases: +1 / +3 / +5 / +8 / +4.5 g at 3 / 17 / 33 /
+37 / 50 % of 200 kg — linear within ~0.1 %, zero return ≤ 10 g. **No linearity
+correction needed; one span correction with a true known mass (≥ 10 kg) for C1, then
+B1 — deferred, no mass available.**
+
+**Open:**
+- `bowlscale/cpg` was found cleared **twice** (field trial, and again during V1.18) —
+  each time an explicit 0.0, which only the single-tap *Clear calibration* row (or `x`)
+  writes. Two-tap arming like the buffer pages' Zero/Clear was offered, not yet decided.
+- NAU7802 first transaction after an ESP reset sometimes fails / reads rev 0x00 —
+  contained by verify + retry, root cause not found.
+- `logBowls` wording on an empty reset reads "count reset to 0 +0 (step -0.0 kg)".
+- None of V1.12–V1.19 has had an independent review (ask before running one).
 
 ---
 
