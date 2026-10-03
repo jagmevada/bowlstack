@@ -817,13 +817,23 @@ void serviceCommands() {
 
   // --- the platform zero, the one that persists ----------------------------
   if (wantPlatformZero_) {
-    wantPlatformZero_ = false;
     if (!windowsFull()) {
       // Same reason a tare waits. Zeroing against a filter that has not settled
       // bakes its start-up error into a constant that then survives every power
       // cycle -- the worst possible place for it to live.
-      Serial.println("scale: platform zero deferred -- filter still settling, try again");
+      //
+      // AND PENDING, LIKE THE TARE, rather than dropped. The row now sends the
+      // operator to the weight page as its confirmation, and a dropped request
+      // would be confirmed there by a number that never moved.
+      static uint32_t nextSayMs = 0;
+      const uint32_t now = millis();
+      if ((int32_t)(now - nextSayMs) >= 0) {
+        nextSayMs = now + 1000;
+        Serial.printf("scale: platform zero pending -- filter %u/%u samples\n",
+                      window_[0].size(), window_n_);
+      }
     } else {
+      wantPlatformZero_ = false;
       for (uint8_t i = 0; i < CELLS; i++) {
         if (cell_[i].state() != CellState::Online) continue;
         platformZero_[i] = window_[i].mean(windowTrim());

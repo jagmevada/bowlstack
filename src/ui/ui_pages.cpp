@@ -182,7 +182,14 @@ void doTare() {
 void doClearCal() { if (onClearCal_) onClearCal_(); }
 void doCycleAvg() { if (onCycleAvg_) onCycleAvg_(); }
 void doRestore() { if (onRestore_) onRestore_(); }
-void doPlatformZero() { if (onPlatformZero_) onPlatformZero_(); }
+// Home afterwards, for doTare()'s reason: the weight page is the confirmation. An
+// empty platform already reading 0.045 kg shows "0.0kg" before and after, so a
+// row that stayed put looked like a tap that did nothing.
+void doPlatformZero() {
+  if (onPlatformZero_) onPlatformZero_();
+  closeAll();
+  goToHome();
+}
 
 // --- buffer platform actions -----------------------------------------------------
 // ZERO AND CLEAR TAKE TWO TAPS. Both are stored, and a stray one is not visible as

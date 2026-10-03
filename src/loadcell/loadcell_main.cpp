@@ -2,7 +2,7 @@
 // Bowlstack :: load-cell station -- Waveshare ESP32-S3-Touch-LCD-2,
 //              3x NAU7802 behind a TCA9548A
 //
-// Firmware: V1.15 261003
+// Firmware: V1.16 261003
 //
 // Also carries the 200 kg buffer-stock cell on its own bus (IO21/IO16) -- see
 // buffer_bank.h. It is a separate instrument: nothing below sums it into the
