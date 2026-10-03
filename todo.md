@@ -2,7 +2,45 @@
 
 ---
 
-## Resume here — `loadcell` branch
+## Resume here — buffer area: bowl count → load-cell kilograms (ACTIVE, 2026-10-03)
+
+**What:** retire the lidar bowl-count (BWL levels 1–4) in every layer and replace it
+with one universal load-scale model. Every platform is its own unit with its own id —
+LDC-001 is the counter (kind `scale`), BWL-001..003 are buffer scales (new kind
+`buffer`) — and several may share one ESP32. Firmware + panel, upload, Supabase, web
+and `tools/fleet_sim.py` all change. Full approved plan, with decisions and
+verification: `C:\Users\jagme\.claude\plans\u-r-aware-right-rustling-lemon.md`
+(owner's machine).
+
+**The bowl rule:** a buffer bowl's dry mass is 2.5 kg. A settled jump of ≥ 10 kg held
+5 s is bowls loaded (or unloaded); how many = round(jump ÷ typical full bowl), the
+typical figure learned from single loads (default 15 kg). Food = gross − bowls × 2.5 kg.
+The count survives a power cycle but reads *unconfirmed* until the next event, or until
+the platform reads empty (< 1 kg → 0).
+
+**Panel:** big total = counter + every buffer; one row each, `C1 10.1kg`,
+`B1 74.2kg 3 bw`; a partial total reads `≥ X` with a chip naming what is missing;
+A/B/C cell rows leave the main page (Diagnose keeps them).
+
+| Phase | | State |
+| --- | --- | --- |
+| 0 | cleanup; V1.10 field-trial code committed as a baseline (`9909e20`) | done |
+| 1 | `include/load_scale.h`, `src/loadcell/load_scale.cpp` — Arduino-free core (filter + step detection, bowl tracker, zero/calibrate, weight_state) with host tests: `bash tools/host_test/run.sh` | 61/61 pass |
+| 2 | buffer bank (replaces `buffer_scale.*`): N scales from a config table, I2C bus recovery + verified writes, panel GUI, Settings › Buffers | next |
+| 3 | Supabase `migrate_buffer.sql` / rollback (kind `buffer`, 250 kg rail, kind guard, views) | |
+| 4 | upload: per-device channel refactor of `scale_telemetry` (counter JSON must stay byte-identical) | |
+| 5 | cut-over of BWL-001 (stop other writers, re-kind, enable upload) | |
+| 6 | web front end (kg for buffers); **ask before pushing — a push deploys** | |
+| 7 | `tools/fleet_sim.py` to kg; re-kind BWL-002..024 together | |
+| 8–9 | docs; remove dormant bowl code | |
+
+**Open:** the counter's stored factor was found cleared during the field trial
+(`bowlscale/cpg = 0.0`, boot says "no calibration stored") — restore with Settings ›
+Scale › Restore default.
+
+---
+
+## Previous — `loadcell` branch
 
 **Three NAU7802 behind a TCA9548A, feeding the same UI. RUNNING AND
 CALIBRATED.** All three cells read, all three respond to load, the dashboard
