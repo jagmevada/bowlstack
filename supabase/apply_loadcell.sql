@@ -1594,8 +1594,13 @@ create table if not exists public.weight_samples (
 -- first. Mirrors status_events_device_time_idx exactly.
 create index if not exists weight_samples_device_time_idx
   on public.weight_samples (device_id, recorded_at desc);
-create index if not exists weight_samples_recorded_at_idx
-  on public.weight_samples (recorded_at);
+-- BRIN, not btree: a btree on recorded_at alone lured the planner into walking
+-- it backwards for "newest sample of device X", the whole table for a device
+-- with none -- see migrate_weight_samples_brin.sql, which converts an existing
+-- database.
+drop index if exists public.weight_samples_recorded_at_idx;
+create index if not exists weight_samples_recorded_at_brin
+  on public.weight_samples using brin (recorded_at);
 
 comment on table public.weight_samples is
   'Append-only weight history for devices.kind = ''scale''. Separate from '

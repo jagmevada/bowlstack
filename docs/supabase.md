@@ -35,6 +35,12 @@ supabase/migrate_hubs.sql            -- kind 'hub', HUB-D/M/T, platform node
                                      -- health; battery moves to the hub
 ```
 
+A database that ran `migrate_weight_samples.sql` before 2026-10-04 also needs
+`supabase/migrate_weight_samples_brin.sql` (idempotent): it swaps the btree on
+`weight_samples.recorded_at` for a BRIN, without which `slot_stock_series` and
+`slot_burn_rate` take seconds per dashboard refresh. Undo:
+`rollback_weight_samples_brin.sql`.
+
 It is safe to re-run, before or after the buffer cut-over: it refuses to
 commit if any device's kind, any status row or any bowl figure moved (the one
 exception is the platform battery `migrate_hubs.sql` clears — see

@@ -88,6 +88,9 @@ with present as (
     (select count(*) from public.devices d
       where d.device_id in ('HUB-D','HUB-M','HUB-T')
         and to_jsonb(d) ->> 'kind' = 'hub')                         as n_hubs,
+    -- migrate_weight_samples_brin.sql: the time index is BRIN, not btree.
+    to_regclass('public.weight_samples_recorded_at_brin') is not null   as i_brin,
+    to_regclass('public.weight_samples_recorded_at_idx') is not null    as i_btree,
     -- Registration.
     (select count(*) from public.devices where device_id like 'BWL-%') as n_stacks
 ),
@@ -183,7 +186,13 @@ select item as step, name as run_this, status, note from (
         (select n_hubs from present)::text || ' of HUB-D/M/T registered, '
           || (select n_health from present)::text || ' of 4 node-health '
           || 'columns -- battery is the hub''s; stop every writer of platform '
-          || 'battery BEFORE running it, or that platform answers 400')
+          || 'battery BEFORE running it, or that platform answers 400'),
+    (14, 'migrate_weight_samples_brin.sql',
+        case when (select i_brin and not i_btree from present) then 'installed'
+             when (select i_brin from present) then 'PARTIAL'
+             else 'MISSING' end,
+        'weight_samples time index as BRIN -- without it the dashboard''s '
+          || 'stock series and burn rate take seconds per refresh')
 ) as t(item, name, status, note)
 order by item;
 
