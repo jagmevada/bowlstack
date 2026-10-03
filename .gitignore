@@ -51,3 +51,7 @@ docs/Flowmeter kickstart/
 
 # Supabase CLI cache (version check, link state) -- local to each machine.
 supabase/.temp/
+
+# Python bytecode (fleet_sim.py is run and compile-checked locally).
+__pycache__/
+*.pyc
