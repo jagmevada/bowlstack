@@ -183,7 +183,6 @@ void doTare() {
   closeAll();
   goToHome();
 }
-void doClearCal() { if (onClearCal_) onClearCal_(); }
 void doCycleAvg() { if (onCycleAvg_) onCycleAvg_(); }
 void doCyclePrecision() { if (onCyclePrecision_) onCyclePrecision_(); }
 void doToggleVessel() { if (onToggleVessel_) onToggleVessel_(); }
@@ -222,6 +221,19 @@ void bufClear(uint8_t i) {
     if (onBufClear_) onBufClear_(i);
   } else {
     armClearUntil_[i] = lv_tick_get() + ARM_MS;
+  }
+}
+// THE COUNTER'S CLEAR CALIBRATION TAKES TWO TAPS TOO. As a single tap it erased the
+// counter's factor twice -- in the field trial and again on the bench on 2026-10-03 --
+// each time found only later, as bowlscale/cpg = 0.0 and a panel reading "uncal".
+// It sits directly under Calibrate, which is the row a person is aiming for.
+uint32_t armClearCalUntil_ = 0;
+void doClearCal() {
+  if (armed(armClearCalUntil_)) {
+    armClearCalUntil_ = 0;
+    if (onClearCal_) onClearCal_();
+  } else {
+    armClearCalUntil_ = lv_tick_get() + ARM_MS;
   }
 }
 void bufBowls(uint8_t i, int8_t d) {
@@ -643,7 +655,9 @@ void buildPages() {
   // to hand. The hint carries the last mass used on this unit, so the row still
   // says what it will do.
   menuAddRow(scaleMenu_, "Calibrate", nullptr, openCalib);
-  menuAddRow(scaleMenu_, "Clear calibration", nullptr, doClearCal);
+  // "Clear cal", as on the buffer pages: the full word left no room for the "tap
+  // again" hint the two-tap arming shows -- the two overlapped on a 240 px row.
+  menuAddRow(scaleMenu_, "Clear cal", nullptr, doClearCal);
   // A ROW THAT CYCLES rather than a sub-page of five radio buttons. There are
   // five values, they are ordered, and the whole point of the setting is to
   // flip between two of them with a mass on the platform and watch which reads
@@ -880,6 +894,7 @@ void pagesTick(uint32_t nowMs) {
     static char mass[12];
     snprintf(mass, sizeof(mass), "%ld g", (long)(s.scale.calMassG + 0.5f));
     menuSetHint(scaleMenu_, ROW_SCALE_CALIBRATE, s.scale.calMassG > 0.0f ? mass : "");
+    menuSetHint(scaleMenu_, ROW_SCALE_CLEAR, armed(armClearCalUntil_) ? "tap again" : "");
     static char avg[8];
     snprintf(avg, sizeof(avg), "%u", s.scale.window);
     menuSetHint(scaleMenu_, ROW_SCALE_AVERAGE, avg);
