@@ -167,7 +167,7 @@ plus a reload goes back to live. Studio is at `http://127.0.0.1:54323`.
 | | |
 | --- | --- |
 | what it is | built from THIS REPO'S SQL, in the order `whats_installed.sql` gives, plus the buffer cut-over -- live's shape, none of live's data |
-| what it is not | a copy of live: menus are `seed_meal_mapping.sql`, readings come from `fleet_sim.py`; HUB-D, LDC-001 and BWL-001..003 stay silent unless a panel is pointed at it |
+| what it is not | a copy of live: menus are `seed_meal_mapping.sql`, readings come from `fleet_sim.py` (BWL-002..024, HUB-M, HUB-T); HUB-D, LDC-001 and BWL-001 stay silent unless a panel is pointed at it |
 | service windows | the repo's defaults; at night set breakfast early (`update public.service_windows set starts_at='01:00' where id=1;` via `docker exec -i supabase_db_bowlstack-local psql ...`) or the dashboard idles "outside service" |
 | reading rows back | as `postgres` through that `docker exec`, not through PostgREST: `anon` cannot SELECT `device_status`, by design |
 | a firmware payload | test its exact JSON with `curl -X PATCH` against `$API_URL/rest/v1/device_status?device_id=eq.X` before flashing -- a body the CHECKs refuse silences the row. Keep `uptime_s` rising within one `boot_id`: the stamp trigger silently ignores a PATCH that goes backwards (0 rows, not an error) |

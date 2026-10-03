@@ -32,7 +32,7 @@ device would have been rejected too. A service_role key would prove nothing, so
 one is refused (the JWT's role claim is decoded, not guessed at).
 
 It does not write to `devices`, and it never writes an id somebody else owns:
-BWL-001..003 belong to the LDC-001 panel's buffer bank, and BWL-025..032 are
+BWL-001 is the LDC-001 panel's real B1, and BWL-025..032 are
 reserved (writing one permanently retires it from awaiting_deployment). Those
 ids are refused even when passed with --ids. Of the hubs it writes only HUB-M and
 HUB-T, which are constants, not something --ids can name.
@@ -78,13 +78,16 @@ REPO = Path(__file__).resolve().parent.parent
 
 FIRMWARE = "sim-kg 2.0"  # says "simulated" wherever the dashboard shows firmware
 
-# BWL-004..024: the deployed buffer positions minus the three the panel owns.
-DEFAULT_IDS = [f"BWL-{i:03d}" for i in range(4, 25)]
+# BWL-002..024: the deployed buffer positions minus BWL-001, the panel's real B1.
+# BWL-002/003 are the panel's B2/B3 slots, NOT FITTED, so they run as dummies like
+# the rest (owner, 2026-10-04) -- the panel posts only fitted slots, so there is no
+# second writer. The day B2/B3 are plugged in, move them back into PANEL_IDS.
+DEFAULT_IDS = [f"BWL-{i:03d}" for i in range(2, 25)]
 
 # Never written, even when named with --ids. Two writers on one row interleave two
 # boot_ids, which the stale-write guard and the dashboard both read as nonsense;
 # and a write to a reserved row sets `reported` permanently.
-PANEL_IDS = {"BWL-001", "BWL-002", "BWL-003"}  # buffer_bank.cpp default slots B1..B3
+PANEL_IDS = {"BWL-001"}  # buffer_bank.cpp slot B1, the one fitted
 RESERVED_IDS = {f"BWL-{i:03d}" for i in range(25, 33)}
 
 # The hubs this simulator owns. HUB-D is NOT one: the LDC-001 panel is area D's hub
@@ -910,7 +913,7 @@ def main() -> int:
     p.add_argument("--always", action="store_true",
                    help="in --live, report outside service hours too")
     p.add_argument("--ids", type=parse_ids, default=DEFAULT_IDS,
-                   help="comma-separated BWL ids (default BWL-004..BWL-024)")
+                   help="comma-separated BWL ids (default BWL-002..BWL-024)")
     p.add_argument("--seed", type=int, default=20260726,
                    help="RNG seed, for reproducible runs")
     p.add_argument("--dry-run", action="store_true",
