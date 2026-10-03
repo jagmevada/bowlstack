@@ -148,6 +148,12 @@ const uint32_t AGE_MAX_MS = 604800000;
 
 uplink::Result lastResult_;
 const char *deviceId_ = nullptr;
+// The hub row this board's power is reported on (migrate_hubs.sql). One ESP32 per
+// area, so the area letter names it; the build flag can override per unit.
+#ifndef BOWLSTACK_HUB_ID
+#define BOWLSTACK_HUB_ID "HUB-D"
+#endif
+const char *hubId_ = BOWLSTACK_HUB_ID;
 uint32_t bootId_ = 0;
 char mac_[18] = {0};
 
@@ -377,11 +383,9 @@ bool flushSamples() {
     else o["net_counts"] = nullptr;
     if (e.countsPerGram > 0.0f) o["counts_per_gram"] = e.countsPerGram;
     else o["counts_per_gram"] = nullptr;
-    o["battery_mv"] = e.batteryMv > config::BATTERY_PUBLISH_MAX_MV
-                          ? config::BATTERY_PUBLISH_MAX_MV
-                          : e.batteryMv;
-    if (e.batteryLevel == battery::Level::Unknown) o["battery_level"] = nullptr;
-    else o["battery_level"] = battery::levelName(e.batteryLevel);
+    // NO BATTERY: power belongs to the hub row (patchHub()), not to a platform's
+    // history -- one ESP32 hosts several platforms, and four copies of one cell
+    // read as four batteries.
     // TRIAL: the estimate as it stood when this sample was TAKEN, not as it
     // stands now. The whole point is pairing it against the weight from the
     // same instant; reading it at flush time would compare an estimate to a
@@ -444,9 +448,8 @@ bool flushSamples() {
   return false;
 }
 
-bool patchStatus(const scale::Snapshot &s, uint32_t uptimeSec, uint16_t batteryMv,
-                 battery::Level batteryLevel, const char *state, int32_t weightG,
-                 bool haveWeight) {
+bool patchStatus(const scale::Snapshot &s, uint32_t uptimeSec, const char *state,
+                 int32_t weightG, bool haveWeight) {
   JsonDocument doc;
   JsonObject o = doc.to<JsonObject>();
 
@@ -477,32 +480,23 @@ bool patchStatus(const scale::Snapshot &s, uint32_t uptimeSec, uint16_t batteryM
   if (s.countsPerGram > 0.0f) o["counts_per_gram"] = s.countsPerGram;
   else o["counts_per_gram"] = nullptr;
 
-  // --- power, identical to the bowl counter's ---
-  // Clamped to the schema's CHECK bound for the same reason telemetry.cpp
-  // clamps it: a floating ADC pin reads far above any real cell, and the raw
-  // value would violate `check (battery_mv between 0 and 6000)`, which
-  // PostgREST reports as 400 -- so the whole PATCH fails and the station stops
-  // reporting its WEIGHT because of a battery-wiring fault.
-  o["battery_mv"] = batteryMv > config::BATTERY_PUBLISH_MAX_MV
-                        ? config::BATTERY_PUBLISH_MAX_MV
-                        : batteryMv;
-  if (batteryLevel == battery::Level::Unknown) o["battery_level"] = nullptr;
-  else o["battery_level"] = battery::levelName(batteryLevel);
-
-  // NULL, NOT false. The ETA6098's STAT output drives the charge LED and
-  // reaches no GPIO on this board, so charge state is genuinely unreadable --
-  // and the column is nullable precisely so a firmware that cannot measure it
-  // reports nothing instead of inventing "not charging", which is
-  // indistinguishable from a real answer. See board_waveshare_s3.h section 5.
+  // --- NO POWER ON A PLATFORM: it belongs to the hub row (patchHub()) ---
+  // One ESP32 hosts the counter and the buffers, so its cell is ONE battery;
+  // reported on each platform it read as four. Sent as explicit nulls, not
+  // omitted, because a PATCH that leaves a column out keeps the old value and
+  // these rows still held ToF-era figures (migrate_hubs.sql also clears them,
+  // and its guard refuses a platform battery from older firmware).
+  o["battery_mv"] = nullptr;
+  o["battery_level"] = nullptr;
   o["charging"] = nullptr;
+  o["external_power"] = nullptr;
 
-  // MAINS PRESENCE, which is a different fact and one this board CAN read --
-  // the 5k/10k divider on IO10. Sent beside `charging` rather than instead of
-  // it: the charger terminates when the cell fills and 5 V stays present, so
-  // reporting VBUS as charging would claim a charge that finished hours ago.
-  // Without it the dashboard could only say "unreadable" about a station that
-  // was plainly plugged in.
-  o["external_power"] = inputs::externalPower();
+  // --- node health (migrate_hubs.sql) ---
+  // RESPONDING: the counter answers if any of its cells converts -- a dead cell
+  // is cells_partial, not a silent node. supply_mv, crc_errors and no_load_g are
+  // left out: this I2C platform has no node ADC, no checksum and no empty
+  // detector yet, and a column a PATCH omits stays NULL -- "not measured".
+  o["responding"] = s.online > 0;
 
   // --- TRIAL HARNESS: the manual fill estimate ------------------------------
   // Sent BESIDE the weight, never instead of it. The experiment is the gap
@@ -566,6 +560,50 @@ bool patchStatus(const scale::Snapshot &s, uint32_t uptimeSec, uint16_t batteryM
   // latch -- somebody has registered the device since.
   everUnprovisioned_ = false;
   return true;
+}
+
+// THE HUB'S OWN ROW (HUB-D, migrate_hubs.sql): the board's power, firmware and
+// uptime, once, instead of a copy on every platform it hosts. Sent after each
+// successful platform PATCH, so it rides the platform's cadence and backoff.
+// A missing hub row (migrate_hubs.sql not yet run) is logged, never latched:
+// the weighing must not stop because the hub is not registered.
+void patchHub(uint32_t uptimeSec, uint16_t batteryMv, battery::Level batteryLevel) {
+  JsonDocument doc;
+  JsonObject o = doc.to<JsonObject>();
+  o["boot_id"] = bootId_;
+  o["uptime_s"] = uptimeSec;
+  o["firmware"] = BOWLSTACK_FW_VERSION;
+  o["mac"] = mac_;
+  // Clamped to the schema's CHECK bound: a floating ADC pin reads far above any
+  // real cell, and a value past `check (battery_mv between 0 and 6000)` fails the
+  // whole PATCH with a 400 -- a wiring fault would silence the hub.
+  o["battery_mv"] = batteryMv > config::BATTERY_PUBLISH_MAX_MV
+                        ? config::BATTERY_PUBLISH_MAX_MV
+                        : batteryMv;
+  if (batteryLevel == battery::Level::Unknown) o["battery_level"] = nullptr;
+  else o["battery_level"] = battery::levelName(batteryLevel);
+  // CHARGING, ON A HUB, MEANS "ON THE CHARGER" (the owner's spec). This board
+  // cannot read the ETA6098's STAT pin (board_waveshare_s3.h section 5), but it
+  // CAN read mains presence on IO10 -- so true = mains present (charging, or full
+  // and holding), false = running on the backup cell. Mains loss is the event
+  // somebody has to act on, and that is exactly what false says.
+  const bool mains = inputs::externalPower();
+  o["charging"] = mains;
+  o["external_power"] = mains;
+
+  String body;
+  serializeJson(doc, body);
+  const String query = String("device_id=eq.") + hubId_;
+  const uplink::Result r = uplink::request("PATCH", "/rest/v1/device_status", query.c_str(),
+                                           "return=minimal,count=exact", body);
+  if (!r.ok() || r.matchedZeroRows) {
+    static uint32_t nextSayMs = 0;
+    if ((int32_t)(millis() - nextSayMs) >= 0) {
+      nextSayMs = millis() + 60000;
+      Serial.printf("scale-uplink: hub %s not updated (%d%s) -- run supabase/migrate_hubs.sql?\n",
+                    hubId_, r.code, r.matchedZeroRows ? ", no row" : "");
+    }
+  }
 }
 
 }  // namespace
@@ -733,7 +771,7 @@ void loop(const scale::Snapshot &s, uint32_t uptimeSec, uint16_t batteryMv,
   // how much food is on the counter right now.
   if (qCount_ > 0) flushSamples();
 
-  if (patchStatus(s, uptimeSec, batteryMv, batteryLevel, state, weightG, haveWeight)) {
+  if (patchStatus(s, uptimeSec, state, weightG, haveWeight)) {
     lastPostMs_ = now;
     everPosted_ = true;
     posts_++;
@@ -746,6 +784,8 @@ void loop(const scale::Snapshot &s, uint32_t uptimeSec, uint16_t batteryMv,
     reportedHadWeight_ = haveWeight;
     reportedWeightG_ = weightG;
     reportedBand_ = batteryLevel;
+
+    patchHub(uptimeSec, batteryMv, batteryLevel);
   } else {
     // lastPostMs_ is advanced on failure too, so a failing endpoint cannot be
     // retried faster than the floor allows.
