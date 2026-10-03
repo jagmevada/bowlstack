@@ -48,3 +48,6 @@ web/test/package-lock.json
 # live in the working copy, not in the history, so they are NOT carried onto
 # the dispenser branch either.
 docs/Flowmeter kickstart/
+
+# Supabase CLI cache (version check, link state) -- local to each machine.
+supabase/.temp/
