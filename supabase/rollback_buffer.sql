@@ -8,7 +8,9 @@
 --  status_events, and every view back to its previous body, grants and
 --  comment.
 --
---  ORDER. After rollback_cutover_buffers.sql if the cut-over ever ran, and
+--  ORDER. After rollback_hubs.sql if migrate_hubs.sql ever ran (it
+--  refuses otherwise), after rollback_cutover_buffers.sql if the cut-over
+--  ever ran, and
 --  BEFORE rollback_vbus_sense / manual_fill / burn_rate / weight_samples /
 --  loadcell -- it recreates the burn-rate views, which read objects those
 --  drop. apply_loadcell.sql's header lists the whole sequence.
@@ -48,6 +50,17 @@ begin
       'Run this BEFORE rollback_burn_rate.sql and rollback_weight_samples.sql '
       '-- it recreates views that read burn_rate_tuning() and weight_samples, '
       'and one of them is already gone. Nothing has been changed.';
+  end if;
+
+  -- migrate_hubs.sql replaced the guard this file drops and appended to the
+  -- device_overview it rebuilds; undone out of order, its hub rows would
+  -- fail the restored kind CHECK with a message that names neither file.
+  if exists (select 1 from information_schema.columns
+              where table_schema = 'public' and table_name = 'device_status'
+                and column_name = 'supply_mv') then
+    raise exception
+      'Run supabase/rollback_hubs.sql first -- migrate_hubs.sql is still '
+      'applied. Nothing has been changed.';
   end if;
 
   select count(*) into v_n from public.devices where kind = 'buffer';

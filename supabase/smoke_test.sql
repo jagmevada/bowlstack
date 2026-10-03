@@ -1,5 +1,5 @@
 -- =====================================================================
---  Bowlstack -- schema smoke test.  40 assertions.
+--  Bowlstack -- schema smoke test.  43 assertions.
 --
 --  Run after schema.sql, and BEFORE flashing any device. Paste the whole file
 --  into the Supabase SQL editor; it returns one table of PASS/FAIL rows plus a
@@ -38,6 +38,11 @@
 --           partial; history into weight_samples and never status_events;
 --           and the stock series dropping a platform the moment it stops
 --           being ok instead of carrying its last weight forward
+--    40-42  AREA HUBS -- battery belongs to the hub (migrate_hubs.sql). A hub
+--           registers and may write its power; a hub refuses a weight and a
+--           platform refuses a battery, while an explicit NULL still passes;
+--           and the platform node health writes, reads back through
+--           device_overview, keeps 0 as 0 and leaves NULL as NULL
 --
 --  Several assertions are SUPPOSED to fail: a device must NOT be able to read
 --  your data. Each is wrapped in an exception handler so the run continues, and
@@ -49,8 +54,9 @@
 --  rows on an absurd date. 'R' is reserved and slot 8 is outside the deployed
 --  1-5, so nothing can merge with live data. The buffer fixtures sit at slot 6
 --  -- also undeployed, and apart from slot 8 so the figures 29-31 assert are
---  untouched. Everything is deleted afterwards, so this is safe to re-run and
---  safe against a populated database.
+--  untouched. The hub fixture HUB-SMOKE sits at 'R' with no slot, as the real
+--  hubs have none. Everything is deleted afterwards, so this is safe to re-run
+--  and safe against a populated database.
 -- =====================================================================
 
 drop table if exists smoke_results;
@@ -120,6 +126,10 @@ declare
   v_cg  bigint;
   v_bw  bigint;
   v_part boolean;
+  -- AREA HUBS. Whether migrate_hubs.sql has been applied; 40-42 SKIP without
+  -- it. The fixture has no slot, so no stock view can see it.
+  HUB   constant text := 'HUB-SMOKE';
+  v_hub boolean;
   -- Menu fixtures live at location 'R' on an absurd date, so they cannot collide
   -- with a real menu even if this runs against a populated database.
   MDAY  constant date := date '1999-01-01';
@@ -146,10 +156,10 @@ begin
    where device_id in (DEV, DEV2, DEV3, DEV4, DEV5, DEV6, BUF1, BUF2, BUF3, BSC);
   delete from public.device_status
    where device_id in (DEV, DEV2, DEV3, DEV4, DEV5, DEV6, SDEV1, SDEV2, SDEV3, SDEV4,
-                       BUF1, BUF2, BUF3, BSC);
+                       BUF1, BUF2, BUF3, BSC, HUB);
   delete from public.devices
    where device_id in (DEV, DEV2, DEV3, DEV4, DEV5, DEV6, SDEV1, SDEV2, SDEV3, SDEV4,
-                       BUF1, BUF2, BUF3, BSC, 'BWL-SMOKEBAD');
+                       BUF1, BUF2, BUF3, BSC, HUB, 'BWL-SMOKEBAD');
   delete from public.meal_food_mapping
    where location = 'D' and food_slot = 6 and food_name = 'Smoke-Buffer';
 
@@ -1133,11 +1143,13 @@ begin
     values (BUF1, 'D', 6, 'buffer');
     begin
       execute 'set local role anon';
+      -- No battery: a platform's power is its hub's (assertion 41), and on a
+      -- database without migrate_hubs.sql leaving it out changes nothing.
       update public.device_status
          set boot_id = 7, uptime_s = 30, weight_state = 'ok', weight_g = 190000,
              gross_g = 200000, bowls = 4, bowls_confirmed = true,
              cells_online = 1, counts_per_gram = 20.7, net_counts = 4140000,
-             battery_mv = 4000, battery_level = 'good', firmware = 'smoke'
+             firmware = 'smoke'
        where device_id = BUF1;
       get diagnostics v_n = row_count;
       if v_n <> 1 then st := 'buffer PATCH matched ' || v_n || ' rows, want 1'; end if;
@@ -1438,6 +1450,192 @@ begin
   end if;   -- v_buf: the buffer schema is present
 
   ------------------------------------------------------------------
+  -- 40-42. AREA HUBS -- see supabase/migrate_hubs.sql. They reuse the
+  --        buffer fixtures, which exist whenever this schema does: the
+  --        migration refuses to run without migrate_buffer.sql.
+  ------------------------------------------------------------------
+  execute 'reset role';
+  select exists (select 1 from information_schema.columns
+                  where table_schema = 'public' and table_name = 'device_status'
+                    and column_name = 'supply_mv')
+    into v_hub;
+
+  if not (v_hub and v_buf) then
+    for v_n in 40..42 loop
+      res := res || jsonb_build_object('n', v_n, 'r','SKIP',
+               'c','hubs: ' || case v_n
+                     when 40 then 'a hub registers and may write its power'
+                     when 41 then 'a hub refuses a weight, a platform refuses a battery'
+                     else         'node health reads back; 0 stays 0, NULL stays NULL'
+                   end,
+               'd','migrate_hubs.sql has not been run on this database');
+    end loop;
+  else
+
+  -- 40. A hub registers, gets its status row from the trigger, and the
+  --     device write path takes the whole power-and-identity PATCH --
+  --     asserted on rows affected, as 4 is, because a PATCH that matches
+  --     nothing is a 204 too.
+  st := 'OK';
+  begin
+    insert into public.devices (device_id, location, food_slot, kind)
+    values (HUB, 'R', null, 'hub');
+    begin
+      execute 'set local role anon';
+      update public.device_status
+         set boot_id = 3, uptime_s = 60, firmware = 'smoke',
+             mac = '8C:94:DF:00:00:01', battery_mv = 4100,
+             battery_level = 'good', charging = true, external_power = true
+       where device_id = HUB;
+      get diagnostics v_n = row_count;
+      if v_n <> 1 then st := 'hub PATCH matched ' || v_n || ' rows, want 1'; end if;
+    exception when others then
+      st := 'hub PATCH refused: ' || sqlstate || ' ' || sqlerrm;
+    end;
+    execute 'reset role';
+    if st = 'OK' then
+      select battery_mv, charging into v_w, v_part
+        from public.device_overview where device_id = HUB and kind = 'hub';
+      if v_w is distinct from 4100 or v_part is not true then
+        st := 'device_overview battery_mv=' || coalesce(v_w::text,'null')
+           || ' charging=' || coalesce(v_part::text,'null') || ', want 4100/true';
+      end if;
+    end if;
+  exception when others then st := sqlstate || ' ' || sqlerrm;
+  end;
+  res := res || jsonb_build_object('n',40,
+           'r', case when st = 'OK' then 'PASS' else 'FAIL' end,
+           'c','a hub registers and may write its power',
+           'd', case when st = 'OK'
+                     then 'kind hub, battery/charging/mains written by anon, '
+                          'read back through device_overview'
+                     else st end);
+
+  -- 41. THE GUARD, both directions, plus the NULL that must still pass.
+  --     Every refused write is valid by its CHECK, so only device_status_kind
+  --     can refuse it. A weight on a hub would be food at no dish; a battery
+  --     on a platform is the copy of the hub's cell this migration removed,
+  --     and the counter (BSC) is held to it as well as the buffers. Current
+  --     firmware sends `"battery_mv": null` to a platform -- that must clear,
+  --     not 400.
+  st := 'OK';
+  begin
+    execute 'set local role anon';
+    update public.device_status set weight_state = 'ok', weight_g = 1000
+     where device_id = HUB;
+    st := 'a weight written to a hub was ACCEPTED';
+  exception when check_violation then null;
+  when others then st := sqlstate || ' ' || sqlerrm;
+  end;
+  if st = 'OK' then
+    begin
+      execute 'set local role anon';
+      update public.device_status set supply_mv = 5000 where device_id = HUB;
+      st := 'node health written to a hub was ACCEPTED';
+    exception when check_violation then null;
+    when others then st := sqlstate || ' ' || sqlerrm;
+    end;
+  end if;
+  if st = 'OK' then
+    begin
+      execute 'set local role anon';
+      update public.device_status set battery_mv = 4000 where device_id = BUF1;
+      st := 'battery_mv written to a buffer was ACCEPTED';
+    exception when check_violation then null;
+    when others then st := sqlstate || ' ' || sqlerrm;
+    end;
+  end if;
+  if st = 'OK' then
+    begin
+      execute 'set local role anon';
+      update public.device_status set external_power = true where device_id = BSC;
+      st := 'external_power written to a scale was ACCEPTED';
+    exception when check_violation then null;
+    when others then st := sqlstate || ' ' || sqlerrm;
+    end;
+  end if;
+  if st = 'OK' then
+    begin
+      execute 'set local role anon';
+      update public.device_status
+         set battery_mv = null, battery_level = null, charging = null,
+             external_power = null
+       where device_id = BUF1;
+      get diagnostics v_n = row_count;
+      if v_n <> 1 then st := 'null power PATCH matched ' || v_n || ' rows, want 1'; end if;
+    exception when others then
+      st := 'explicit null power on a buffer refused: ' || sqlstate || ' ' || sqlerrm;
+    end;
+  end if;
+  execute 'reset role';
+  res := res || jsonb_build_object('n',41,
+           'r', case when st = 'OK' then 'PASS' else 'FAIL' end,
+           'c','a hub refuses a weight, a platform refuses a battery',
+           'd', case when st = 'OK'
+                     then 'weight and supply_mv on a hub, battery on a buffer, '
+                          'mains on a scale all 23514; explicit NULLs accepted'
+                     else st end);
+
+  -- 42. NODE HEALTH round trip. BUF1's node reports a healthy supply, no
+  --     checksum failures and a dead-on zero: the 0s are MEASUREMENTS and
+  --     must read back as 0. BUF2's node has reported nothing, and must read
+  --     back NULL -- not 0, which would claim a check nobody ran. And the
+  --     ranges hold.
+  st := 'OK';
+  begin
+    execute 'set local role anon';
+    update public.device_status
+       set supply_mv = 5020, crc_errors = 0, responding = true, no_load_g = 0
+     where device_id = BUF1;
+    get diagnostics v_n = row_count;
+    if v_n <> 1 then st := 'node-health PATCH matched ' || v_n || ' rows, want 1'; end if;
+  exception when others then
+    st := 'node-health PATCH refused: ' || sqlstate || ' ' || sqlerrm;
+  end;
+  execute 'reset role';
+  if st = 'OK' then
+    select supply_mv, crc_errors, no_load_g, responding into v_w, v_bg, v_cg, v_part
+      from public.device_overview where device_id = BUF1;
+    if v_w is distinct from 5020 or v_bg is distinct from 0
+       or v_cg is distinct from 0 or v_part is not true then
+      st := 'BUF1 supply_mv=' || coalesce(v_w::text,'null')
+         || ' crc_errors=' || coalesce(v_bg::text,'null')
+         || ' no_load_g=' || coalesce(v_cg::text,'null')
+         || ' responding=' || coalesce(v_part::text,'null') || ', want 5020/0/0/true';
+    end if;
+  end if;
+  if st = 'OK' then
+    select count(*) into v_n from public.device_overview
+     where device_id = BUF2
+       and supply_mv is null and crc_errors is null
+       and responding is null and no_load_g is null;
+    if v_n <> 1 then st := 'BUF2 never reported node health, yet it is not NULL'; end if;
+  end if;
+  if st = 'OK' then
+    begin
+      update public.device_status set supply_mv = 25000 where device_id = BUF1;
+      st := 'supply_mv 25000 was ACCEPTED';
+    exception when check_violation then null;
+    end;
+  end if;
+  if st = 'OK' then
+    begin
+      update public.device_status set crc_errors = -1 where device_id = BUF1;
+      st := 'crc_errors -1 was ACCEPTED';
+    exception when check_violation then null;
+    end;
+  end if;
+  res := res || jsonb_build_object('n',42,
+           'r', case when st = 'OK' then 'PASS' else 'FAIL' end,
+           'c','node health reads back; 0 stays 0, NULL stays NULL',
+           'd', case when st = 'OK'
+                     then '5020 mV / 0 / 0 g / true read back; unreported reads NULL; '
+                          'ranges refuse 25000 mV and -1'
+                     else st end);
+
+  end if;   -- v_hub: the hub schema is present
+
+  ------------------------------------------------------------------
   -- Cleanup. Deliberately no enclosing ROLLBACK: that would discard the
   -- results along with the test data.
   ------------------------------------------------------------------
@@ -1451,10 +1649,10 @@ begin
    where device_id in (DEV, DEV2, DEV3, DEV4, DEV5, DEV6, BUF1, BUF2, BUF3, BSC);
   delete from public.device_status
    where device_id in (DEV, DEV2, DEV3, DEV4, DEV5, DEV6, SDEV1, SDEV2, SDEV3, SDEV4,
-                       BUF1, BUF2, BUF3, BSC);
+                       BUF1, BUF2, BUF3, BSC, HUB);
   delete from public.devices
    where device_id in (DEV, DEV2, DEV3, DEV4, DEV5, DEV6, SDEV1, SDEV2, SDEV3, SDEV4,
-                       BUF1, BUF2, BUF3, BSC, 'BWL-SMOKEBAD');
+                       BUF1, BUF2, BUF3, BSC, HUB, 'BWL-SMOKEBAD');
   delete from public.meal_food_mapping
    where location = 'R' and meal_date in (MDAY, MDAY + 1);
   -- Assertion 35's menu row, by its name, so a real dish at D/6 (which the

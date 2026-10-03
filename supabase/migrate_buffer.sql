@@ -134,10 +134,24 @@ end $$;
 -- Same constraint NAME, so migrate_loadcell.sql's
 -- `add constraint ... exception when duplicate_object` stays a no-op on a
 -- re-run of apply_loadcell.sql rather than re-adding the narrow one.
+--
+-- WIDENS, NEVER NARROWS, for the same reason one step on: migrate_hubs.sql
+-- adds 'hub' to this list and apply_loadcell.sql re-runs this file before
+-- it, so dropping and re-adding the three-kind list here would fail on the
+-- hub rows and abort the whole re-run. Re-added only while the CHECK does
+-- not already accept 'buffer'.
 -- ---------------------------------------------------------------------
-alter table public.devices
-  drop constraint if exists devices_kind_ck,
-  add  constraint devices_kind_ck check (kind in ('stack','scale','buffer'));
+do $$
+begin
+  if not exists (select 1 from pg_constraint
+                  where conrelid = 'public.devices'::regclass
+                    and conname  = 'devices_kind_ck'
+                    and pg_get_constraintdef(oid) like '%''buffer''%') then
+    alter table public.devices drop constraint if exists devices_kind_ck;
+    alter table public.devices
+      add constraint devices_kind_ck check (kind in ('stack','scale','buffer'));
+  end if;
+end $$;
 
 comment on column public.devices.kind is
   'What this installation MEASURES. stack = four ToF sensors up a pipe, '

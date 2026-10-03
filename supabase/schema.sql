@@ -11,7 +11,7 @@
 --      3. assign_devices.sql    permanent location/food_slot assignment
 --      4. seed_meal_mapping.sql sample menus, for the front-end test bed
 --      5. reset_spares.sql      only after a stray write; see that file
---      6. smoke_test.sql        40 assertions; expect ALL PASS
+--      6. smoke_test.sql        43 assertions; expect ALL PASS
 --
 --  diagnose.sql is read-only and can be run at any time.
 --
@@ -137,6 +137,10 @@ create table public.devices (
   --   buffer  one 200 kg cell under a buffer platform (BWL, since
   --           cutover_buffers.sql), reporting grams of FOOD plus the bowls
   --           it stands in. Leaves every stack_* column NULL.
+  --   hub     the ESP32 that runs a serving area (HUB-D/M/T, registered by
+  --           migrate_hubs.sql), reporting only its own power and identity.
+  --           Battery and mains are the hub's: a scale or buffer leaves them
+  --           NULL, and reports its node's health instead.
   --
   -- A hardware fact fixed at registration, never a setting. No device writes
   -- it -- `devices` has no anon policy at all -- and device_status_kind
@@ -150,7 +154,7 @@ create table public.devices (
   -- and a migrated one have the same column order and `select *` cannot tell
   -- them apart.
   kind        text not null default 'stack'
-                constraint devices_kind_ck check (kind in ('stack','scale','buffer'))
+                constraint devices_kind_ck check (kind in ('stack','scale','buffer','hub'))
 );
 
 comment on column public.devices.location is
@@ -298,9 +302,16 @@ create table public.device_status (
   -- plus four bowls of dish. See migrate_buffer.sql section 3.
   --
   -- LAST, after the load-cell half, because that is where migrate_buffer.sql
-  -- appends them on a live database. (manual_fill_* and external_power come
-  -- from migrations this file does not carry, so a rebuilt row is not
-  -- column-for-column the live one either way; the views name their columns.)
+  -- appends them on a live database. (manual_fill_* comes from a migration
+  -- this file does not carry, so a rebuilt row is not column-for-column the
+  -- live one either way; the views name their columns.)
+  --
+  -- external_power IS carried, ahead of them where migrate_vbus_sense.sql put
+  -- it: device_status_kind (section 4) reads it, and a guard naming a column
+  -- the table lacks fails every scale and buffer PATCH at run time. Same
+  -- definition, comment and grant as that migration, which then adds nothing.
+  external_power  boolean,
+
   bowls           smallint,
   bowls_confirmed boolean,
   gross_g         integer,
@@ -313,8 +324,49 @@ create table public.device_status (
     check (gross_g is null or gross_g between -5000 and 260000),
   constraint device_status_bowls_ok_ck
     check ((bowls is null and gross_g is null)
-           or weight_state is not distinct from 'ok')
+           or weight_state is not distinct from 'ok'),
+
+  -- --- platform node health (kind scale or buffer) ------------------------
+  -- What the hub's health poll says about a platform's node: its supply, its
+  -- checksum failures since power-up, whether it answered, and what it read
+  -- when last empty. All NULL = not measured, never 0 -- today's platforms
+  -- are wired straight to the hub and measure none of it. Ranges wide on
+  -- purpose: a value the hub can send that a CHECK refuses is a 400 that loses
+  -- the weight in the same PATCH. LAST because migrate_hubs.sql appends them
+  -- there; see its section 3.
+  supply_mv       smallint,
+  crc_errors      integer,
+  responding      boolean,
+  no_load_g       integer,
+
+  constraint device_status_supply_mv_ck
+    check (supply_mv is null or supply_mv between 0 and 20000),
+  constraint device_status_crc_errors_ck
+    check (crc_errors is null or crc_errors >= 0),
+  constraint device_status_no_load_ck
+    check (no_load_g is null or no_load_g between -50000 and 50000)
 );
+
+comment on column public.device_status.external_power is
+  'Mains present, from the VBUS divider. NOT `charging`: the charger stops when '
+  'the cell is full and 5 V remains, so this stays true where charging goes '
+  'false. NULL means unreadable -- no divider fitted -- and never "on battery".';
+comment on column public.device_status.supply_mv is
+  'PLATFORM NODE HEALTH. Supply voltage at the platform''s node, measured by '
+  'its own ADC, in mV (0..20000). Not a battery: a platform has none -- the '
+  'area''s battery is on its hub''s row. NULL = not measured.';
+comment on column public.device_status.crc_errors is
+  'PLATFORM NODE HEALTH. Frames from this node that failed their checksum '
+  'since the node powered up (>= 0); back to 0 when the node restarts. '
+  'NULL = not measured.';
+comment on column public.device_status.responding is
+  'PLATFORM NODE HEALTH. Whether the node answered the hub''s last health '
+  'poll. false = asked and heard nothing; NULL = not polled.';
+comment on column public.device_status.no_load_g is
+  'PLATFORM NODE HEALTH. What the platform read the last time it was empty, '
+  'in grams (-50000..50000). Should sit near 0; a slow walk away from 0 is '
+  'zero drift, visible here before it corrupts weight_g. 0 is a real reading; '
+  'NULL = not measured.';
 
 -- Columns are nullable because the row exists before the device has ever
 -- spoken. `reported` distinguishes "never heard from" from "reported zero
@@ -468,9 +520,14 @@ create trigger status_events_stamp
 -- column a PATCH did not mention at its OLD value, so testing NEW alone would
 -- reject a buffer whose row still held its last stack_count.
 --
+-- Power is the HUB's: a scale or buffer refuses battery_mv, battery_level,
+-- charging and external_power, and a hub refuses everything but those and
+-- its identity -- one ESP32 per area has one battery, and reported on each
+-- platform it read as four.
+--
 -- Fires before device_status_stamp because row triggers run in name order.
 -- SECURITY DEFINER because it reads devices, which anon cannot -- without it
--- every device PATCH would fail 42501. Same body as migrate_buffer.sql
+-- every device PATCH would fail 42501. Same body as migrate_hubs.sql
 -- section 6.
 create or replace function public.tg_device_status_kind()
 returns trigger language plpgsql security definer set search_path = '' as $$
@@ -504,6 +561,17 @@ begin
         using errcode = 'check_violation';
     end if;
 
+    -- Power is the hub's (migrate_hubs.sql).
+    if (new.battery_mv     is not null and new.battery_mv     is distinct from old.battery_mv)
+    or (new.battery_level  is not null and new.battery_level  is distinct from old.battery_level)
+    or (new.charging       is not null and new.charging       is distinct from old.charging)
+    or (new.external_power is not null and new.external_power is distinct from old.external_power) then
+      raise exception
+        '% is a %: it has no battery -- battery_mv, battery_level, charging and '
+        'external_power belong on its area''s hub (HUB-D/M/T)', new.device_id, v_kind
+        using errcode = 'check_violation';
+    end if;
+
     if v_kind = 'scale' then
       if (new.bowls           is not null and new.bowls           is distinct from old.bowls)
       or (new.bowls_confirmed is not null and new.bowls_confirmed is distinct from old.bowls_confirmed)
@@ -520,6 +588,30 @@ begin
           using errcode = 'check_violation';
       end if;
     end if;
+
+  elsif v_kind = 'hub' then
+    if (new.weight_g        is not null and new.weight_g        is distinct from old.weight_g)
+    or (new.weight_state    is not null and new.weight_state    is distinct from old.weight_state)
+    or (new.cells_online    is not null and new.cells_online    is distinct from old.cells_online)
+    or (new.counts_per_gram is not null and new.counts_per_gram is distinct from old.counts_per_gram)
+    or (new.net_counts      is not null and new.net_counts      is distinct from old.net_counts)
+    or (new.bowls           is not null and new.bowls           is distinct from old.bowls)
+    or (new.bowls_confirmed is not null and new.bowls_confirmed is distinct from old.bowls_confirmed)
+    or (new.gross_g         is not null and new.gross_g         is distinct from old.gross_g)
+    or (new.stack_count     is not null and new.stack_count     is distinct from old.stack_count)
+    or (new.stack_status    is not null and new.stack_status    is distinct from old.stack_status)
+    or (new.levels          is not null and new.levels          is distinct from old.levels)
+    or (new.sensors_ok      is not null and new.sensors_ok      is distinct from old.sensors_ok)
+    or (new.sensors_online  is not null and new.sensors_online  is distinct from old.sensors_online)
+    or (new.supply_mv       is not null and new.supply_mv       is distinct from old.supply_mv)
+    or (new.crc_errors      is not null and new.crc_errors      is distinct from old.crc_errors)
+    or (new.responding      is not null and new.responding      is distinct from old.responding)
+    or (new.no_load_g       is not null and new.no_load_g       is distinct from old.no_load_g) then
+      raise exception
+        '% is a hub: it reports its own power and identity only -- never a '
+        'weight, bowls, stack_* or a platform''s node health', new.device_id
+        using errcode = 'check_violation';
+    end if;
   end if;
 
   return new;
@@ -527,9 +619,11 @@ end $$;
 
 comment on function public.tg_device_status_kind() is
   'Guard on device_status: a stack writes only stack_*, a scale or buffer '
-  'never writes stack_*, a scale never writes bowls/gross_g and stays under '
-  '100 kg. Tests only columns that changed to a non-null value. SECURITY '
-  'DEFINER because it reads devices, which anon cannot.';
+  'never writes stack_* or power (battery/charging/external_power -- that is '
+  'the hub''s), a scale never writes bowls/gross_g and stays under 100 kg, a '
+  'hub writes only power and identity. Tests only columns that changed to a '
+  'non-null value. SECURITY DEFINER because it reads devices, which anon '
+  'cannot.';
 
 create trigger device_status_kind
   before update on public.device_status
@@ -1203,6 +1297,12 @@ grant update (weight_g, weight_state, cells_online, counts_per_gram, net_counts)
 grant update (bowls, bowls_confirmed, gross_g)
   on public.device_status to anon;
 
+-- Mains presence (migrate_vbus_sense.sql) and platform node health
+-- (migrate_hubs.sql). Which kind may write which is the guard's business,
+-- not the grant's -- every device holds the same key.
+grant update (external_power, supply_mv, crc_errors, responding, no_load_g)
+  on public.device_status to anon;
+
 -- Plain INSERT; no SELECT of any kind. A duplicate raises 23505, which is the
 -- idempotency mechanism.
 grant insert (device_id, boot_id, seq, age_ms, reason, stack_count,
@@ -1357,7 +1457,16 @@ select d.device_id,
        -- weight_state is not 'ok'.
        s.bowls,
        s.bowls_confirmed,
-       s.gross_g
+       s.gross_g,
+
+       -- Platform node health (migrate_hubs.sql), appended last for the same
+       -- reason. NULL -- never 0 -- on a hub, a stack, and a platform whose
+       -- node has not measured it. A hub's battery needs nothing new: it is
+       -- battery_mv / battery_level / charging above, on the hub's own row.
+       s.supply_mv,
+       s.crc_errors,
+       s.responding,
+       s.no_load_g
   from public.devices d
   left join public.device_status s using (device_id)
   left join public.meal_food_mapping m
@@ -2038,7 +2147,7 @@ commit;
 --       assign_devices.sql      the permanent location/food_slot assignment
 --       seed_meal_mapping.sql   sample menus, for the front-end test bed
 --       reset_spares.sql        restores awaiting_deployment for the reserved 8
---       smoke_test.sql          40 assertions; expect ALL PASS
+--       smoke_test.sql          43 assertions; expect ALL PASS
 --
 --     Then, for the load cells at the serving counter and under the buffers:
 --       apply_loadcell.sql      every load-cell migration in ONE
@@ -2046,12 +2155,14 @@ commit;
 --                               every device, status row and slot_overview
 --                               figure first and RAISES if one moved
 --     or separately, in the order tools/build_apply_loadcell.mjs lists them,
---     ending with migrate_buffer.sql.
+--     ending with migrate_buffer.sql and migrate_hubs.sql.
 --
---     This file already carries what migrate_buffer.sql adds, so on a
---     rebuild that part converges without changing anything. The BWL rows
---     stay kind 'stack' until cutover_buffers.sql -- run that on its own,
---     after the web that reads buffers is live.
+--     This file already carries what migrate_buffer.sql and migrate_hubs.sql
+--     add, so on a rebuild those parts converge without changing anything --
+--     except that migrate_hubs.sql REGISTERS the three area hubs, HUB-D/M/T,
+--     which are data and are not created here. The BWL rows stay kind
+--     'stack' until cutover_buffers.sql -- run that on its own, after the
+--     web that reads buffers is live.
 --
 --     whats_installed.sql says which of those a database already has.
 -- ---------------------------------------------------------------------

@@ -8,7 +8,7 @@
 --  WHAT THIS IS FOR
 --  ---------------------------------------------------------------------
 --  Paste the whole file into the Supabase SQL editor and run it ONCE. It
---  does what these 9 do, in the only order that works:
+--  does what these 10 do, in the only order that works:
 --
 --    1. migrate_bowl_weight.sql    per-bowl weight, and the Master Dashboard view
 --    2. migrate_loadcell.sql       load-cell stations alongside the bowl counters
@@ -19,13 +19,15 @@
 --    7. migrate_manual_fill.sql    TRIAL HARNESS -- the manual fill estimate
 --    8. migrate_vbus_sense.sql     mains presence, from the VBUS divider
 --    9. migrate_buffer.sql         BWL buffer platforms: kind buffer, bowls, kg views
+--   10. migrate_hubs.sql           area hubs carry the battery; platforms node health
 --
 --  ---------------------------------------------------------------------
 --  IF YOU NEED TO UNDO IT AFTER IT HAS COMMITTED
 --  ---------------------------------------------------------------------
---  Run these 6, IN THIS ORDER -- they undo in the reverse of the
+--  Run these 7, IN THIS ORDER -- they undo in the reverse of the
 --  order applied, because each drops objects the one before it depends on:
 --
+--      rollback_hubs.sql
 --      rollback_buffer.sql
 --      rollback_vbus_sense.sql
 --      rollback_manual_fill.sql
@@ -45,7 +47,7 @@
 --  ---------------------------------------------------------------------
 --  WHY IT IS SAFE TO RUN MID-SERVICE
 --  ---------------------------------------------------------------------
---  ONE TRANSACTION. All 9 parts and the verification run inside a single
+--  ONE TRANSACTION. All 10 parts and the verification run inside a single
 --  BEGIN. If ANY of it fails -- a missing prerequisite, a constraint, a
 --  verification check -- the whole thing rolls back and your database is
 --  exactly as it was. There is no half-applied state to recover from.
@@ -57,14 +59,19 @@
 --  aborts the transaction. "It should not affect bowl counting" becomes a
 --  check the database performs rather than a claim in a comment.
 --
---  IT ADDS AND NEVER REMOVES. No table is dropped, no row is rewritten, no
---  existing column changes name, type, nullability or default, and the only
---  CHECKs it changes, it widens.
+--  IT ADDS AND NEVER REMOVES -- with one deliberate exception. No table is
+--  dropped, no existing column changes name, type, nullability or default,
+--  and the only CHECKs it changes, it widens. The exception is
+--  migrate_hubs.sql's trim: battery_mv, battery_level, charging and
+--  external_power are cleared on every scale and buffer row, because power
+--  now lives on the area's hub. Check #1 still holds every other column of
+--  every row, and every column of every bowl counter, and updated_at /
+--  reported are not stamped by the trim.
 --
 --  IT IS SAFE TO RE-RUN, before or after the buffer cut-over: no device's
 --  kind may change (check #4), and every view ends on its newest body because
---  migrate_buffer.sql runs last. The cut-over itself is NOT in here -- it is
---  supabase/cutover_buffers.sql, run on its own.
+--  migrate_buffer.sql and migrate_hubs.sql run last. The cut-over itself is
+--  NOT in here -- it is supabase/cutover_buffers.sql, run on its own.
 --
 --  ---------------------------------------------------------------------
 --  TO REHEARSE FIRST
@@ -116,7 +123,7 @@ create temp table _before_counts on commit drop as
          (select count(*) from public.meal_food_mapping)  as meal_food_mapping;
 
 -- #####################################################################
--- ##  PART 1 of 9:  migrate_bowl_weight.sql
+-- ##  PART 1 of 10:  migrate_bowl_weight.sql
 -- ##  per-bowl weight, and the Master Dashboard view
 -- #####################################################################
 
@@ -617,7 +624,7 @@ comment on view public.slot_quantity is
   'excluded, which hides the undeployed backup units.';
 
 -- #####################################################################
--- ##  PART 2 of 9:  migrate_loadcell.sql
+-- ##  PART 2 of 10:  migrate_loadcell.sql
 -- ##  load-cell stations alongside the bowl counters
 -- #####################################################################
 
@@ -1434,7 +1441,7 @@ comment on view public.slot_quantity is
   'part it is showing.';
 
 -- #####################################################################
--- ##  PART 3 of 9:  register_loadcells.sql
+-- ##  PART 3 of 10:  register_loadcells.sql
 -- ##  LDC-001..032 into the devices registry
 -- #####################################################################
 
@@ -1464,7 +1471,7 @@ update public.devices
    and kind is distinct from 'scale';
 
 -- #####################################################################
--- ##  PART 4 of 9:  assign_loadcells.sql
+-- ##  PART 4 of 10:  assign_loadcells.sql
 -- ##  each LDC onto the position of its BWL
 -- #####################################################################
 
@@ -1491,7 +1498,7 @@ update public.devices d
      or d.food_slot is distinct from b.food_slot);
 
 -- #####################################################################
--- ##  PART 5 of 9:  migrate_weight_samples.sql
+-- ##  PART 5 of 10:  migrate_weight_samples.sql
 -- ##  the analog history a scale appends to
 -- #####################################################################
 
@@ -1737,7 +1744,7 @@ grant insert (device_id, boot_id, seq, age_ms, reason,
 grant select on public.weight_samples to authenticated;
 
 -- #####################################################################
--- ##  PART 6 of 9:  migrate_burn_rate.sql
+-- ##  PART 6 of 10:  migrate_burn_rate.sql
 -- ##  consumption rate, and when a dish runs out
 -- #####################################################################
 
@@ -2259,7 +2266,7 @@ comment on view public.slot_burn_rate is
   'not value every hall''s buffer, which makes the rate a lower bound.';
 
 -- #####################################################################
--- ##  PART 7 of 9:  migrate_manual_fill.sql
+-- ##  PART 7 of 10:  migrate_manual_fill.sql
 -- ##  TRIAL HARNESS -- the manual fill estimate
 -- #####################################################################
 
@@ -2516,7 +2523,7 @@ revoke all on public.trial_fill_vs_weight from anon, authenticated, public;
 grant select on public.trial_fill_vs_weight to authenticated;
 
 -- #####################################################################
--- ##  PART 8 of 9:  migrate_vbus_sense.sql
+-- ##  PART 8 of 10:  migrate_vbus_sense.sql
 -- ##  mains presence, from the VBUS divider
 -- #####################################################################
 
@@ -2567,7 +2574,7 @@ revoke all on public.device_power from anon, authenticated, public;
 grant select on public.device_power to authenticated;
 
 -- #####################################################################
--- ##  PART 9 of 9:  migrate_buffer.sql
+-- ##  PART 9 of 10:  migrate_buffer.sql
 -- ##  BWL buffer platforms: kind buffer, bowls, kg views
 -- #####################################################################
 
@@ -2620,10 +2627,24 @@ end $$;
 -- Same constraint NAME, so migrate_loadcell.sql's
 -- `add constraint ... exception when duplicate_object` stays a no-op on a
 -- re-run of apply_loadcell.sql rather than re-adding the narrow one.
+--
+-- WIDENS, NEVER NARROWS, for the same reason one step on: migrate_hubs.sql
+-- adds 'hub' to this list and apply_loadcell.sql re-runs this file before
+-- it, so dropping and re-adding the three-kind list here would fail on the
+-- hub rows and abort the whole re-run. Re-added only while the CHECK does
+-- not already accept 'buffer'.
 -- ---------------------------------------------------------------------
-alter table public.devices
-  drop constraint if exists devices_kind_ck,
-  add  constraint devices_kind_ck check (kind in ('stack','scale','buffer'));
+do $$
+begin
+  if not exists (select 1 from pg_constraint
+                  where conrelid = 'public.devices'::regclass
+                    and conname  = 'devices_kind_ck'
+                    and pg_get_constraintdef(oid) like '%''buffer''%') then
+    alter table public.devices drop constraint if exists devices_kind_ck;
+    alter table public.devices
+      add constraint devices_kind_ck check (kind in ('stack','scale','buffer'));
+  end if;
+end $$;
 
 comment on column public.devices.kind is
   'What this installation MEASURES. stack = four ToF sensors up a pipe, '
@@ -3830,6 +3851,407 @@ comment on view public.slot_burn_rate is
   'which makes the rate unreliable in either direction.';
 
 -- #####################################################################
+-- ##  PART 10 of 10:  migrate_hubs.sql
+-- ##  area hubs carry the battery; platforms node health
+-- #####################################################################
+
+-- ---------------------------------------------------------------------
+-- 0. Prerequisites.
+--
+-- Checked BEFORE anything is written, so an out-of-order run leaves the
+-- database exactly as it found it and names the file to run. Section 6
+-- replaces migrate_buffer.sql's guard and reads external_power; section 7
+-- appends to migrate_buffer.sql's device_overview. Without these checks the
+-- file would get that far and abort on a symptom.
+-- ---------------------------------------------------------------------
+do $$
+begin
+  if to_regprocedure('public.tg_device_status_kind()') is null
+     or not exists (select 1 from information_schema.columns
+                     where table_schema = 'public' and table_name = 'device_status'
+                       and column_name = 'bowls') then
+    raise exception
+      'Run supabase/migrate_buffer.sql FIRST (the last part of '
+      'apply_loadcell.sql before this one) -- device_status_kind and '
+      'device_status.bowls do not exist yet. Nothing has been changed.';
+  end if;
+  if not exists (select 1 from information_schema.columns
+                  where table_schema = 'public' and table_name = 'device_status'
+                    and column_name = 'external_power') then
+    raise exception
+      'Run supabase/migrate_vbus_sense.sql FIRST (part of apply_loadcell.sql) '
+      '-- device_status.external_power does not exist yet, and a hub reports '
+      'its mains there. Nothing has been changed.';
+  end if;
+end $$;
+
+-- ---------------------------------------------------------------------
+-- 1. devices.kind -- 'hub'.
+--
+-- A FOURTH KIND, because a hub measures nothing on the line: no weight, no
+-- bowls, no stack. What it has is the area's power, and kind is exactly the
+-- column that says which half of device_status a device owns.
+--
+-- Same constraint NAME, so migrate_loadcell.sql's add-if-absent stays a
+-- no-op and migrate_buffer.sql's widen-only re-add leaves this list alone
+-- on a re-run of apply_loadcell.sql.
+-- ---------------------------------------------------------------------
+alter table public.devices
+  drop constraint if exists devices_kind_ck,
+  add  constraint devices_kind_ck
+       check (kind in ('stack','scale','buffer','hub'));
+
+comment on column public.devices.kind is
+  'What this installation MEASURES. stack = four ToF sensors up a pipe, '
+  'reporting a bowl count; scale = the serving-counter load cell (LDC), '
+  'reporting grams; buffer = the 200 kg buffer platform (BWL), reporting '
+  'grams of FOOD plus the bowls it stands in; hub = the ESP32 that runs a '
+  'serving area (HUB-D/M/T), reporting only its own power and identity -- '
+  'battery and mains belong to the hub, never to a platform. Fixed at '
+  'registration or by cutover_buffers.sql, never a setting. The views use it '
+  'to decide which columns of device_status are a measurement and which are '
+  'absent, and device_status_kind refuses a write to the wrong half.';
+
+-- ---------------------------------------------------------------------
+-- 2. The three hubs.
+--
+-- LOCATION SET, food_slot NULL. The location is what keeps a hub out of
+-- reset_spares.sql, which resets anything at 'R' or nowhere; the missing
+-- slot is what keeps it out of every stock view, which group by position.
+--
+-- ON CONFLICT DO NOTHING, so a re-run never overwrites a label or a
+-- location somebody has since edited on the dashboard. kind is the one
+-- column forced, for the reason register_loadcells.sql gives: a row
+-- inserted before the kind existed, or by hand without it, defaults to
+-- 'stack', and a hub filed as a stack would be refused its own battery.
+--
+-- The devices_create_status trigger creates each hub's device_status row.
+-- ---------------------------------------------------------------------
+insert into public.devices (device_id, location, food_slot, label, timezone, kind)
+values ('HUB-D', 'D', null, 'Darshanarthi hub', 'Asia/Kolkata', 'hub'),
+       ('HUB-M', 'M', null, 'Mahatma hub',      'Asia/Kolkata', 'hub'),
+       ('HUB-T', 'T', null, 'Tiffin hub',       'Asia/Kolkata', 'hub')
+on conflict (device_id) do nothing;
+
+update public.devices
+   set kind = 'hub'
+ where device_id in ('HUB-D','HUB-M','HUB-T')
+   and kind is distinct from 'hub';
+
+-- ---------------------------------------------------------------------
+-- 3. Node health -- four columns a PLATFORM writes.
+--
+-- What can go wrong with a weighing platform that its weight_state does
+-- not say: the node's supply sagging, a noisy bus corrupting frames, the
+-- node no longer answering, and the empty-platform zero walking away. The
+-- hub polls each node and PATCHes these onto that platform's own row.
+--
+-- ALL NULL = NOT MEASURED, NEVER 0, the rule weight_g keeps: today's
+-- platforms are wired straight to the hub and measure none of these, and a
+-- 0 crc_errors or 0 g no_load beside them would claim a check nobody ran.
+--
+-- The ranges are wide on purpose -- a value the hub can send that a CHECK
+-- refuses is a 400 that loses the weight in the same PATCH:
+--
+--   supply_mv   0..20000   a 12 V RS485 supply with surge headroom.
+--                          smallint holds it.
+--   crc_errors  >= 0       a counter since the node powered up; it falls
+--                          back to 0 when the node restarts, which is
+--                          itself worth seeing beside uptime.
+--   no_load_g   +/-50 kg   a zero that has drifted 50 kg is a broken cell,
+--                          not drift; past that the number means nothing.
+--
+-- Constraints dropped and re-added rather than IF NOT EXISTS, so a re-run
+-- converges on THESE definitions.
+-- ---------------------------------------------------------------------
+alter table public.device_status
+  add column if not exists supply_mv  smallint,
+  add column if not exists crc_errors integer,
+  add column if not exists responding boolean,
+  add column if not exists no_load_g  integer;
+
+alter table public.device_status
+  drop constraint if exists device_status_supply_mv_ck,
+  drop constraint if exists device_status_crc_errors_ck,
+  drop constraint if exists device_status_no_load_ck,
+  add  constraint device_status_supply_mv_ck
+       check (supply_mv is null or supply_mv between 0 and 20000),
+  add  constraint device_status_crc_errors_ck
+       check (crc_errors is null or crc_errors >= 0),
+  add  constraint device_status_no_load_ck
+       check (no_load_g is null or no_load_g between -50000 and 50000);
+
+comment on column public.device_status.supply_mv is
+  'PLATFORM NODE HEALTH. Supply voltage at the platform''s node, measured by '
+  'its own ADC, in mV (0..20000). Not a battery: a platform has none -- the '
+  'area''s battery is on its hub''s row. NULL = not measured.';
+comment on column public.device_status.crc_errors is
+  'PLATFORM NODE HEALTH. Frames from this node that failed their checksum '
+  'since the node powered up (>= 0); back to 0 when the node restarts. '
+  'NULL = not measured.';
+comment on column public.device_status.responding is
+  'PLATFORM NODE HEALTH. Whether the node answered the hub''s last health '
+  'poll. false = asked and heard nothing; NULL = not polled.';
+comment on column public.device_status.no_load_g is
+  'PLATFORM NODE HEALTH. What the platform read the last time it was empty, '
+  'in grams (-50000..50000). Should sit near 0; a slow walk away from 0 is '
+  'zero drift, visible here before it corrupts weight_g. 0 is a real reading; '
+  'NULL = not measured.';
+
+-- ---------------------------------------------------------------------
+-- 4. The anon write path -- extended, not replaced.
+--
+-- Column grants ACCUMULATE, so a re-run is a no-op, and SELECT stays at
+-- device_id alone: the hub can no more read a platform's health back than
+-- the platform can read its weight.
+-- ---------------------------------------------------------------------
+grant update (supply_mv, crc_errors, responding, no_load_g)
+  on public.device_status to anon;
+
+-- ---------------------------------------------------------------------
+-- 5. THE TRIM -- every scale and buffer stops carrying a battery.
+--
+-- The rows hold ToF-era figures (every BWL was a battery-powered stack
+-- until the cut-over) and simulator values, and LDC-001's own reading. Left
+-- in place they would sit under device_overview forever, beside a guard
+-- that stops them ever changing -- a frozen "good" on a platform that has
+-- no battery at all.
+--
+-- WITHOUT STAMPING THE ROWS, exactly as cutover_buffers.sql section 2 does
+-- and for its reason: device_status_stamp sets updated_at := now() and
+-- reported := true on every UPDATE, which would make every platform look as
+-- if it had just reported -- a dead one live for forty seconds, its
+-- missed_last_service cleared, a spare retired from "awaiting deployment".
+-- None of that is a measurement. The stamp is off for this one statement,
+-- inside this transaction, and back on before the commit; if anything
+-- fails, the rollback restores it with everything else.
+--
+-- device_status_kind stays ON: it refuses only values changed to non-null,
+-- and this sets NULL.
+--
+-- Only rows that HOLD something are touched, which is what makes a re-run
+-- a no-op. Recorded first so the report can say how many.
+-- ---------------------------------------------------------------------
+drop table if exists _hubs_trim;
+create temp table _hubs_trim as
+  select s.device_id
+    from public.device_status s
+    join public.devices d using (device_id)
+   where d.kind in ('scale','buffer')
+     and (s.battery_mv is not null or s.battery_level is not null
+          or s.charging is not null or s.external_power is not null);
+
+alter table public.device_status disable trigger device_status_stamp;
+
+update public.device_status s
+   set battery_mv     = null,
+       battery_level  = null,
+       charging       = null,
+       external_power = null
+  from public.devices d
+ where d.device_id = s.device_id
+   and d.kind in ('scale','buffer')
+   and (s.battery_mv is not null or s.battery_level is not null
+        or s.charging is not null or s.external_power is not null);
+
+alter table public.device_status enable trigger device_status_stamp;
+
+-- ---------------------------------------------------------------------
+-- 6. device_status_kind -- power belongs to the hub.
+--
+-- migrate_buffer.sql section 6's body with two additions; every existing
+-- test is unchanged, and so is the changed-to-non-null rule, the
+-- SECURITY DEFINER reasoning, the 23514 and the name that makes it fire
+-- before device_status_stamp.
+--
+--   * A SCALE OR BUFFER refuses battery_mv, battery_level, charging and
+--     external_power. A firmware from before the hub split sends them on
+--     every PATCH, and without this the trim above would be undone within
+--     twenty seconds by every platform still running it.
+--
+--   * A HUB refuses everything that is not power or identity: the weight
+--     half, the buffer half, stack_* and the platform node health. A hub
+--     writing a weight would put food on no dish -- it has no slot -- and
+--     node health on the hub's row would be filed under the wrong device.
+--     cells_online, counts_per_gram and net_counts are refused with the
+--     rest of the weight half, as the stack branch already refuses them.
+--
+-- Explicit NULLs pass, which is what lets current firmware keep sending
+-- `"battery_mv": null` to a platform and clear rather than fail.
+-- ---------------------------------------------------------------------
+create or replace function public.tg_device_status_kind()
+returns trigger language plpgsql security definer set search_path = '' as $$
+declare v_kind text;
+begin
+  select kind into v_kind from public.devices where device_id = new.device_id;
+
+  if v_kind = 'stack' then
+    if (new.weight_g        is not null and new.weight_g        is distinct from old.weight_g)
+    or (new.weight_state    is not null and new.weight_state    is distinct from old.weight_state)
+    or (new.cells_online    is not null and new.cells_online    is distinct from old.cells_online)
+    or (new.counts_per_gram is not null and new.counts_per_gram is distinct from old.counts_per_gram)
+    or (new.net_counts      is not null and new.net_counts      is distinct from old.net_counts)
+    or (new.bowls           is not null and new.bowls           is distinct from old.bowls)
+    or (new.bowls_confirmed is not null and new.bowls_confirmed is distinct from old.bowls_confirmed)
+    or (new.gross_g         is not null and new.gross_g         is distinct from old.gross_g) then
+      raise exception
+        '% is a stack: it reports stack_* and never a weight, bowls or gross_g',
+        new.device_id using errcode = 'check_violation';
+    end if;
+
+  elsif v_kind in ('scale','buffer') then
+    if (new.stack_count    is not null and new.stack_count    is distinct from old.stack_count)
+    or (new.stack_status   is not null and new.stack_status   is distinct from old.stack_status)
+    or (new.levels         is not null and new.levels         is distinct from old.levels)
+    or (new.sensors_ok     is not null and new.sensors_ok     is distinct from old.sensors_ok)
+    or (new.sensors_online is not null and new.sensors_online is distinct from old.sensors_online) then
+      raise exception
+        '% is a %: it never reports stack_count, stack_status, levels, '
+        'sensors_ok or sensors_online', new.device_id, v_kind
+        using errcode = 'check_violation';
+    end if;
+
+    -- Power is the hub's (migrate_hubs.sql).
+    if (new.battery_mv     is not null and new.battery_mv     is distinct from old.battery_mv)
+    or (new.battery_level  is not null and new.battery_level  is distinct from old.battery_level)
+    or (new.charging       is not null and new.charging       is distinct from old.charging)
+    or (new.external_power is not null and new.external_power is distinct from old.external_power) then
+      raise exception
+        '% is a %: it has no battery -- battery_mv, battery_level, charging and '
+        'external_power belong on its area''s hub (HUB-D/M/T)', new.device_id, v_kind
+        using errcode = 'check_violation';
+    end if;
+
+    if v_kind = 'scale' then
+      if (new.bowls           is not null and new.bowls           is distinct from old.bowls)
+      or (new.bowls_confirmed is not null and new.bowls_confirmed is distinct from old.bowls_confirmed)
+      or (new.gross_g         is not null and new.gross_g         is distinct from old.gross_g) then
+        raise exception
+          '% is a scale: it has no bowls and no gross_g -- those are buffer columns',
+          new.device_id using errcode = 'check_violation';
+      end if;
+      -- The counter's 100 kg rail; the table CHECK is 250 kg for the buffers.
+      if new.weight_g > 100000 and new.weight_g is distinct from old.weight_g then
+        raise exception
+          '% is a scale reporting % g; above 100 kg on the counter is a units '
+          'mix-up or a wild calibration factor, not food', new.device_id, new.weight_g
+          using errcode = 'check_violation';
+      end if;
+    end if;
+
+  elsif v_kind = 'hub' then
+    if (new.weight_g        is not null and new.weight_g        is distinct from old.weight_g)
+    or (new.weight_state    is not null and new.weight_state    is distinct from old.weight_state)
+    or (new.cells_online    is not null and new.cells_online    is distinct from old.cells_online)
+    or (new.counts_per_gram is not null and new.counts_per_gram is distinct from old.counts_per_gram)
+    or (new.net_counts      is not null and new.net_counts      is distinct from old.net_counts)
+    or (new.bowls           is not null and new.bowls           is distinct from old.bowls)
+    or (new.bowls_confirmed is not null and new.bowls_confirmed is distinct from old.bowls_confirmed)
+    or (new.gross_g         is not null and new.gross_g         is distinct from old.gross_g)
+    or (new.stack_count     is not null and new.stack_count     is distinct from old.stack_count)
+    or (new.stack_status    is not null and new.stack_status    is distinct from old.stack_status)
+    or (new.levels          is not null and new.levels          is distinct from old.levels)
+    or (new.sensors_ok      is not null and new.sensors_ok      is distinct from old.sensors_ok)
+    or (new.sensors_online  is not null and new.sensors_online  is distinct from old.sensors_online)
+    or (new.supply_mv       is not null and new.supply_mv       is distinct from old.supply_mv)
+    or (new.crc_errors      is not null and new.crc_errors      is distinct from old.crc_errors)
+    or (new.responding      is not null and new.responding      is distinct from old.responding)
+    or (new.no_load_g       is not null and new.no_load_g       is distinct from old.no_load_g) then
+      raise exception
+        '% is a hub: it reports its own power and identity only -- never a '
+        'weight, bowls, stack_* or a platform''s node health', new.device_id
+        using errcode = 'check_violation';
+    end if;
+  end if;
+
+  return new;
+end $$;
+
+revoke all on function public.tg_device_status_kind() from public, anon, authenticated;
+
+comment on function public.tg_device_status_kind() is
+  'Guard on device_status: a stack writes only stack_*, a scale or buffer '
+  'never writes stack_* or power (battery/charging/external_power -- that is '
+  'the hub''s), a scale never writes bowls/gross_g and stays under 100 kg, a '
+  'hub writes only power and identity. Tests only columns that changed to a '
+  'non-null value. SECURITY DEFINER because it reads devices, which anon '
+  'cannot.';
+
+-- ---------------------------------------------------------------------
+-- 7. device_overview -- the four node-health columns, APPENDED.
+--
+-- CREATE OR REPLACE VIEW may only add columns at the end, so they go after
+-- gross_g; every existing column keeps its name, place and type, and
+-- schema.sql and weekly_menu_and_offline.sql say the same. A hub's battery
+-- needs nothing new here -- it is in battery_mv / battery_level / charging,
+-- where it always was, on the hub's own row.
+-- ---------------------------------------------------------------------
+create or replace view public.device_overview
+with (security_invoker = true) as
+select d.device_id,
+       d.location,
+       d.food_slot,
+       d.label,
+       d.timezone,
+
+       m.food_name                          as current_food,
+       public.current_meal_type(d.timezone) as current_meal,
+
+       s.reported,
+       s.updated_at,
+       now() - s.updated_at as stale_for,
+       public.in_service_window(now(), d.timezone, d.device_id) as in_service,
+
+       (coalesce(s.reported, false)
+        and public.in_service_window(now(), d.timezone, d.device_id)
+        and s.updated_at < now() - public.offline_after()) as offline,
+
+       (not coalesce(s.reported, false)) as awaiting_deployment,
+
+       (not public.in_service_window(now(), d.timezone, d.device_id)
+        and s.updated_at is not null) as data_is_stale,
+
+       s.stack_count, s.stack_status, s.levels,
+       s.sensors_online, s.battery_mv, s.battery_level, s.charging,
+       s.uptime_s, s.firmware, s.mac,
+
+       coalesce(coalesce(s.reported, false)
+                and d.location in ('D','M','T')
+                and d.food_slot is not null
+                and s.updated_at <
+                    public.last_service_window_end(d.timezone, d.device_id)
+                      - public.offline_after(),
+                false) as missed_last_service,
+
+       d.kind,
+       s.weight_g,
+       s.weight_state,
+       s.cells_online,
+       s.counts_per_gram,
+       s.net_counts,
+
+       -- The buffer half. NULL on every scale and stack, and on a buffer
+       -- whenever weight_state is not 'ok' -- see migrate_buffer.sql
+       -- section 3.
+       s.bowls,
+       s.bowls_confirmed,
+       s.gross_g,
+
+       -- Platform node health. NULL -- never 0 -- on a hub, a stack, and a
+       -- platform whose node has not measured it.
+       s.supply_mv,
+       s.crc_errors,
+       s.responding,
+       s.no_load_g
+  from public.devices d
+  left join public.device_status s using (device_id)
+  left join public.meal_food_mapping m
+         on m.location  = d.location
+        and m.food_slot = d.food_slot
+        and m.meal_date = public.current_meal_date(d.timezone)
+        and m.meal_type = public.current_meal_type(d.timezone);
+
+-- #####################################################################
 -- ##  VERIFICATION -- runs before the commit, and aborts it on failure.
 -- #####################################################################
 do $$
@@ -3847,13 +4269,27 @@ begin
     raise exception 'ABORTED: % existing device row(s) changed or vanished', v_n;
   end if;
 
+  --    Power is compared on BOWL COUNTERS ONLY. migrate_hubs.sql clears it on
+  --    every scale and buffer row -- the one rewrite this file makes -- and a
+  --    platform's kind is held by check #4, so scoping by it cannot hide a
+  --    reclassified device. Everything else, reported included, is compared
+  --    on every row: the trim must not stamp what it clears.
   select count(*) into v_n from (
-    select * from _before_status
+    select b.device_id, b.reported, b.boot_id, b.uptime_s, b.stack_count,
+           b.stack_status, b.levels, b.sensors_ok, b.sensors_online,
+           case when k.kind = 'stack' then b.battery_mv end,
+           case when k.kind = 'stack' then b.battery_level end,
+           case when k.kind = 'stack' then b.charging end,
+           b.firmware, b.mac
+      from _before_status b join _before_devices k using (device_id)
     except
-    select device_id, reported, boot_id, uptime_s, stack_count, stack_status,
-           levels, sensors_ok, sensors_online, battery_mv, battery_level,
-           charging, firmware, mac
-      from public.device_status
+    select s.device_id, s.reported, s.boot_id, s.uptime_s, s.stack_count,
+           s.stack_status, s.levels, s.sensors_ok, s.sensors_online,
+           case when d.kind = 'stack' then s.battery_mv end,
+           case when d.kind = 'stack' then s.battery_level end,
+           case when d.kind = 'stack' then s.charging end,
+           s.firmware, s.mac
+      from public.device_status s join public.devices d using (device_id)
   ) x;
   if v_n > 0 then
     raise exception 'ABORTED: % existing device_status row(s) changed', v_n;
@@ -3883,7 +4319,7 @@ begin
   end if;
 
   -- 3. Nothing deleted anywhere. Only devices and device_status may GROW,
-  --    and only by the 32 scales being registered.
+  --    and only by the 32 scales and the 3 area hubs being registered.
   select count(*) into v_n from _before_counts b
    where (select count(*) from public.status_events)     <> b.status_events
       or (select count(*) from public.service_windows)   <> b.service_windows
@@ -3901,7 +4337,9 @@ begin
   --    buffer cut-over made every BWL a 'buffer' -- after which a re-run of
   --    this file would abort on a database that was exactly right. What the
   --    check is for is "applying this did not reclassify anything", and that
-  --    is a comparison, whatever the kinds happen to be.
+  --    is a comparison, whatever the kinds happen to be. The hubs and scales
+  --    this file registers are NEW rows, absent from the snapshot, so the
+  --    join leaves them out.
   select count(*) into v_n from public.devices d
     join _before_devices b using (device_id)
    where d.kind is distinct from b.kind;
@@ -3966,8 +4404,16 @@ select item as step, name as detail, status from (
           || ' columns'),
     (5, 'measured weight',
         'no station has reported one yet -- expected until a scale is flashed'),
-    (6, 'next',
-        'run supabase/smoke_test.sql -- expect 40 assertions, 0 FAIL; then, '
+    (6, 'area hubs (HUB-*)',
+        (select count(*)::text from public.devices where kind = 'hub')
+          || ' registered; platforms holding a battery: '
+          || (select count(*)::text from public.device_status s
+                join public.devices d using (device_id)
+               where d.kind in ('scale','buffer')
+                 and (s.battery_mv is not null or s.battery_level is not null
+                      or s.charging is not null or s.external_power is not null))),
+    (7, 'next',
+        'run supabase/smoke_test.sql -- expect 43 assertions, 0 FAIL; then, '
         'when the web is live, supabase/cutover_buffers.sql')
 ) as t(item, name, status)
 order by item;

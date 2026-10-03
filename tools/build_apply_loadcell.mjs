@@ -54,19 +54,31 @@ const PARTS = [
   // After migrate_loadcell.sql, necessarily: migrate_vbus_sense.sql raises
   // unless device_status.weight_state already exists.
   ['migrate_vbus_sense.sql', 'mains presence, from the VBUS divider', 'rollback_vbus_sense.sql'],
-  // LAST, AND IT HAS TO BE. It appends columns to views that migrate_loadcell
-  // and migrate_burn_rate (re)create with their own, older bodies -- so on a
-  // re-run it is what puts the buffer columns, the guards and the measured
-  // buffer series back. Anywhere earlier, a re-run would end with those
-  // reverted. Last here also makes its rollback the FIRST undo, which it must
-  // be: rollback_buffer.sql recreates the burn-rate views, and the undos
-  // after it drop what those read.
+  // AFTER EVERY OTHER VIEW-WRITER, AND IT HAS TO BE. It appends columns to
+  // views that migrate_loadcell and migrate_burn_rate (re)create with their
+  // own, older bodies -- so on a re-run it is what puts the buffer columns,
+  // the guards and the measured buffer series back. Anywhere earlier, a
+  // re-run would end with those reverted. Late here also puts its rollback
+  // ahead of the earlier ones, which it must be: rollback_buffer.sql
+  // recreates the burn-rate views, and the undos after it drop what those
+  // read.
   //
   // cutover_buffers.sql is deliberately NOT a part. It re-kinds every BWL and
   // clears its stack_* -- exactly what checks #1 and #4 below exist to
   // refuse -- and it is the one rollout step that changes the dashboard, so
   // it is run on its own, by decision.
   ['migrate_buffer.sql', 'BWL buffer platforms: kind buffer, bowls, kg views', 'rollback_buffer.sql'],
+  // LAST, for the reason migrate_buffer.sql was last before it: it replaces
+  // migrate_buffer's guard and appends to its device_overview, and a re-run
+  // re-creates both with migrate_buffer's bodies first -- so anywhere
+  // earlier, the hub guard and the node-health columns would end reverted.
+  // Its rollback is therefore the FIRST undo, and rollback_buffer.sql
+  // refuses until it has run.
+  //
+  // It is also the one part that REWRITES ROWS: the battery and mains columns
+  // on every scale and buffer, cleared because power is now the hub's. Check
+  // #1 below is scoped to allow exactly that and nothing else.
+  ['migrate_hubs.sql', 'area hubs carry the battery; platforms node health', 'rollback_hubs.sql'],
 ];
 
 // Reverse of the apply order, skipping the parts that have no rollback. This
@@ -137,7 +149,7 @@ const out = `-- ================================================================
 --  Paste the whole file into the Supabase SQL editor and run it ONCE. It
 --  does what these ${PARTS.length} do, in the only order that works:
 --
-${PARTS.map(([f, w], i) => `--    ${i + 1}. ${f.padEnd(26)} ${w}`).join('\n')}
+${PARTS.map(([f, w], i) => `--   ${String(i + 1).padStart(2)}. ${f.padEnd(26)} ${w}`).join('\n')}
 --
 --  ---------------------------------------------------------------------
 --  IF YOU NEED TO UNDO IT AFTER IT HAS COMMITTED
@@ -171,14 +183,19 @@ ${ROLLBACKS.map((f) => `--      ${f}`).join('\n')}
 --  aborts the transaction. "It should not affect bowl counting" becomes a
 --  check the database performs rather than a claim in a comment.
 --
---  IT ADDS AND NEVER REMOVES. No table is dropped, no row is rewritten, no
---  existing column changes name, type, nullability or default, and the only
---  CHECKs it changes, it widens.
+--  IT ADDS AND NEVER REMOVES -- with one deliberate exception. No table is
+--  dropped, no existing column changes name, type, nullability or default,
+--  and the only CHECKs it changes, it widens. The exception is
+--  migrate_hubs.sql's trim: battery_mv, battery_level, charging and
+--  external_power are cleared on every scale and buffer row, because power
+--  now lives on the area's hub. Check #1 still holds every other column of
+--  every row, and every column of every bowl counter, and updated_at /
+--  reported are not stamped by the trim.
 --
 --  IT IS SAFE TO RE-RUN, before or after the buffer cut-over: no device's
 --  kind may change (check #4), and every view ends on its newest body because
---  migrate_buffer.sql runs last. The cut-over itself is NOT in here -- it is
---  supabase/cutover_buffers.sql, run on its own.
+--  migrate_buffer.sql and migrate_hubs.sql run last. The cut-over itself is
+--  NOT in here -- it is supabase/cutover_buffers.sql, run on its own.
 --
 --  ---------------------------------------------------------------------
 --  TO REHEARSE FIRST
@@ -248,13 +265,27 @@ begin
     raise exception 'ABORTED: % existing device row(s) changed or vanished', v_n;
   end if;
 
+  --    Power is compared on BOWL COUNTERS ONLY. migrate_hubs.sql clears it on
+  --    every scale and buffer row -- the one rewrite this file makes -- and a
+  --    platform's kind is held by check #4, so scoping by it cannot hide a
+  --    reclassified device. Everything else, reported included, is compared
+  --    on every row: the trim must not stamp what it clears.
   select count(*) into v_n from (
-    select * from _before_status
+    select b.device_id, b.reported, b.boot_id, b.uptime_s, b.stack_count,
+           b.stack_status, b.levels, b.sensors_ok, b.sensors_online,
+           case when k.kind = 'stack' then b.battery_mv end,
+           case when k.kind = 'stack' then b.battery_level end,
+           case when k.kind = 'stack' then b.charging end,
+           b.firmware, b.mac
+      from _before_status b join _before_devices k using (device_id)
     except
-    select device_id, reported, boot_id, uptime_s, stack_count, stack_status,
-           levels, sensors_ok, sensors_online, battery_mv, battery_level,
-           charging, firmware, mac
-      from public.device_status
+    select s.device_id, s.reported, s.boot_id, s.uptime_s, s.stack_count,
+           s.stack_status, s.levels, s.sensors_ok, s.sensors_online,
+           case when d.kind = 'stack' then s.battery_mv end,
+           case when d.kind = 'stack' then s.battery_level end,
+           case when d.kind = 'stack' then s.charging end,
+           s.firmware, s.mac
+      from public.device_status s join public.devices d using (device_id)
   ) x;
   if v_n > 0 then
     raise exception 'ABORTED: % existing device_status row(s) changed', v_n;
@@ -284,7 +315,7 @@ begin
   end if;
 
   -- 3. Nothing deleted anywhere. Only devices and device_status may GROW,
-  --    and only by the 32 scales being registered.
+  --    and only by the 32 scales and the 3 area hubs being registered.
   select count(*) into v_n from _before_counts b
    where (select count(*) from public.status_events)     <> b.status_events
       or (select count(*) from public.service_windows)   <> b.service_windows
@@ -302,7 +333,9 @@ begin
   --    buffer cut-over made every BWL a 'buffer' -- after which a re-run of
   --    this file would abort on a database that was exactly right. What the
   --    check is for is "applying this did not reclassify anything", and that
-  --    is a comparison, whatever the kinds happen to be.
+  --    is a comparison, whatever the kinds happen to be. The hubs and scales
+  --    this file registers are NEW rows, absent from the snapshot, so the
+  --    join leaves them out.
   select count(*) into v_n from public.devices d
     join _before_devices b using (device_id)
    where d.kind is distinct from b.kind;
@@ -367,8 +400,16 @@ select item as step, name as detail, status from (
           || ' columns'),
     (5, 'measured weight',
         'no station has reported one yet -- expected until a scale is flashed'),
-    (6, 'next',
-        'run supabase/smoke_test.sql -- expect 40 assertions, 0 FAIL; then, '
+    (6, 'area hubs (HUB-*)',
+        (select count(*)::text from public.devices where kind = 'hub')
+          || ' registered; platforms holding a battery: '
+          || (select count(*)::text from public.device_status s
+                join public.devices d using (device_id)
+               where d.kind in ('scale','buffer')
+                 and (s.battery_mv is not null or s.battery_level is not null
+                      or s.charging is not null or s.external_power is not null))),
+    (7, 'next',
+        'run supabase/smoke_test.sql -- expect 43 assertions, 0 FAIL; then, '
         'when the web is live, supabase/cutover_buffers.sql')
 ) as t(item, name, status)
 order by item;

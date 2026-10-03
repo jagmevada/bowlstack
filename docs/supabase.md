@@ -13,7 +13,7 @@ supabase/schema.sql            -- drops and rebuilds everything
 supabase/register_devices.sql  -- registers BWL-001 .. BWL-032
 supabase/assign_devices.sql    -- permanent location/food_slot assignment
 supabase/seed_meal_mapping.sql -- sample menus, for the front-end test bed
-supabase/smoke_test.sql        -- 40 assertions; run BEFORE flashing any device
+supabase/smoke_test.sql        -- 43 assertions; run BEFORE flashing any device
 ```
 
 For the **load cells** — the scales at the serving counter (LDC-001..032) and
@@ -31,14 +31,19 @@ supabase/migrate_manual_fill.sql     -- trial harness: the manual fill knob
 supabase/migrate_vbus_sense.sql      -- device_status.external_power
 supabase/migrate_buffer.sql          -- kind 'buffer', bowls/gross_g, the kind
                                      -- guards, measured buffer kg in the views
+supabase/migrate_hubs.sql            -- kind 'hub', HUB-D/M/T, platform node
+                                     -- health; battery moves to the hub
 ```
 
 It is safe to re-run, before or after the buffer cut-over: it refuses to
-commit if any device's kind, any status row or any bowl figure moved, and
-`migrate_buffer.sql` runs last so every view ends on its newest body. Run the
-parts on their own only if you know why — `migrate_loadcell.sql` and
-`migrate_burn_rate.sql` recreate views with their *older* bodies and silently
-undo `migrate_buffer.sql` until it runs again.
+commit if any device's kind, any status row or any bowl figure moved (the one
+exception is the platform battery `migrate_hubs.sql` clears — see
+[Area hubs](#area-hubs)), and `migrate_buffer.sql` then `migrate_hubs.sql`
+run last so every view ends on its newest body. Run the parts on their own
+only if you know why — `migrate_loadcell.sql` and `migrate_burn_rate.sql`
+recreate views with their *older* bodies and silently undo `migrate_buffer.sql`
+until it runs again, and `migrate_buffer.sql` alone after `migrate_hubs.sql`
+fails outright (its `device_overview` has four columns fewer).
 
 `supabase/whats_installed.sql` says which of these a database already has and
 what to run next; `supabase/inventory.sql` dumps every table, view, function,
@@ -49,8 +54,9 @@ went on, because each one removes what depends on the objects the next one
 drops:
 
 ```
+rollback_hubs.sql              -- cannot restore the trimmed platform battery
 rollback_cutover_buffers.sql   -- only if cutover_buffers.sql ever ran
-rollback_buffer.sql
+rollback_buffer.sql            -- refuses until rollback_hubs.sql has run
 rollback_vbus_sense.sql
 rollback_manual_fill.sql
 rollback_burn_rate.sql
@@ -137,7 +143,7 @@ plain `UPDATE` instead of an upsert.
 | Column | Notes |
 | --- | --- |
 | `device_id` | PK, `^[A-Za-z0-9_-]{3,32}$` — the installation's identity |
-| `kind` | `stack` (ToF bowl counter, the default), `scale` (serving-counter load cell, LDC) or `buffer` (200 kg buffer platform, BWL after the cut-over) |
+| `kind` | `stack` (ToF bowl counter, the default), `scale` (serving-counter load cell, LDC), `buffer` (200 kg buffer platform, BWL after the cut-over) or `hub` (the ESP32 running an area, HUB-D/M/T — see [Area hubs](#area-hubs)) |
 | `location` | `D` Darshanarthi, `M` Mahatma, `T` Tiffin, `R` reserved/future |
 | `food_slot` | 1–8, the dish position on the station |
 | `label` | free text, names the **position** — never the dish |
@@ -205,15 +211,20 @@ Carries `boot_id`, `uptime_s`, `stack_count`, `stack_status`, `levels[]`,
 > inference, and an implausible value there identifies a wiring fault the band
 > would disguise.
 
+**Battery is a stack's or a hub's, never a platform's.** A scale or buffer row
+carries no `battery_mv`, `battery_level`, `charging` or `external_power` — its
+power is its area hub's ([Area hubs](#area-hubs)).
+
 #### The load-cell columns
 
 A scale or a buffer writes `weight_state`, `weight_g`, `cells_online`,
 `counts_per_gram`, `net_counts` and leaves every stack column NULL. A bowl
-counter does the reverse. All write the shared ones — `boot_id`, `uptime_s`,
-battery, firmware, MAC.
+counter does the reverse. All write `boot_id`, `uptime_s`, firmware and MAC;
+battery only a stack or a hub.
 
 The trigger `device_status_kind` holds each kind to its own half: a stack
-writing a weight, or a scale/buffer writing `stack_*`, is refused with `23514`.
+writing a weight, a scale/buffer writing `stack_*` or power, or a hub writing
+anything but power and identity, is refused with `23514`.
 It tests only columns that **changed to a non-null value** — a PATCH leaves
 every column it did not mention at its old value, so testing the whole row
 would refuse a buffer whose row still held its last bowl count. It also holds
@@ -367,6 +378,56 @@ buffer and sets kind back to `stack`; bowl counts are not restored), then
 any device is still a buffer or any weight above 100 kg is stored — current
 or in `weight_samples`, which a full buffer's history is. Those rows are
 food history; deleting them is a decision for whoever runs the rollback.
+
+### Area hubs
+
+One ESP32 runs each serving area — `D` Darshanarthi, `M` Mahatma, `T` Tiffin
+— on mains with a small backup cell, and every platform in the area hangs off
+it (the counter and buffers today, RS485 nodes later). It has **one** battery,
+so the battery lives on the hub's row: `migrate_hubs.sql` registers
+`HUB-D`, `HUB-M`, `HUB-T` as `kind = 'hub'`, location D/M/T, **no
+`food_slot`** — so no stock view sees a hub, and `reset_spares.sql` (which
+resets anything at `R` or nowhere) leaves it alone.
+
+**A hub's row uses existing columns only:** `boot_id`, `uptime_s`,
+`firmware`, `mac`, `battery_mv`, `battery_level`, `charging` (`true` = on its
+charger / mains present, `false` = on its cell, NULL = unknown) and
+`external_power`. The guard refuses anything else on a hub — weight, bowls,
+`stack_*`, node health.
+
+**A platform's row carries node health instead of power** — what the hub's
+poll says about the node under each scale or buffer:
+
+| Column | Meaning | Range |
+| --- | --- | --- |
+| `supply_mv` | supply voltage at the node, from its own ADC | 0 … 20 000 mV |
+| `crc_errors` | frames that failed their checksum since the node powered up | ≥ 0 |
+| `responding` | did the node answer the hub's last health poll | — |
+| `no_load_g` | what the platform read when last empty — should sit near 0; drift shows here first | −50 000 … 50 000 g |
+
+All four are NULL = **not measured**, never 0: today's platforms are wired
+straight to the hub and measure none of them. A 0 is a reading. The CHECKs
+are named (`device_status_supply_mv_ck`, `_crc_errors_ck`, `_no_load_ck`),
+anon has UPDATE on all four and SELECT on none, and `device_overview` appends
+them after `gross_g`. A write from the hub stamps the platform's `updated_at`
+like any PATCH.
+
+**The trim.** In the same transaction `migrate_hubs.sql` NULLs the battery
+and mains columns on every scale and buffer row (ToF-era and simulator
+values), with `device_status_stamp` switched off as `cutover_buffers.sql`
+does, so no platform looks freshly reported. From then on the guard refuses
+a platform battery (`23514`) — an explicit `null` still passes. **Stop every
+writer of platform battery first** (pre-hub LDC/BWL firmware sends it on
+every PATCH; so does `tools/fleet_sim.py`): applied before them, those
+stations go silent, weight included. `rollback_hubs.sql` cannot restore the
+trimmed values. A BWL re-kinded by a *later* cut-over keeps its stack-era
+battery until `migrate_hubs.sql` is run again.
+
+Consequences on the dashboard: `slot_overview` / `slot_quantity`
+`any_battery_warn` see no platform battery any more (after the cut-over it is
+false or NULL everywhere) — read a hub's battery from `device_overview` or
+`device_power`. And `missed_last_service` is gated on a `food_slot`, so it is
+never true for a hub; `offline` is.
 
 ---
 

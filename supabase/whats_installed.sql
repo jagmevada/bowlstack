@@ -66,12 +66,28 @@ with present as (
     (select count(*) from information_schema.columns
       where table_schema='public' and table_name='device_status'
         and column_name='external_power')                           > 0 as c_extpwr,
+    -- The view too: schema.sql now carries the column (the kind guard reads
+    -- it) but not device_power, which the dashboard reads mains from -- so
+    -- the column alone no longer proves the migration ran.
+    to_regclass('public.device_power')            is not null as v_power,
     -- migrate_buffer.sql: the columns and the guard. Both, because a firmware
     -- buffer PATCH needs the columns and the cut-over needs the guard.
     (select count(*) from information_schema.columns
       where table_schema='public' and table_name='device_status'
         and column_name='bowls')                                    > 0 as c_bowls,
     to_regprocedure('public.tg_device_status_kind()') is not null       as f_kindguard,
+    -- migrate_hubs.sql: the four node-health columns and the three hubs.
+    -- Both, because the columns are what a platform PATCH needs and the hub
+    -- rows are what the hub's own PATCH needs -- a missing one is a 400, a
+    -- missing other is a PATCH that matches nothing.
+    (select count(*) from information_schema.columns
+      where table_schema='public' and table_name='device_status'
+        and column_name in ('supply_mv','crc_errors','responding','no_load_g'))
+                                                                    as n_health,
+    -- kind through to_jsonb(), as below, so this parses before kind exists.
+    (select count(*) from public.devices d
+      where d.device_id in ('HUB-D','HUB-M','HUB-T')
+        and to_jsonb(d) ->> 'kind' = 'hub')                         as n_hubs,
     -- Registration.
     (select count(*) from public.devices where device_id like 'BWL-%') as n_stacks
 ),
@@ -140,10 +156,12 @@ select item as step, name as run_this, status, note from (
         'device_status.manual_fill_pct -- FIRMWARE PATCHES THIS COLUMN; '
         'absent means 400 on every post and the scale goes silent'),
     (10, 'migrate_vbus_sense.sql',
-        case when (select c_extpwr from present) then 'installed'
+        case when (select c_extpwr and v_power from present) then 'installed'
+             when (select c_extpwr or v_power from present) then 'PARTIAL'
              else 'MISSING' end,
-        'device_status.external_power -- FIRMWARE PATCHES THIS COLUMN; '
-        'absent means 400 on every post and the scale goes silent'),
+        'device_status.external_power + the device_power view -- FIRMWARE '
+        'PATCHES THIS COLUMN (a hub with its reading, a platform with null); '
+        'absent means 400 on every post and the device goes silent'),
     (11, 'migrate_buffer.sql',
         case when (select c_bowls and f_kindguard from present) then 'installed'
              when (select c_bowls or f_kindguard from present) then 'PARTIAL'
@@ -157,7 +175,15 @@ select item as step, name as run_this, status, note from (
              else 'PARTIAL' end,
         (select n_buffer from bwl)::text || ' buffer, '
           || (select n_stack from bwl)::text || ' stack among BWL-* -- run it '
-          || 'only once the web that reads buffers is live')
+          || 'only once the web that reads buffers is live'),
+    (13, 'migrate_hubs.sql',
+        case when (select n_health = 4 and n_hubs = 3 from present) then 'installed'
+             when (select n_health > 0 or n_hubs > 0 from present) then 'PARTIAL'
+             else 'MISSING' end,
+        (select n_hubs from present)::text || ' of HUB-D/M/T registered, '
+          || (select n_health from present)::text || ' of 4 node-health '
+          || 'columns -- battery is the hub''s; stop every writer of platform '
+          || 'battery BEFORE running it, or that platform answers 400')
 ) as t(item, name, status, note)
 order by item;
 
@@ -177,18 +203,22 @@ order by item;
 --    9. migrate_buffer.sql          <- BWL buffer platforms; refuses unless 6
 --                                      has run. Additive: no bowl figure
 --                                      moves, every BWL stays a stack
---   10. smoke_test.sql              <- 40 assertions; expect ALL PASS
+--   10. migrate_hubs.sql            <- HUB-D/M/T carry the battery; platforms
+--                                      report node health. Refuses unless 9
+--                                      has run. Clears platform battery
+--   11. smoke_test.sql              <- 43 assertions; expect ALL PASS
 --
---  Steps 5-9 are what apply_loadcell.sql fuses together with 1-4, so running
+--  Steps 5-10 are what apply_loadcell.sql fuses together with 1-4, so running
 --  that one file instead is the shorter route and the one the docs point at.
 --
 --  cutover_buffers.sql is NOT in that sequence. It re-kinds every BWL to
 --  'buffer' -- the one step that changes the dashboard -- and goes only after
 --  the web that reads buffers has been pushed. Then the kg fleet simulator.
 --
---  weekly_menu_and_offline.sql, if it has never been run, goes AFTER 2 --
+--  weekly_menu_and_offline.sql, if it has never been run, goes AFTER 10 --
 --  it carries its own copies of two views whose bodies now read devices.kind,
---  and it checks for that before writing anything.
+--  the buffer columns and the node health, and it checks for those before
+--  writing anything.
 --
 --  Nothing here drops a table or rewrites an existing row, so all of it is
 --  safe mid-service. The one thing that CHANGES on screen the moment step 2

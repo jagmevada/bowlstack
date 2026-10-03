@@ -7,10 +7,12 @@
 --  produce the same result on a fresh rebuild, so nothing here can drift.
 --
 --  ORDERING: RUN migrate_bowl_weight.sql AND apply_loadcell.sql (which ends
---  with migrate_buffer.sql) FIRST. This file carries full copies of
---  device_overview and slot_overview, and those bodies now read devices.kind,
---  device_status.weight_* and the buffer columns (bowls, bowls_confirmed,
---  gross_g), which only exist after those migrations. It also recreates
+--  with migrate_buffer.sql and migrate_hubs.sql) FIRST. This file carries
+--  full copies of device_overview and slot_overview, and those bodies now
+--  read devices.kind, device_status.weight_*, the buffer columns (bowls,
+--  bowls_confirmed, gross_g) and the platform node health (supply_mv,
+--  crc_errors, responding, no_load_g), which only exist after those
+--  migrations. It also recreates
 --  meal_mapping_preload with the bowl_weight_g column the weight migration
 --  added. Run out of order it aborts on a missing column -- so section 0
 --  below checks first and says which file to run, rather than leaving a
@@ -112,6 +114,14 @@ begin
       'Run supabase/migrate_buffer.sql (the last part of apply_loadcell.sql) '
       'before this file: the view bodies below read device_status.bowls, '
       'bowls_confirmed and gross_g, which it adds.';
+  end if;
+  if not exists (select 1 from information_schema.columns
+                  where table_schema = 'public' and table_name = 'device_status'
+                    and column_name = 'supply_mv') then
+    raise exception
+      'Run supabase/migrate_hubs.sql (the last part of apply_loadcell.sql) '
+      'before this file: device_overview below reads supply_mv, crc_errors, '
+      'responding and no_load_g, which it adds.';
   end if;
 end $$;
 
@@ -624,12 +634,20 @@ select d.device_id,
        s.counts_per_gram,
        s.net_counts,
 
-       -- The buffer half (migrate_buffer.sql), appended last for the same
+       -- The buffer half (migrate_buffer.sql), appended for the same
        -- reason. NULL on every scale and stack, and on a buffer whenever
        -- weight_state is not 'ok'.
        s.bowls,
        s.bowls_confirmed,
-       s.gross_g
+       s.gross_g,
+
+       -- Platform node health (migrate_hubs.sql), appended last for the same
+       -- reason. NULL -- never 0 -- on a hub, a stack, and a platform whose
+       -- node has not measured it.
+       s.supply_mv,
+       s.crc_errors,
+       s.responding,
+       s.no_load_g
   from public.devices d
   left join public.device_status s using (device_id)
   left join public.meal_food_mapping m
