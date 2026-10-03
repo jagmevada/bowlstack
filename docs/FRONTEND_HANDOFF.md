@@ -7,14 +7,24 @@ reading the firmware repo. No embedded knowledge is required.
 
 ## 1. What the system is
 
-Serving stations in a kitchen each hold a stack of large steel food bowls. A
-device on each station counts how many bowls remain and reports it. The
-**kitchen in-charge** watches this to see remaining stock per item, cut waste,
-and get early warning of a shortage — then tells the service counter in-charge
-to act.
+Serving stations in a kitchen each hold large steel food bowls waiting behind
+the line (the **buffer**) and a vessel being served from (the **counter**).
+Devices weigh both and report it. The **kitchen in-charge** watches this to see
+remaining stock per item, cut waste, and get early warning of a shortage — then
+tells the service counter in-charge to act.
 
-- **32 devices**, `BWL-001` … `BWL-032`.
-- Each reports **0–4 bowls**.
+Three kinds of device, told apart by `device_overview.kind`:
+
+| `kind` | Ids | What it reports |
+| --- | --- | --- |
+| `buffer` | `BWL-001` … `BWL-032` | one 200 kg load cell under the waiting bowls: **food in grams** and **how many bowls** are on it |
+| `scale` | `LDC-001` … `LDC-032` | three 20 kg cells under the counter vessel: food in grams |
+| `stack` | (legacy) | the old ToF bowl counter: **0–4 bowls**, no grams |
+
+Every BWL was a `stack` until `supabase/cutover_buffers.sql` re-kinded it. A
+database that predates `migrate_loadcell.sql` has no `kind` column at all;
+treat a missing `kind` as `stack`.
+
 - Devices are powered **only during meal service** and are dark otherwise. This
   is normal, and the UI must not present it as failure.
 
@@ -69,16 +79,35 @@ const { data } = await supabase.from('device_overview').select('*')
 | `missed_last_service` | bool | slept through the most recently completed service window — the alarm that survives the dark hours |
 | `awaiting_deployment` | bool | registered, never heard from — not a fault |
 | `data_is_stale` | bool | outside service hours: numbers are last-known, not live |
-| `stack_count` | int | **0–4 bowls — the primary number** |
-| `stack_status` | text | `ok` / `discontiguous` / `degraded` |
-| `levels` | text[] | 4 entries, bottom-up: `present` / `absent` / `unknown` |
-| `sensors_online` | int | 0–4 |
+| `stack_count` | int | `stack` only: **0–4 bowls**. NULL on every other kind |
+| `stack_status` | text | `stack` only: `ok` / `discontiguous` / `degraded` |
+| `levels` | text[] | `stack` only: 4 entries, bottom-up: `present` / `absent` / `unknown` |
+| `sensors_online` | int | `stack` only: 0–4 |
 | `battery_mv` | int | millivolts at the cell — raw measurement, for diagnosis |
 | `battery_level` | text | `good` / `medium` / `low` / `critical`, or **`null`** |
-| `charging` | bool | |
+| `charging` | bool | **null is "unreadable", not "no"** — the panel that hosts scales and buffers cannot see it |
 | `uptime_s` | int | seconds since the device booted |
-| `firmware` | text | e.g. `0.2.0` |
-| `mac` | text | which physical board is in this installation |
+| `firmware` | text | e.g. `0.2.0`, `V1.20 261003` |
+| `mac` | text | which physical board is in this installation — one panel hosts LDC-001 *and* its buffers, so they share a MAC by design |
+| `kind` | text | `stack` / `scale` / `buffer` — see §1. Absent before `migrate_loadcell.sql` |
+| `weight_g` | int | `scale`/`buffer`: grams of **food**. **NULL unless `weight_state = 'ok'`**; 0 is a real, empty platform |
+| `weight_state` | text | `scale`/`buffer`: always sent — `ok`, `no_cells`, `cells_partial` (scale only), `over_range`, `settling`, `uncalibrated`, `untared` |
+| `cells_online` | int | 0–3 for a scale, 0–1 for a buffer |
+| `counts_per_gram` | numeric | calibration; ~107 for a scale, ~20.7 for a 200 kg buffer. NULL = never calibrated |
+| `net_counts` | bigint | raw converter counts; NULL while there are no samples (0 is a reading) |
+| `bowls` | smallint | `buffer` only: bowls on the platform, 0–4 in practice (0–8 allowed). NULL unless `ok`. *Appended by `migrate_buffer.sql`* |
+| `bowls_confirmed` | bool | `buffer` only: **false = the count is remembered from before a power cycle**, not yet confirmed by a bowl moving or the platform reading empty. NULL exactly when `bowls` is |
+| `gross_g` | int | `buffer` only: everything on the platform, `weight_g + bowls × 2500`. NULL unless `ok` |
+
+**A buffer's `weight_g` is always food** — the gross load less 2.5 kg of steel
+per counted bowl — whatever the panel's own display switch shows. Read it as
+the headline and put `bowls` and `gross_g` beside it; never subtract again.
+
+**Before `migrate_buffer.sql` the last three columns do not exist** — the keys
+are simply absent from each row, not NULL. A client that must work on both
+databases treats an absent column as "not available", never as 0, and reads
+history with `select('*')` rather than naming a column that may not be there
+(a named missing column is a 400 that fails the whole query).
 
 ---
 
@@ -117,6 +146,22 @@ trial arguably is one.
 a day that would false-alarm on every healthy device and bury the one that
 genuinely failed. Both flags above are computed server-side, service-hour
 aware, in each device's own timezone.
+
+### `weight_state` first, the number second
+
+A scale or buffer always sends its state and sends a number only when that
+state is `ok` — the database enforces it (`(weight_state = 'ok') = (weight_g is
+not null)`). So render the state, and the number only under `ok`:
+
+| `weight_state` | Meaning | UI treatment |
+| --- | --- | --- |
+| `ok` | a weight | show it — **0 renders `0.0 kg`**, never a dash |
+| `no_cells`, `over_range`, `cells_partial` | the reading cannot be trusted | fault (`over_range` on a buffer can also mean more bowls counted than are on it) |
+| `uncalibrated`, `untared` | not set up | degraded — counts, not kilograms |
+| `settling` | first readings arriving (a buffer) / power-up zero (a scale) | idle, not a fault |
+
+A buffer has **one** cell; a scale has three. Draw the cell count per kind —
+a buffer drawn with three marks reads "1 of 3", a fault it does not have.
 
 ### `stack_status` — trust the count only when `ok`
 
@@ -184,13 +229,21 @@ Dashboard. Four rules matter more than the rest.
 ### Buffer and counter ADD; they are not rival estimates
 
 A slot's food sits in two places. Bowls are **buffered** behind the line —
-counted by the BWL stacks, converted to grams through the dish's per-bowl
-weight. Food already **on the counter** is weighed directly by the LDC scales.
-They are different food in different places, so:
+weighed by the BWL buffer platforms (and, while any legacy `stack` remains,
+counted by it and converted to grams through the dish's per-bowl weight). Food
+already **on the counter** is weighed directly by the LDC scales. They are
+different food in different places, so:
 
 ```
 weight_g  =  buffer_g  +  counter_g
+buffer_g  =  weighed buffer food  +  stack bowls x kg/bowl   (the second term
+                                       is dormant once every BWL is a buffer)
 ```
+
+Each term is NULL when nothing measured it, and the sum is **NULL only when
+both are** — never a 0 standing in for "unknown". After `migrate_buffer.sql`
+this holds for `slot_overview.weight_g` too; before it, that column coalesced
+an unknown buffer to 0, so an old client gated on `measured_weight_g` instead.
 
 This is the correction that matters most, because the plausible alternative is
 wrong in the dangerous direction. Preferring the measured figure where one
@@ -260,6 +313,27 @@ exactly to `total_bowls × W`, so nothing is lost.
 | `buffer_g` / `counter_g` | the two terms of the sum above, named so a screen can break the headline down without re-deriving it |
 | `weight_g` | **the headline.** `buffer_g + counter_g`, NULL only when neither exists |
 | `scale_issues` | jsonb, NULL when every scale here is healthy: which area, which device, which `weight_state`. LEFT joined one row per slot, so it cannot multiply anything |
+| `buffers` / `buffers_ok` | *(migrate_buffer.sql)* buffer platforms at this slot, and how many report `ok` |
+| `buffer_measured_g` | weighed buffer food alone (bigint), NULL when no buffer is `ok` |
+| `buffer_bowls` | bowls on the `ok` buffers, NULL when none is `ok` |
+| `buffer_unconfirmed` | true when any `ok` buffer's count is unconfirmed — render the count as `3?` |
+| `weight_is_partial` | **the figure is a lower bound**: a buffer or scale here is not `ok` while the slot still has a figure, or `est_is_partial`. Never true on a NULL weight |
+
+`areas[]` gains the same per hall: `buffers`, `buffers_ok`, `buffer_g`,
+`buffer_bowls`, `buffer_unconfirmed`. A hall with buffers has no bowl
+capacity — show its bowl count alone (`3`, `3?`), not `3/12`.
+
+`slot_overview` (per hall per slot, the Stock screen's source) appends
+`buffers`, `buffers_ok`, `buffer_measured_g`, `buffer_bowls`,
+`buffer_unconfirmed` and `buffer_issues` (buffers not `ok`); its `buffer_g` is
+the same buffer term and its `weight_g` follows the NULL rule above.
+
+> **Lower bounds and never-installed units.** A device registered at a position
+> that has *never reported* is awaiting deployment, not missing data: the LDC
+> scales are all assigned and most have never spoken, so counting them as "not
+> ok" would put a `≥` on every slot for good. The dashboard decides Stock's `≥`
+> from the device rows — any `scale`/`buffer` that has `reported` and is not
+> `ok` — and Master's from `weight_is_partial`, which must apply the same rule.
 
 > **`scale_issues` is a separate CTE for a reason.** It began as
 > `left join lateral unnest(scale_issues)` inside the grouped query, which
@@ -271,10 +345,17 @@ There is deliberately **no site-wide total** — rice + dal + curry added
 together is arithmetically fine and operationally meaningless. Quantity is only
 meaningful per dish, so totals stop at the slot.
 
-**Render `est_is_partial` as `≥`.** It is the same notation `deviceStack()`
-already uses for a degraded stack's count, and reusing it beats inventing a
-second vocabulary for "real but incomplete". A total that silently drops an
-unweighed area reads as complete, and a kitchen under-orders against it.
+**Render `est_is_partial` or `weight_is_partial` as `≥`.** It is the same
+notation `deviceStack()` already uses for a degraded stack's count, and reusing
+it beats inventing a second vocabulary for "real but incomplete". A total that
+silently drops an unweighed area reads as complete, and a kitchen under-orders
+against it. Only `est_is_partial` earns a *Set weight* link — a buffer or scale
+that is down is not fixed on the Menu tab.
+
+**The per-bowl weight only matters while a `stack` exists.** A buffer weighs
+its bowls, so once no `stack` device is left the dashboard hides the Menu
+tab's kg/bowl field — hidden, not removed, because every save reads it back
+and a missing field would write NULL over every stored `bowl_weight_g`.
 
 **A hall with no dish at this position owes no weight.** Breakfast runs at
 Darshanarthi only, so Mahatma held a bowl against no dish and the slot reported
@@ -355,24 +436,28 @@ moments up to 5 s apart. Order by `recorded_at`, never by `id` or `received_at`.
 has no clock. It can be meaningfully earlier than `received_at` after a network
 outage — that is correct, not a bug.
 
-### Load cells: `weight_samples`, not `status_events`
+### Load cells and buffers: `weight_samples`, not `status_events`
 
-A scale cannot append to `status_events` — five of that table's NOT NULL
-columns are bowl-shaped, so it could only do so by fabricating a bowl count.
-Its history is its own table, with the same shape of contract:
+A scale or a buffer cannot append to `status_events` — five of that table's NOT
+NULL columns are bowl-shaped, so it could only do so by fabricating a bowl
+count. Its history is its own table, with the same shape of contract:
 
 ```ts
 const { data } = await supabase.from('weight_samples')
-  .select('recorded_at, reason, weight_state, weight_g, cells_online, battery_level')
-  .eq('device_id', 'LDC-001')
+  .select('*')   // a buffer's bowls/gross_g exist only after migrate_buffer.sql
+  .eq('device_id', 'BWL-001')
   .gte('recorded_at', since)
-  .order('recorded_at', { ascending: true })
+  .order('recorded_at', { ascending: false })
+  .limit(1000)
 ```
 
 Unlike `status_events` this is **not** change-only: a row lands on a 250 g move
-or a state change, and otherwise every two minutes, so a station that is simply
+(5 s floor), a state change, and otherwise every two minutes — and for a buffer
+also on any change of `bowls` or `bowls_confirmed` — so a station that is simply
 sitting there still draws a line. `weight_g` is NULL wherever `weight_state`
-is not `ok`; plot those as gaps, never as zero.
+is not `ok`; plot those as gaps, never as zero. A buffer's rows also carry
+`bowls`, `bowls_confirmed` and `gross_g` under the same NULL rules as
+`device_overview`; a scale's rows leave them NULL.
 
 > Change-detection compares against the last **enqueued** sample, not the last
 > **posted** one. Comparing against the posted value while the sampler ran every
@@ -428,8 +513,8 @@ it flips when a completed window passes with no report.
 
 Reads `slot_quantity`. One card per slot number across all areas, itemised by
 serving hall, with that slot's own total and no site-wide one. See §4b — in
-particular, render `est_is_partial` as `≥` and never coalesce a NULL weight to
-zero.
+particular, render `est_is_partial` / `weight_is_partial` as `≥` and never
+coalesce a NULL weight to zero.
 
 ### Stock view — the primary screen
 
@@ -458,8 +543,14 @@ product exists for: **which dish is going fastest, and will it last the meal.**
 | `is_partial` | the level is a lower bound, so the projection is optimistic |
 | `dishes`, `consumed_g_window` | what, and how much has gone this service |
 
-`public.slot_stock_series` is the same figure over time, for the chart;
-`public.device_burn_rate` is the per-device working.
+`public.slot_stock_series` is the same figure over time, for the chart — one
+row per **hall** per slot per point (`location, food_slot, at_ts, buffer_g,
+counter_g, total_g`), so select `location` and key the curve by it, or three
+halls interleave into one zig-zag. At each point it takes every instrument's
+newest sample **in any state** and counts its weight only if that sample is
+`ok`, so a buffer or scale that drops out leaves a gap rather than a frozen
+last weight. `public.device_burn_rate` is the per-device working, for `scale`
+and `buffer` devices.
 
 > **Rate is measured on buffer + counter together**, so carrying bowls from the
 > stack onto the counter reads as *flat* rather than as a serving. Measuring
@@ -479,9 +570,10 @@ product exists for: **which dish is going fastest, and will it last the meal.**
 ### Health view
 
 Battery, charging, `sensors_online`, `firmware`, `offline`,
-`awaiting_deployment`. For a scale the sensor line is **weight and cell
-count**, not a stack of four levels — `kind` picks which, and a scale rendered
-with `f1..f4` is the usual symptom of forgetting it. This is what lets the kitchen in-charge tell the service
+`awaiting_deployment`. For a scale or a buffer the sensor line is **weight and
+cell count** (three cells, or one), not a stack of four levels — `kind` picks
+which, and a buffer rendered with `f1..f4` is the usual symptom of forgetting
+it. This is what lets the kitchen in-charge tell the service
 counter in-charge which station needs attention — so sort by severity, not by
 device ID. (The trial dashboard renders this as a symbolic roster — one glyph
 line per device — with the sentences on each device's own page.)
@@ -513,5 +605,14 @@ close (devices legitimately off, still "expected").
 > 06:30–09:30, lunch 11:30–14:30, dinner **16:30**–21:30). The table above is
 > the real schedule, to be restored before clean trial data.
 
-A stack is **0–4** bowls. A device replaced in the field keeps its `device_id`;
-only `mac` changes.
+A legacy stack is **0–4** bowls. A buffer holds up to 4 bowls of 14–18 kg food
+each plus 2.5 kg of steel per bowl; `weight_g` spans −5 000 … 250 000 g on a
+buffer, and the counter keeps a 100 kg sanity limit. A device replaced in the
+field keeps its `device_id`; only `mac` changes.
+
+**Rollout, and why the dashboard reads both shapes.** `migrate_buffer.sql`
+(additive — new columns, every BWL still `stack`) → the dashboard deploy →
+`cutover_buffers.sql` (every `BWL-%` re-kinded to `buffer`, its `stack_*`
+NULLed in the same transaction) → the kg fleet simulator. The dashboard ships
+between the two SQL steps, so it must render a pre-migration database exactly
+as before and a post-cut-over one correctly; the smoke suite runs both.

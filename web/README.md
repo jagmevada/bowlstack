@@ -437,9 +437,11 @@ npm install      # jsdom, only for the test — the app itself has no dependenci
 node smoke.mjs
 ```
 
-229 assertions. It loads the real `index.html`, stubs PostgREST with rows shaped
-like `device_overview` / `slot_overview` / `status_events`, and drives every
-screen. It exists to protect the rules in the section above — each is one
+387 assertions at 1.42. It loads the real `index.html`, stubs PostgREST with rows
+shaped like `device_overview` / `slot_overview` / `status_events`, and drives
+every screen — first against kind-less bowl stacks (a database from before
+`migrate_buffer.sql`), then with buffer platforms spliced in (after the
+cut-over). It exists to protect the rules in the section above — each is one
 plausible edit away from breaking with nothing visibly wrong on screen.
 
 ## Known limits

@@ -16,7 +16,7 @@ import { h, badge, banner, toast, confirmAction, fillSlot } from '../ui.js';
 import { unwrap, describeError } from '../supa.js';
 import {
   LOCATION_NAMES, SERVING_LOCATIONS, MEAL_TYPES, FOOD_SLOTS, WEEKDAYS,
-  weekdayOf, serviceDate, addDays, mealAtLocalClock, fmtDay, serviceState,
+  weekdayOf, serviceDate, addDays, mealAtLocalClock, fmtDay, serviceState, isStack,
 } from '../domain.js';
 
 /** Last preload per (location, meal, date).
@@ -44,6 +44,18 @@ const SLOT_ID = 'menu-body';
 const MIN_KG = 0.1;
 const MAX_KG = 50;
 
+// THE kg / bowl FIELD ONLY EVER MULTIPLIED A STACK'S BOWL COUNT. A buffer
+// platform weighs its bowls, so once no kind = 'stack' device is left
+// (supabase/cutover_buffers.sql) the field feeds no figure on any screen and
+// only invites typing that changes nothing.
+//
+// HIDDEN, NEVER REMOVED. Every save path reads it back through readWeight(),
+// and a missing input reads as NULL -- so dropping it from the form would
+// erase every stored bowl_weight_g on the next Save. Hidden, it carries the
+// stored figure through untouched, and comes back if a stack ever does.
+// Set per render from the fleet; an empty fleet shows it rather than guess.
+let showWeight = true;
+
 function weightInput(label, grams, extra = {}) {
   return h('input', {
     class: 'w-input',
@@ -52,6 +64,7 @@ function weightInput(label, grams, extra = {}) {
     value: grams == null ? '' : (Number(grams) / 1000).toFixed(1),
     placeholder: 'kg',
     'aria-label': `${label} — kilograms per bowl`,
+    hidden: !showWeight,
     ...extra,
   });
 }
@@ -74,7 +87,7 @@ function fieldHead() {
   return h('div', { class: 'row-form row-head' },
     h('span', { class: 'slotno' }, ''),
     h('span', {}, 'Dish'),
-    h('span', {}, 'kg / bowl'),
+    h('span', { hidden: !showWeight }, 'kg / bowl'),
     h('span', {}));
 }
 
@@ -117,6 +130,7 @@ function areaCapsules({ allMode, locs, go }) {
 
 export function renderMenu(state, params, ctx) {
   const { tz } = serviceState(state.devices);
+  showWeight = !state.devices.length || state.devices.some(isStack);
   const mode = params.get('mode') === 'week' ? 'week' : 'date';
   const meal = MEAL_TYPES.includes(params.get('meal')) ? params.get('meal') : mealAtLocalClock(tz);
   const date = /^\d{4}-\d{2}-\d{2}$/.test(params.get('date') || '') ? params.get('date') : serviceDate(tz);

@@ -1032,6 +1032,11 @@ table.coverage .ghost { width: 100%; min-width: 2.2rem; }
 .row-form .w-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 .row-form .w-input { -moz-appearance: textfield; }
 
+/* No stacks left, so the kg box is hidden (menu.js says why it is hidden and
+   not removed). Its column goes with it, or the row's badge drops into the
+   4.5rem slot. Without :has() the row keeps an empty column, nothing worse. */
+.row-form:has(> [hidden]) { grid-template-columns: 3rem 1fr auto; }
+
 @media (max-width: 560px) {
   /* On a phone the dish gets the full width and the weight tucks under it
      beside the slot number, rather than squeezing both onto one line. */

@@ -360,7 +360,9 @@ async function refresh(manual = false) {
         .catch(() => []),
       // The curve behind the rate. Same tolerance: absent without
       // migrate_burn_rate.sql, and Master simply draws no sparkline.
-      client.from('slot_stock_series').select('food_slot, at_ts, total_g')
+      // `location` too: the view is per hall, and without it Master could
+      // only draw the three halls' points interleaved into one zig-zag.
+      client.from('slot_stock_series').select('location, food_slot, at_ts, total_g')
         .order('at_ts')
         .then(r => (r.error ? [] : r.data || []))
         .catch(() => []),
@@ -516,14 +518,15 @@ function renderChrome() {
 
   chips.push(chip('offline', s.offline, 'critical', 'offline',
     'Not reporting when they should be'));
-  // Two different failures, two different filters: a fault is an IMPOSSIBLE
-  // reading from working sensors (a bowl above an empty level — bowls stack,
-  // f2 cannot exist without f1); degraded is a sensor itself being down.
+  // Two different failures, two different filters, worded for every product
+  // isFault/isDegraded cover: a fault is a reading that cannot be trusted at
+  // all; degraded is one that is a lower bound or not yet set up.
   chips.push(chip('faults', s.fault, 'critical', 'fault',
-    'Impossible stack reading — the sensors answer, but the pattern cannot '
-    + 'physically happen. Check the mount or an obstruction.'));
+    'A reading that cannot be trusted at all — a load cell not answering or '
+    + 'saturated, or an impossible bowl-stack pattern. Check the station.'));
   chips.push(chip('degraded', s.degraded, 'warning', 'degraded',
-    'A sensor itself is down — the bowl count is a lower bound.'));
+    'A reading that may be low or is not set up — a sensor down, or a scale '
+    + 'not calibrated or tared.'));
   chips.push(chip('battery', s.batteryWarn, 'warning', 'battery',
     'Battery low or critical'));
   // No "N not deployed" chip: the figure is static configuration, not

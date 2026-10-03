@@ -324,8 +324,12 @@ export function weightChart({ points, now = Date.now(), width = 640, tz,
   // A NICE ceiling, not the maximum. An axis topping out at 1,213 g puts every
   // tick on a number nobody can hold in their head; rounding up to the next
   // 0.5 kg makes the gridlines readable and costs a little headroom.
+  //
+  // Tiers up to a 200 kg buffer platform. With 10 kg as the last step, a full
+  // buffer drew twenty gridlines -- a page of ruled paper with a line on it.
   const peak = Math.max(...usable.map(p => p.v), 0);
-  const stepG = peak <= 2000 ? 500 : peak <= 10000 ? 2000 : peak <= 40000 ? 5000 : 10000;
+  const stepG = peak <= 2000 ? 500 : peak <= 10000 ? 2000 : peak <= 40000 ? 5000
+              : peak <= 100000 ? 10000 : peak <= 200000 ? 25000 : 50000;
   const top = Math.max(stepG, Math.ceil(peak / stepG) * stepG);
 
   const x = t => PAD.l + ((t - t0) / span) * iw;

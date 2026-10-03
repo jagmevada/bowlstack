@@ -233,6 +233,18 @@ for (let i = 30; i >= 0; i--) {
 }
 events.reverse();   // the query orders recorded_at descending
 
+// weight_samples for the buffer block near the end, newest first. The oldest
+// row is the boot after a power cycle, so its bowl count is unconfirmed.
+const samples = [0, 1, 2].map(k => ({
+  device_id: 'BWL-101', recorded_at: iso(now - k * 120_000),
+  received_at: iso(now - k * 120_000 + 300),
+  reason: k === 2 ? 'boot' : 'periodic', seq: 3 - k, boot_id: 7,
+  weight_state: 'ok', weight_g: 42300 + k * 500, gross_g: 49800 + k * 500,
+  bowls: 3, bowls_confirmed: k !== 2, cells_online: 1,
+  net_counts: Math.round((49800 + k * 500) * 20.7), counts_per_gram: 20.7,
+  battery_level: 'good', firmware: 'V1.20 261003',
+}));
+
 const preload = [1, 2, 3, 4, 5].map(s => ({
   food_slot: s, food_name: MENU.D[s], bowl_weight_g: WEIGHT.D[s],
   source_date: '2026-07-26', is_saved: false,
@@ -276,6 +288,7 @@ function builder(table) {
       : table === 'slot_overview' ? slots
       : table === 'slot_quantity' ? quantity
       : table === 'status_events' ? events
+      : table === 'weight_samples' ? samples
       : table === 'meal_food_mapping' ? [{ meal_type: 'Lunch', food_slot: 1, food_name: 'Rice' }]
       : table === 'meal_menu_template' ? templateRows
       : [];
@@ -1517,6 +1530,273 @@ await go('#/assign');
   ok('a null slot is written through', !!patch && patch.food_slot === null, JSON.stringify(patch));
 }
 
+// =======================================================================
+//  Buffer platforms -- every BWL-xxx after supabase/cutover_buffers.sql.
+//
+//  Everything above ran against kind-less stacks and slot rows with no
+//  buffer columns: the database BEFORE migrate_buffer.sql, and those
+//  assertions passing untouched is the proof the dashboard still reads one.
+//  This block splices a post-cut-over set of positions in -- D/7, D/8, M/7,
+//  M/8, none of which the fixtures above use -- asserts, and takes it back
+//  out, so no count above moves. Expected figures are worked by hand.
+//
+//    D/7  BWL-101 ok 42.3 kg food, 3 bowls, gross 49.8 kg
+//         BWL-102 settling                -> the position is >= 50.4 kg
+//         LDC-107 ok 8.1 kg on the counter
+//    D/8  BWL-103 ok, tared and empty     -> 0.0 kg, never "No data"
+//    M/7  BWL-104 ok 30.0 kg, 3 bowls UNCONFIRMED
+//    M/8  BWL-105 no_cells                -> NULL -> "No data", never >=
+// =======================================================================
+console.log('\n[buffers: one 200 kg cell, food in kilograms]');
+{
+  const live = { reported: true, updated_at: iso(now - 20_000), stale_for: '00:00:20',
+    in_service: true, offline: false, awaiting_deployment: false, data_is_stale: false,
+    missed_last_service: false, stack_count: null, stack_status: null, levels: null,
+    sensors_online: null, battery_mv: 4020, battery_level: 'good', charging: null,
+    uptime_s: 3120, firmware: 'V1.20 261003', mac: '28:84:85:47:AB:01',
+    timezone: 'Asia/Kolkata', current_meal: 'Lunch' };
+  const none = { weight_g: null, gross_g: null, bowls: null, bowls_confirmed: null };
+  const buf = (id, loc, slot, w) => ({ ...live, device_id: id, kind: 'buffer',
+    location: loc, food_slot: slot, label: `${AREA[loc]} buffer ${slot}`,
+    current_food: 'Pulao', cells_online: 1, counts_per_gram: 20.7,
+    net_counts: w.gross_g == null ? null : Math.round(w.gross_g * 20.7), ...w });
+  const extraDevices = [
+    buf('BWL-101', 'D', 7, { weight_state: 'ok', weight_g: 42300, gross_g: 49800,
+                             bowls: 3, bowls_confirmed: true }),
+    buf('BWL-102', 'D', 7, { ...none, weight_state: 'settling' }),
+    { ...live, device_id: 'LDC-107', kind: 'scale', location: 'D', food_slot: 7,
+      label: 'Darshanarthi slot 7 scale', current_food: 'Pulao', ...none,
+      weight_state: 'ok', weight_g: 8100, cells_online: 3, counts_per_gram: 106.857,
+      net_counts: 865542 },
+    buf('BWL-103', 'D', 8, { weight_state: 'ok', weight_g: 0, gross_g: 0,
+                             bowls: 0, bowls_confirmed: true }),
+    buf('BWL-104', 'M', 7, { weight_state: 'ok', weight_g: 30000, gross_g: 37500,
+                             bowls: 3, bowls_confirmed: false }),
+    buf('BWL-105', 'M', 8, { ...none, weight_state: 'no_cells', cells_online: 0 }),
+  ];
+  const slotRow = (loc, n, o) => ({ location: loc, food_slot: n, current_food: 'Pulao',
+    current_meal: 'Lunch', devices: 0, devices_reported: 0, bowls_capacity: 0,
+    bowls_trusted: null, bowls_reported: null, any_fault: false, any_degraded: false,
+    any_battery_warn: false, any_offline: false, any_missed_service: false,
+    oldest_update: iso(now - 20_000), scales: 0, scales_ok: 0, measured_weight_g: null,
+    scale_issues: [], bowl_weight_g: null, buffer_issues: 0, buffer_unconfirmed: null,
+    ...o });
+  const extraSlots = [
+    slotRow('D', 7, { scales: 1, scales_ok: 1, measured_weight_g: 8100,
+      buffers: 2, buffers_ok: 1, buffer_issues: 1, buffer_measured_g: 42300,
+      buffer_g: 42300, buffer_bowls: 3, buffer_unconfirmed: false, weight_g: 50400 }),
+    slotRow('D', 8, { buffers: 1, buffers_ok: 1, buffer_measured_g: 0, buffer_g: 0,
+      buffer_bowls: 0, buffer_unconfirmed: false, weight_g: 0 }),
+    slotRow('M', 7, { buffers: 1, buffers_ok: 1, buffer_measured_g: 30000,
+      buffer_g: 30000, buffer_bowls: 3, buffer_unconfirmed: true, weight_g: 30000 }),
+    slotRow('M', 8, { buffers: 1, buffers_ok: 0, buffer_issues: 1,
+      buffer_measured_g: null, buffer_g: null, buffer_bowls: null, weight_g: null }),
+  ];
+  const area = (loc, o) => ({ location: loc, food_name: 'Pulao', bowl_weight_g: null,
+    bowls_trusted: null, bowls_capacity: 0, devices: 0, est_weight_g: null,
+    capacity_weight_g: null, scales: 0, measured_weight_g: null, ...o });
+  const qRow = (n, o) => ({ food_slot: n, current_meal: 'Lunch', menu_meal_type: 'Lunch',
+    menu_meal_date: '2026-08-20', menu_is_live: true, dishes: ['Pulao'],
+    bowl_weight_g: null, devices: 0, bowls_capacity: 0, bowls_trusted: null,
+    est_weight_g: null, capacity_weight_g: null, est_is_partial: false,
+    areas_without_weight: [], any_fault: false, any_degraded: false,
+    any_battery_warn: false, any_offline: false, any_missed_service: false,
+    oldest_update: iso(now - 20_000), ...o });
+  const extraQuantity = [
+    // 42.3 + 8.1 at D, 30.0 at M = 80.4, a bound because BWL-102 is settling.
+    qRow(7, { areas: [
+        area('D', { weight_g: 50400, measured_weight_g: 8100, scales: 1, buffers: 2,
+                    buffers_ok: 1, buffer_g: 42300, buffer_bowls: 3, buffer_unconfirmed: false }),
+        area('M', { weight_g: 30000, buffers: 1, buffers_ok: 1, buffer_g: 30000,
+                    buffer_bowls: 3, buffer_unconfirmed: true })],
+      scales: 1, scales_ok: 1, measured_weight_g: 8100, buffer_g: 72300, counter_g: 8100,
+      weight_g: 80400, buffers: 3, buffers_ok: 2, buffer_measured_g: 72300,
+      buffer_bowls: 6, buffer_unconfirmed: true, weight_is_partial: true }),
+    // 0 at D (empty) and nothing known at M: a bound on ZERO, which is a figure.
+    qRow(8, { areas: [
+        area('D', { weight_g: 0, buffers: 1, buffers_ok: 1, buffer_g: 0,
+                    buffer_bowls: 0, buffer_unconfirmed: false }),
+        area('M', { weight_g: null, buffers: 1, buffers_ok: 0, buffer_g: null,
+                    buffer_bowls: null, buffer_unconfirmed: null })],
+      measured_weight_g: null, buffer_g: 0, counter_g: null, weight_g: 0,
+      buffers: 2, buffers_ok: 1, buffer_measured_g: 0, buffer_bowls: 0,
+      buffer_unconfirmed: false, weight_is_partial: true }),
+  ];
+  devices.push(...extraDevices);
+  slots.push(...extraSlots);
+  quantity.push(...extraQuantity);
+  window.document.getElementById('refresh-btn').dispatchEvent(new window.Event('click'));
+  await new Promise(r => setTimeout(r, 200));
+
+  // --- Stock ------------------------------------------------------------
+  await go('#/stock');
+  const sCard = (loc, n) => [...(view.querySelector(`.area-${loc}`)?.querySelectorAll('.slot') || [])]
+    .find(c => c.querySelector('.slot-pos')?.textContent === `Slot ${n}`);
+  const kgOn = c => c?.querySelector('.slot-kg')?.textContent;
+  ok('a buffer position leads with kilograms of food', kgOn(sCard('D', 7)) === '≥50.4 kg',
+    kgOn(sCard('D', 7)));
+  ok('...a lower bound, because one buffer there is settling',
+    /lower bound/.test(sCard('D', 7)?.querySelector('.slot-kg')?.title || ''));
+  ok('...and the tooltip splits buffer from counter',
+    /42\.3 kg in the buffer \+ 8\.1 kg on the counter/.test(
+      sCard('D', 7)?.querySelector('.slot-kg')?.title || ''),
+    sCard('D', 7)?.querySelector('.slot-kg')?.title);
+  ok('the line under it is the bowls on the buffer',
+    sCard('D', 7)?.querySelector('.slot-of')?.textContent === '3 bowls buffered',
+    sCard('D', 7)?.querySelector('.slot-of')?.textContent);
+  ok('a position with no stack draws no bowl meter', sCard('D', 7)?.querySelector('.meter') == null);
+  ok('a tared, empty buffer reads 0.0 kg, not "No data"', kgOn(sCard('D', 8)) === '0.0 kg',
+    kgOn(sCard('D', 8)));
+  ok('an unconfirmed count wears a ?',
+    /^3\? bowls/.test(sCard('M', 7)?.querySelector('.slot-of')?.textContent || ''),
+    sCard('M', 7)?.querySelector('.slot-of')?.textContent);
+  ok('...but the kilograms are not a bound for it', kgOn(sCard('M', 7)) === '30.0 kg',
+    kgOn(sCard('M', 7)));
+  ok('a buffer with no weight is "No data"',
+    sCard('M', 8)?.querySelector('.slot-nodata')?.textContent === 'No data');
+  ok('...and never a bound', !/≥/.test(sCard('M', 8)?.querySelector('.slot-figure')?.textContent || 'x'));
+  ok('the device line shows the food, not a bowl count',
+    [...(sCard('D', 7)?.querySelectorAll('.dev-line') || [])]
+      .find(l => /BWL-101/.test(l.textContent))?.querySelector('.ct')?.textContent === '42.3 kg');
+
+  // --- Health -----------------------------------------------------------
+  await go('#/health');
+  const hRow = id => [...view.querySelectorAll('.dev')].find(r => r.textContent.includes(id));
+  ok('a buffer draws ONE cell, not three',
+    hRow('BWL-101')?.querySelectorAll('.cells i').length === 1,
+    String(hRow('BWL-101')?.querySelectorAll('.cells i').length));
+  ok('...while the counter still draws three',
+    hRow('LDC-107')?.querySelectorAll('.cells i').length === 3);
+  ok('a buffer row reads in kilograms',
+    hRow('BWL-101')?.querySelector('.dev-count.is-weight')?.textContent === '42.3 kg');
+  ok('its tooltip carries the bowls and the gross',
+    /3 bowls · gross 49\.8 kg/.test(hRow('BWL-101')?.querySelector('.dev-count')?.title || ''),
+    hRow('BWL-101')?.querySelector('.dev-count')?.title);
+  ok('an unconfirmed count says so',
+    /3 bowls \(unconfirmed\)/.test(hRow('BWL-104')?.querySelector('.dev-count')?.title || ''));
+  ok('a buffer with no cell answering is a fault', hRow('BWL-105')?.querySelector('.st-fault') != null);
+  ok('a healthy buffer is not "no reading"', hRow('BWL-101')?.querySelector('.st-ok') != null);
+  ok('no level ladder is drawn for a buffer', hRow('BWL-101')?.querySelector('.levels') == null);
+  await go('#/health?f=fault');
+  ok('...and the Faults filter lists it', text().includes('BWL-105'));
+
+  // --- Device -----------------------------------------------------------
+  await go('#/device/BWL-101?h=24');
+  await new Promise(r => setTimeout(r, 80));
+  const hist = calls.filter(c => c.table === 'weight_samples');
+  ok('buffer history queries weight_samples',
+    hist.some(c => c.filters.some(f => f[0] === 'eq' && f[1] === 'device_id' && f[2] === 'BWL-101')));
+  ok("...with select('*'), so it works before and after migrate_buffer.sql",
+    hist.every(c => c.filters.some(f => f[0] === 'select' && f[1] === '*')));
+  ok('...and never status_events',
+    !calls.some(c => c.table === 'status_events'
+      && c.filters.some(f => f[0] === 'eq' && f[2] === 'BWL-101')));
+  ok('the card is titled for a buffer', /Buffer now/.test(text()) && !/Counter now/.test(text()));
+  ok('the card draws one cell', view.querySelectorAll('.cells.lg i').length === 1,
+    String(view.querySelectorAll('.cells.lg i').length));
+  ok('the device line says 1 of 1', /1 of 1 converting/.test(text()));
+  const kvOf = k => [...view.querySelectorAll('dl.kv dt')]
+    .find(dt => dt.textContent === k)?.nextElementSibling?.textContent;
+  ok('the bowls have a row', kvOf('Bowls') === '3 bowls', kvOf('Bowls'));
+  ok('...and the gross, in kilograms', /^49\.8 kg/.test(kvOf('Gross') || ''), kvOf('Gross'));
+  ok('the history chart is food on this buffer', /Food on this buffer/.test(text()));
+  {
+    const heads = [...view.querySelectorAll('table thead th')].map(t => t.textContent);
+    ok('the history table has Bowls and Gross columns',
+      heads.includes('Bowls') && heads.includes('Gross'), heads.join(','));
+    ok('an unconfirmed sample shows its ?',
+      [...view.querySelectorAll('table tbody tr')].some(r => /3\?/.test(r.textContent)));
+  }
+  await go('#/device/BWL-104');
+  ok('the device page spells out unconfirmed',
+    /unconfirmed: remembered from before a power cycle/.test(text()));
+  await go('#/device/LDC-107');
+  ok('a counter keeps its own title and three cells',
+    /Counter now/.test(text()) && view.querySelectorAll('.cells.lg i').length === 3);
+
+  // --- Master -----------------------------------------------------------
+  await go('#/master');
+  {
+    const mCard = n => [...view.querySelectorAll('.mslot')]
+      .find(c => c.querySelector('.mrow-slot')?.textContent === `Slot ${n}`);
+    const hall = (n, i) => mCard(n)?.querySelectorAll('.marea')[i];
+    ok('a buffer slot states buffer + counter as a bound',
+      mCard(7)?.querySelector('.mrow-kg')?.textContent === '≥80.4 kg',
+      mCard(7)?.querySelector('.mrow-kg')?.textContent);
+    ok('...marked as one', mCard(7)?.querySelector('.mrow-kg.is-bound') != null);
+    ok('...with no "Set weight" link, which could not fix a buffer that is down',
+      mCard(7)?.querySelector('.mrow-fix') == null);
+    ok('the slot carries its buffered bowls, ? when unconfirmed',
+      mCard(7)?.querySelector('.mslot-of')?.textContent === '6? bowls buffered',
+      mCard(7)?.querySelector('.mslot-of')?.textContent);
+    ok("each hall's bowls stand alone",
+      hall(7, 0)?.querySelector('.marea-bowls')?.textContent === '3'
+      && hall(7, 1)?.querySelector('.marea-bowls')?.textContent === '3?',
+      `${hall(7, 0)?.querySelector('.marea-bowls')?.textContent} / ${hall(7, 1)?.querySelector('.marea-bowls')?.textContent}`);
+    ok("each hall's kilograms are its buffer + counter",
+      hall(7, 0)?.querySelector('.marea-kg')?.textContent === '50.4 kg'
+      && hall(7, 1)?.querySelector('.marea-kg')?.textContent === '30.0 kg');
+    ok('the hall tooltip says the buffer was weighed',
+      /42\.3 kg buffered \(3 bowls, weighed on the buffer\) \+ 8\.1 kg weighed at the counter/
+        .test(hall(7, 0)?.querySelector('.marea-kg')?.title || ''),
+      hall(7, 0)?.querySelector('.marea-kg')?.title);
+    ok('a settling buffer is not a fault on its hall -- only the slot is a bound',
+      hall(7, 0)?.querySelector('.st-fault') == null);
+    ok('zero is a figure even beside a dead buffer: >= 0.0 kg, not No data',
+      mCard(8)?.querySelector('.mrow-kg')?.textContent === '≥0.0 kg',
+      mCard(8)?.querySelector('.mrow-kg')?.textContent);
+    ok('a buffer hall with no weight is a dash, never "no weight set"',
+      hall(8, 1)?.querySelector('.marea-kg')?.textContent === '—'
+      && !/no weight set/.test(mCard(8)?.textContent || ''),
+      hall(8, 1)?.querySelector('.marea-kg')?.textContent);
+    ok('the dead buffer marks its hall as a fault', hall(8, 1)?.querySelector('.st-fault') != null);
+  }
+
+  // --- Menu: kg / bowl only where a stack can use it --------------------
+  // Stacks are still in the fleet, so the field shows...
+  await go('#/menu?locs=D&meal=Lunch&date=2026-09-01');
+  ok('kg / bowl is visible while a stack exists',
+    [...view.querySelectorAll('.row-form .w-input')].length >= 5
+    && [...view.querySelectorAll('.row-form .w-input')].every(i => !i.hasAttribute('hidden')));
+  // ...and with only buffers and scales left it hides -- but stays in the form.
+  const stacks = devices.filter(d => d.kind == null);
+  devices.splice(0, devices.length, ...devices.filter(d => d.kind != null));
+  window.document.getElementById('refresh-btn').dispatchEvent(new window.Event('click'));
+  await new Promise(r => setTimeout(r, 200));
+  await go('#/stock');
+  await go('#/menu?locs=D&meal=Lunch&date=2026-09-01');
+  {
+    const w = [...view.querySelectorAll('.row-form .w-input')];
+    ok('with no stack left, kg / bowl is hidden', w.length >= 5 && w.every(i => i.hasAttribute('hidden')),
+      `${w.length} inputs, ${w.filter(i => i.hasAttribute('hidden')).length} hidden`);
+    ok('...its header too',
+      [...view.querySelectorAll('.row-head span')].find(s => s.textContent === 'kg / bowl')
+        ?.hasAttribute('hidden') === true);
+    const saveBtn = [...view.querySelectorAll('button')].find(b => b.textContent === 'Save menu');
+    saveBtn?.dispatchEvent(new window.Event('click'));
+    await new Promise(r => setTimeout(r, 150));
+    const up = [...calls].reverse().find(c => c.table === 'meal_food_mapping'
+      && c.filters.some(f => f[0] === 'upsert'));
+    const payload = up?.filters.find(f => f[0] === 'upsert')?.[1] || [];
+    ok('a save still carries the stored weights through the hidden field',
+      payload.some(r => Number(r.food_slot) === 4 && r.bowl_weight_g === 2000),
+      JSON.stringify(payload.map(r => r.bowl_weight_g)));
+  }
+  devices.splice(0, devices.length, ...stacks, ...devices);
+
+  // Out again, so nothing after this block sees the post-cut-over positions.
+  for (const [arr, extra] of [[devices, extraDevices], [slots, extraSlots],
+                              [quantity, extraQuantity]]) {
+    for (const x of extra) arr.splice(arr.indexOf(x), 1);
+  }
+  window.document.getElementById('refresh-btn').dispatchEvent(new window.Event('click'));
+  await new Promise(r => setTimeout(r, 200));
+  await go('#/menu?locs=D&meal=Lunch&date=2026-09-01');
+  ok('the fixtures are restored, and kg / bowl is back',
+    devices.length === 32
+    && [...view.querySelectorAll('.row-form .w-input')].every(i => !i.hasAttribute('hidden')));
+}
+
 
 // =======================================================================
 //  Load cells -- slotQuantity() against the columns migrate_loadcell.sql
@@ -1597,6 +1877,34 @@ await go('#/assign');
   });
   ok('bowls with no weight still fall back to the count',
     noWeight.kind === 'noweight' && noWeight.headline === '7 bowls', noWeight.headline);
+
+  // --- after migrate_buffer.sql: weight_g is NULL-not-0 ---------------------
+  // A per-bowl weight typed and no stack left makes est_weight_g a real 0.
+  // Falling back to it on a NULL weight_g would print 0.0 kg for a slot
+  // nobody can see; the fallback is only for a row with no weight_g at all.
+  const unseen = slotQuantity({
+    bowls_trusted: null, bowls_capacity: 0, est_weight_g: 0, weight_g: null,
+    buffers: 2, buffers_ok: 0, weight_is_partial: false,
+  });
+  ok('a NULL weight beside a 0 estimate is "No data", not 0.0 kg',
+    unseen.kind === 'nodata' && unseen.headline === 'No data', unseen.headline);
+  const nullBound = slotQuantity({
+    bowls_trusted: null, bowls_capacity: 0, weight_g: null, weight_is_partial: true,
+  });
+  ok('never a bound on a NULL', nullBound.headline === 'No data' && !nullBound.partial);
+  const emptyBuf = slotQuantity({
+    bowls_trusted: null, bowls_capacity: 0, weight_g: 0, buffer_measured_g: 0,
+    buffer_g: 0, buffers: 1, buffers_ok: 1, buffer_bowls: 0, weight_is_partial: false,
+  });
+  ok('an empty buffer is 0.0 kg', emptyBuf.headline === '0.0 kg', emptyBuf.headline);
+  const downBuf = slotQuantity({
+    bowls_trusted: null, bowls_capacity: 0, weight_g: 40000, buffer_measured_g: 40000,
+    buffers: 2, buffers_ok: 1, buffer_bowls: 3, weight_is_partial: true,
+  });
+  ok('a buffer down makes the figure a bound', downBuf.headline === '≥40.0 kg', downBuf.headline);
+  ok('...that the Menu tab cannot fix', downBuf.partial && !downBuf.estPartial);
+  ok('...and says where the figure came from', /Weighed in the buffer/.test(downBuf.note),
+    downBuf.note);
 }
 
 // ---------------------------------------------------------------------
@@ -1632,23 +1940,50 @@ await go('#/assign');
     slots.some(r => k in r) || allAreas.some(a => k in a));
   ok('no retired column is still manufactured', leaked.length === 0, leaked.join(','));
 
-  // 2. Buffer plus counter, per hall AND at the slot. The precedence rule
-  //    reported 18.0 kg at a position holding 54.0 kg.
-  const badArea = allAreas.find(a => {
-    const b = a.est_weight_g, c = a.measured_weight_g;
-    if (b == null && c == null) return a.weight_g != null;
-    return a.weight_g !== (b || 0) + (c || 0);
-  });
+  // 2. weight_g = buffer_g + counter_g, per hall AND at the slot, NULL only
+  //    when both are. The precedence rule reported 18.0 kg at a position
+  //    holding 54.0 kg. The buffer term is now what the platforms WEIGH plus
+  //    any stack's bowls x kg -- and the demo has no stack left, so it is the
+  //    weighed food alone.
+  const sum2 = (b, c) => (b == null && c == null) ? null : (b || 0) + (c || 0);
+  const badArea = allAreas.find(a => a.weight_g !== sum2(a.buffer_g, a.measured_weight_g));
   ok("a hall's weight is buffer + counter", !badArea, JSON.stringify(badArea));
+  const badSlot = slots.find(r => r.weight_g !== sum2(r.buffer_g, r.counter_g));
+  ok("a slot's weight_g is buffer_g + counter_g", !badSlot, JSON.stringify(badSlot));
 
-  const bothTerms = slots.find(r => r.est_weight_g != null && r.measured_weight_g != null);
+  const bothTerms = slots.find(r => r.buffer_g != null && r.counter_g != null);
   ok('at least one slot exercises BOTH terms', !!bothTerms,
-    'no slot in the fixture has buffered bowls and a scale together');
-  if (bothTerms) {
-    ok('...and its total adds them rather than choosing',
-      bothTerms.weight_g === bothTerms.est_weight_g + bothTerms.measured_weight_g,
-      `${bothTerms.weight_g} vs ${bothTerms.est_weight_g}+${bothTerms.measured_weight_g}`);
-  }
+    'no slot in the fixture has a weighed buffer and a scale together');
+  ok('the buffer term is weighed, not estimated: no stack, no estimate',
+    slots.every(r => r.est_weight_g == null && r.bowls_trusted == null));
+
+  // 2b. Every buffer row obeys the contract the database CHECKs: numbers only
+  //     when ok, food = gross - bowls x 2.5 kg, and never a stack column.
+  const { data: rowsNow } = await client.from('device_overview').select('*');
+  const buffers = rowsNow.filter(d => d.kind === 'buffer');
+  ok('every BWL is a buffer after the cut-over',
+    buffers.length === 32 && rowsNow.every(d => d.kind !== 'stack'));
+  const badBuf = buffers.find(d => {
+    const ok_ = d.weight_state === 'ok';
+    return ok_ !== (d.weight_g != null) || ok_ !== (d.gross_g != null)
+      || ok_ !== (d.bowls != null) || (d.bowls == null) !== (d.bowls_confirmed == null)
+      || (ok_ && d.weight_g !== d.gross_g - d.bowls * 2500)
+      || d.stack_count != null || d.levels != null || d.weight_state === 'cells_partial';
+  });
+  ok('every buffer row obeys the contract', !badBuf, JSON.stringify(badBuf));
+  const seeded = s => buffers.some(d => s(d));
+  ok('the demo seeds every buffer state the UI has a rule for',
+    seeded(d => d.bowls_confirmed === false) && seeded(d => d.offline)
+    && seeded(d => d.weight_state === 'no_cells') && seeded(d => d.weight_state === 'settling')
+    && seeded(d => d.weight_g === 0));
+  const { data: hist } = await client.from('weight_samples').select('*')
+    .eq('device_id', 'BWL-001').order('recorded_at', { ascending: false }).limit(1000);
+  ok('demo mode serves a buffer its weight history', hist.length > 100
+    && hist.every(r => r.device_id === 'BWL-001' && 'bowls' in r && 'gross_g' in r));
+  const { data: series } = await client.from('slot_stock_series')
+    .select('location, food_slot, at_ts, total_g');
+  ok('...and Master its per-hall stock curve',
+    series.length > 0 && series.every(p => p.location && p.at_ts));
 
   // 3. A hall with no dish owes no weight, so it cannot make a slot partial.
   const wrongPartial = slots.find(r => (r.areas_without_weight || [])

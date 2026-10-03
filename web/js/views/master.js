@@ -23,7 +23,7 @@
 import { h, empty, banner } from '../ui.js';
 import {
   LOCATION_NAMES, SERVING_LOCATIONS,
-  slotQuantity, fmtWeight,
+  slotQuantity, fmtWeight, bowlsText, isFault, isDegraded,
   deviceOffline, slotOffline, fmtClock, fmtDay, serviceState, mealAtLocalClock,
 } from '../domain.js';
 
@@ -86,21 +86,27 @@ export function renderMaster(state) {
   // Grouped once here rather than filtered per card: the series is one row per
   // slot per five minutes, so filtering inside the loop is quadratic over a
   // list that grows with both the fleet and the window.
+  //
+  // KEYED BY HALL AS WELL AS SLOT, because the view is. Keyed by slot alone,
+  // the three halls' points interleaved into one curve that zig-zagged between
+  // their levels every five minutes; the card draws the hall whose deadline it
+  // states.
   const series = new Map();
   for (const p of (state.series || [])) {
     if (p.total_g == null) continue;
-    const k = Number(p.food_slot);
+    const k = `${p.location}|${Number(p.food_slot)}`;
     if (!series.has(k)) series.set(k, []);
     series.get(k).push({ t: new Date(p.at_ts).getTime(), v: Number(p.total_g) });
   }
-  for (const row of rows)
-    grid.append(slotCard(row, state.devices, inService, tz, meal,
-                         burn.get(Number(row.food_slot)),
-                         series.get(Number(row.food_slot))));
+  for (const row of rows) {
+    const rate = burn.get(Number(row.food_slot));
+    grid.append(slotCard(row, state.devices, inService, tz, meal, rate,
+                         rate && series.get(`${rate.location}|${Number(row.food_slot)}`)));
+  }
   frag.append(grid);
 
   frag.append(h('div', { class: 'legend-line' },
-    h('span', {}, h('b', {}, '≥'), ' a lower bound — some bowls have no weight set'),
+    h('span', {}, h('b', {}, '≥'), ' a lower bound — part of it could not be weighed'),
     h('span', {}, h('b', { class: 'st-fault' }, '▲'), ' fault'),
     h('span', {}, h('b', { class: 'st-off' }, '✕'), ' offline'),
     h('span', {}, h('b', { class: 'st-deg' }, '◐'), ' degraded')));
@@ -130,8 +136,8 @@ function mealStrip(rows) {
   }
   return banner('info', '◷',
     h('b', {}, 'No menu for this meal. '),
-    'Bowls are counted, but there is no dish to weigh them against — enter one '
-    + 'on the Menu tab.');
+    'Stock is being measured, but there is no dish to name it against — enter '
+    + 'one on the Menu tab.');
 }
 
 /** Is this slot's figure something to act on, or something to check first?
@@ -148,10 +154,13 @@ function areaHealth(devices, loc, slot) {
   const mine = devices.filter(d => d.location === loc
     && Number(d.food_slot) === Number(slot)
     && !d.awaiting_deployment);
+  // isFault/isDegraded, not stack_status: a buffer or scale with no cell
+  // answering is as much a fault in this hall as an impossible stack, and
+  // keyed on stack_status it never marked a hall at all.
   return {
-    fault: mine.some(d => d.stack_status === 'discontiguous'),
+    fault: mine.some(isFault),
     offline: mine.some(deviceOffline),
-    degraded: mine.some(d => d.stack_status === 'degraded'),
+    degraded: mine.some(isDegraded),
   };
 }
 
@@ -192,14 +201,22 @@ function slotCard(row, devices, inService, tz, meal, rate, series) {
     fig.append(h('span', {
       class: `mrow-kg${alert ? ' is-alert' : ''}${q.partial ? ' is-bound' : ''}`,
       title: q.note || (alert
-        ? 'A stack at this position is not reporting valid data — this figure '
-          + 'is what the healthy stacks hold.'
+        ? 'A device at this position is not reporting valid data — this figure '
+          + 'is what the healthy ones hold.'
         : undefined),
     }, q.headline));
     if (q.trusted != null) {
       fig.append(h('span', { class: 'mslot-of' }, `${q.trusted} of ${q.capacity} bowls`));
+    } else if (q.bowls != null) {
+      // A buffer counts its bowls from the load steps; there is no capacity to
+      // put them out of, so the count stands alone.
+      fig.append(h('span', { class: 'mslot-of' },
+        `${bowlsText(q.bowls, q.bowlsUnconfirmed)} buffered`));
     }
-    if (q.partial) {
+    // ONLY the missing per-bowl weight has a fix on the Menu tab. A buffer or
+    // scale that is down makes the figure a bound too, but sending somebody to
+    // type a weight would not bring it back.
+    if (q.estPartial) {
       fig.append(h('a', {
         class: 'mrow-fix', href: weightLink(row, meal), title: q.note,
       }, 'Set weight ›'));
@@ -250,10 +267,18 @@ function slotCard(row, devices, inService, tz, meal, rate, series) {
 // Says how a hall's kilograms were arrived at, in the terms the view actually
 // publishes: est_weight_g is the buffered bowls, measured_weight_g is what its
 // scales weigh, and the figure on screen is their sum.
+//
+// A hall with buffer PLATFORMS (a.buffers, from migrate_buffer.sql) has its
+// buffer weighed, not estimated: a.buffer_g is that measured food, and the
+// bowls are the platform's own count rather than a figure times the Menu tab.
 export function areaWeightNote(a, bowls) {
   const kg = g => (Number(g) / 1000).toFixed(1);
-  const buf = a.est_weight_g, ctr = a.measured_weight_g;
-  const bowlPart = a.bowl_weight_g != null
+  const weighed = Number(a.buffers) > 0;
+  const buf = weighed ? a.buffer_g : a.est_weight_g, ctr = a.measured_weight_g;
+  const bowlPart = weighed
+    ? (a.buffer_bowls == null ? 'weighed on the buffer'
+       : `${bowlsText(a.buffer_bowls, a.buffer_unconfirmed)}, weighed on the buffer`)
+    : a.bowl_weight_g != null
     ? `${bowls == null ? '—' : bowls} bowls x ${kg(a.bowl_weight_g)} kg, from the Menu tab`
     : 'buffered bowls';
   const scalePart = `weighed at the counter${a.scales > 1 ? ` by ${a.scales} scales` : ''}`;
@@ -261,22 +286,26 @@ export function areaWeightNote(a, bowls) {
     return `${kg(buf)} kg buffered (${bowlPart}) + ${kg(ctr)} kg ${scalePart}.`;
   }
   if (ctr != null) return `${kg(ctr)} kg, ${scalePart}.`;
-  if (buf != null) return `${bowlPart}.`;
+  if (buf != null) return weighed ? `${kg(buf)} kg, ${bowlPart}.` : `${bowlPart}.`;
   return undefined;
 }
 
 function areaLine(a, health, showDish) {
   const bowls = a.bowls_trusted == null ? null : Number(a.bowls_trusted);
   const grams = a.weight_g == null ? null : Number(a.weight_g);
+  // Stacks count against a capacity; a buffer counts what is on it. Absent
+  // before migrate_buffer.sql, where a.buffers is undefined and this is 0.
+  const buffers = Number(a.buffers) || 0;
+  const bufBowls = a.buffer_bowls == null ? null : Number(a.buffer_bowls);
 
   // Priority mirrors severity everywhere else in this app: an impossible
   // reading outranks silence outranks a dead sensor.
   const glyph = health.fault
-      ? { cls: 'fault', g: '▲', word: 'impossible reading — check the sensors' }
+      ? { cls: 'fault', g: '▲', word: 'a reading here cannot be trusted — check the station' }
     : health.offline
       ? { cls: 'off', g: '✕', word: 'offline — this is its last known value' }
     : health.degraded
-      ? { cls: 'deg', g: '◐', word: 'a sensor is down — the count is a lower bound' }
+      ? { cls: 'deg', g: '◐', word: 'a sensor is down or not set up — this figure may be low' }
     : null;
 
   const line = h('div', { class: `marea${glyph ? ' is-alert' : ''}` });
@@ -302,11 +331,22 @@ function areaLine(a, health, showDish) {
   // 250px wide, and the verbose form wraps there — a wrapped line is taller
   // than the row it saved. The slot header above already says "of 20 bowls"
   // in full, so the context is not lost, and the tooltip spells it out.
-  line.append(h('span', {
-    class: 'marea-bowls',
-    title: bowls == null ? 'No stack here has reported'
-      : `${bowls} of ${a.bowls_capacity} bowls`,
-  }, bowls == null ? '—' : `${bowls}/${a.bowls_capacity}`));
+  // A buffer hall has no capacity to divide by, so its count stands alone:
+  // "3", or "3?" while the platform still holds a count from before a power
+  // cycle. The stack form wins while a hall still has a counted stack.
+  line.append(bowls == null && buffers
+    ? h('span', {
+        class: 'marea-bowls',
+        title: bufBowls == null ? 'No buffer here has a weight right now'
+          : `${bowlsText(bufBowls)} on the buffer`
+            + (a.buffer_unconfirmed
+                ? ' — remembered from before a power cycle, not yet confirmed' : ''),
+      }, bufBowls == null ? '—' : `${bufBowls}${a.buffer_unconfirmed ? '?' : ''}`)
+    : h('span', {
+        class: 'marea-bowls',
+        title: bowls == null ? 'No stack here has reported'
+          : `${bowls} of ${a.bowls_capacity} bowls`,
+      }, bowls == null ? '—' : `${bowls}/${a.bowls_capacity}`));
 
   // NULL is not zero, here as everywhere: a hall with nothing to weigh with
   // says what it is missing rather than printing "0.0 kg", which would read as
@@ -327,16 +367,23 @@ function areaLine(a, health, showDish) {
   //
   // The first used to render as "no weight set", which asked somebody to go
   // and configure a dish that does not exist at that hall.
+  //
+  // And "no weight set" only where there are STACKS to multiply: a buffer
+  // platform weighs its bowls, so a hall without stacks owes the Menu tab
+  // nothing and its dash means its instruments have no weight.
+  const askWeight = a.food_name != null && a.bowl_weight_g == null
+                    && Number(a.bowls_capacity) > 0;
   line.append(grams == null
     ? h('span', {
         class: 'marea-kg unset',
         title: a.food_name == null
           ? 'This hall is not serving at this position for the current meal.'
-          : a.bowl_weight_g == null
+          : askWeight
             ? 'Serving, but no kg per bowl has been entered on the Menu tab.'
-            : 'No stack here has reported.',
-      }, a.food_name == null ? 'no dish'
-         : a.bowl_weight_g == null ? 'no weight set' : '—')
+            : buffers || a.scales
+              ? 'No buffer or scale here has a weight right now.'
+              : 'No stack here has reported.',
+      }, a.food_name == null ? 'no dish' : askWeight ? 'no weight set' : '—')
     : h('span', {
         class: `marea-kg${glyph ? ' is-alert' : ''}`,
         // THE TOOLTIP HAS TO SHOW THE SUM, because the figure it is attached
@@ -417,7 +464,7 @@ function burnLine(rate, tz, series) {
          + `(${((rate.buffer_g ?? 0) / 1000).toFixed(1)} buffered `
          + `+ ${((rate.counter_g ?? 0) / 1000).toFixed(1)} on the counter)`
          + (rate.is_partial
-             ? '. Some hall’s buffer has no per-bowl weight, so this is the '
+             ? '. Part of the stock could not be weighed, so this is the '
                + 'earliest it could run out, not the likeliest.'
              : ''),
   }, ...bits);

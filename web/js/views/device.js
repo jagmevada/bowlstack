@@ -15,8 +15,9 @@ import { h, badge, empty, banner, copyText, fillSlot, cellColumn } from '../ui.j
 import { unwrap, describeError } from '../supa.js';
 import { stepChart, weightChart, statusTimeline, STATUS_STYLE } from '../chart.js';
 import {
-  batteryInfo, deviceStack, deviceWeight, isScale, deviceSeverity, deviceOffline, positionLabel,
-  serviceState, fmtRelative, fmtDateTime, fmtUptime,
+  batteryInfo, deviceStack, deviceWeight, isScale, isBuffer, isWeighed, cellsTotal,
+  deviceSeverity, deviceOffline, positionLabel,
+  serviceState, fmtRelative, fmtDateTime, fmtUptime, fmtWeight, bowlsText,
 } from '../domain.js';
 import { APP_VERSION } from '../version.js';
 
@@ -113,10 +114,12 @@ export function renderDevice(state, params, ctx) {
   // a fabricated ladder on a station whose actual reading is a single number.
   // TRIAL HARNESS: only ever appears on a scale that has actually reported an
   // estimate, so every other device and every other deployment is untouched.
+  // isScale, not isWeighed: the knob is the counter's, and trial_manual_fill
+  // filters kind = 'scale' anyway.
   const trial = isScale(dev) ? trialCard(dev, state, ctx) : null;
   if (trial) grid.append(trial);
 
-  grid.append(isScale(dev) ? weightCard(dev) : h('div', { class: 'card' },
+  grid.append(isWeighed(dev) ? weightCard(dev) : h('div', { class: 'card' },
     h('div', { class: 'chart-title' }, 'Stack now'),
     h('div', { style: 'display:flex;gap:1.2rem;align-items:center;margin-top:.5rem' },
       // ONE labelled column — f-label, cell, state word. It used to be an
@@ -177,7 +180,7 @@ export function renderDevice(state, params, ctx) {
       // "on mains" is deliberately not "yes". Plugged in is all this hardware
       // can see without the STAT wire; whether current is still flowing is
       // exactly what it cannot tell.
-      isScale(dev) ? kv('Charging', chargeText(dev, state)) : null),
+      isWeighed(dev) ? kv('Charging', chargeText(dev, state)) : null),
     h('div', { class: 'dim', style: 'font-size:.75rem;margin-top:.5rem;line-height:1.4' },
       'The band is hysteretic — it leaves a level lower than it re-enters it, so a band ',
       'that has not moved while the millivolts have is correct, not stale. There is no ',
@@ -186,9 +189,9 @@ export function renderDevice(state, params, ctx) {
   grid.append(h('div', { class: 'card' },
     h('div', { class: 'chart-title' }, 'Device'),
     h('dl', { class: 'kv', style: 'margin-top:.6rem' },
-      isScale(dev)
+      isWeighed(dev)
         ? kv('Load cells', dev.cells_online != null
-              ? `${dev.cells_online} of 3 converting` : '—')
+              ? `${dev.cells_online} of ${cellsTotal(dev)} converting` : '—')
         : kv('Sensors', dev.sensors_online != null ? `${dev.sensors_online} of 4 online` : '—'),
       kv('Firmware', dev.firmware ?? '—'),
       kv('Uptime', fmtUptime(dev.uptime_s)),
@@ -236,11 +239,13 @@ export function renderDevice(state, params, ctx) {
 
   frag.append(h('div', { class: 'section' },
     h('div', { class: 'section-head' }, h('h2', {}, 'History'),
-      h('span', { class: 'count' }, 'one row per real change — gaps are steady state')),
+      h('span', { class: 'count' }, isWeighed(dev)
+        ? 'sampled every two minutes and on every change'
+        : 'one row per real change — gaps are steady state')),
     bar, historyBox));
 
   if (!fresh) {
-    loadHistory(ctx.client, id, hours, isScale(dev))
+    loadHistory(ctx.client, id, hours, isWeighed(dev))
       .then(rows => {
         historyCache.set(cacheKey, { at: Date.now(), rows });
         historyState.rows = rows;
@@ -261,19 +266,22 @@ function kv(k, v) {
   return f;
 }
 
-async function loadHistory(client, deviceId, hours, scale = false) {
+async function loadHistory(client, deviceId, hours, weighed = false) {
   const since = new Date(Date.now() - hours * 3600_000).toISOString();
 
-  // TWO TABLES, because there are two products. A scale cannot appear in
-  // status_events at all -- five of its NOT NULL columns are bowl-shaped -- so
-  // its history lives in weight_samples. Same shape of query, same ordering,
-  // same cap.
-  if (scale) {
+  // TWO TABLES, because there are two shapes of product. A scale or a buffer
+  // cannot appear in status_events at all -- five of its NOT NULL columns are
+  // bowl-shaped -- so its history lives in weight_samples. Same shape of
+  // query, same ordering, same cap.
+  //
+  // `*`, NOT A COLUMN LIST. A buffer's rows carry bowls / bowls_confirmed /
+  // gross_g, which exist only once migrate_buffer.sql has run -- and naming a
+  // column PostgREST does not have is a 400 that blanks the whole history. `*`
+  // asks for whatever the table has, so one query serves both databases.
+  if (weighed) {
     return unwrap(await client
       .from('weight_samples')
-      .select('recorded_at, received_at, reason, seq, boot_id, weight_g, '
-            + 'weight_state, cells_online, net_counts, counts_per_gram, '
-            + 'battery_level, firmware')
+      .select('*')
       .eq('device_id', deviceId)
       .gte('recorded_at', since)
       .order('recorded_at', { ascending: false })
@@ -292,7 +300,7 @@ async function loadHistory(client, deviceId, hours, scale = false) {
 function renderHistory(rowsDesc, dev, tz, hours) {
   const frag = document.createDocumentFragment();
   if (!rowsDesc.length) {
-    frag.append(empty(isScale(dev)
+    frag.append(empty(isWeighed(dev)
       ? `No weight recorded in the last ${hours} hours. That means the station `
         + `was not powered, or supabase/migrate_weight_samples.sql has not been run.`
       : `No recorded changes in the last ${hours} hours. `
@@ -300,7 +308,7 @@ function renderHistory(rowsDesc, dev, tz, hours) {
     return frag;
   }
 
-  if (isScale(dev)) return renderWeightHistory(rowsDesc, dev, tz, hours);
+  if (isWeighed(dev)) return renderWeightHistory(rowsDesc, dev, tz, hours);
 
   const rows = [...rowsDesc].reverse();     // oldest first for plotting
   const points = rows.map(r => ({
@@ -448,7 +456,7 @@ function powerBadge(dev, state) {
   if (ext === true) return badge('good', '⚡', dev.charging === false
                                    ? 'On mains — charge complete' : 'On mains');
   if (ext === false) return badge('idle', '▮', 'On battery');
-  if (dev.charging === null && isScale(dev)) {
+  if (dev.charging === null && isWeighed(dev)) {
     return badge('idle', '?', 'Charge state unknown — no sense pin');
   }
   return '';
@@ -488,14 +496,26 @@ function weightCard(dev) {
   if (dev.net_counts != null) {
     detail.push(kv('Raw', `${Number(dev.net_counts).toLocaleString()} counts`));
   }
+  // A BUFFER'S two extra facts, each only when the row carries it: both are
+  // NULL whenever there is no weight, and a dash there is the honest answer.
+  // Unconfirmed is spelled out here because this is where somebody goes to
+  // find out why the dashboard put a ? beside the count.
+  const buffer = isBuffer(dev);
+  if (buffer) {
+    detail.push(kv('Bowls', dev.bowls == null ? '—'
+      : bowlsText(dev.bowls) + (dev.bowls_confirmed === false
+          ? ' — unconfirmed: remembered from before a power cycle' : '')));
+    detail.push(kv('Gross', dev.gross_g == null ? '—'
+      : `${fmtWeight(dev.gross_g)} (food + 2.5 kg per bowl)`));
+  }
 
   return h('div', { class: 'card' },
-    h('div', { class: 'chart-title' }, 'Counter now'),
+    h('div', { class: 'chart-title' }, buffer ? 'Buffer now' : 'Counter now'),
     h('div', { style: 'display:flex;gap:1.2rem;align-items:center;margin-top:.5rem' },
-      // Three marks, one per cell. The direct analogue of the level ladder,
-      // and round rather than rectangular so the two are not confused on a
-      // page that may show either.
-      cellColumn(dev.cells_online, 3, true),
+      // One mark per cell. The direct analogue of the level ladder, and round
+      // rather than rectangular so the two are not confused on a page that
+      // may show either.
+      cellColumn(dev.cells_online, cellsTotal(dev), true),
       h('div', {},
         h('div', {
           class: 'hero' + (stale && w.kind === 'weight' ? ' is-offline' : ''),
@@ -503,15 +523,23 @@ function weightCard(dev) {
         h('div', { class: 'muted', style: 'font-size:.82rem' },
           stale
             ? `Last known — ${fmtRelative(dev.updated_at)}${w.note ? ` · ${w.note}` : ''}`
-            : w.note || 'weighed at the counter'))),
+            : w.note || (buffer ? 'food on the buffer' : 'weighed at the counter')))),
     detail.length
       ? h('dl', { class: 'kv', style: 'margin-top:.7rem' }, ...detail)
       : null,
     h('div', { class: 'dim', style: 'font-size:.75rem;margin-top:.5rem;line-height:1.4' },
-      'Three cells under one platform, and they SUM — so a cell dropping out ',
-      'does not add noise, it makes the total read LOW. That is why fewer than ',
-      'three reports no weight at all rather than a partial one. Zero is a real ',
-      'weight: a tared, empty platform reads 0.0 kg and means refill me.'));
+      ...(buffer ? [
+        'One 200 kg cell under the platform. The figure is FOOD: the whole load ',
+        'less 2.5 kg for each bowl the platform has counted, from the steps as ',
+        'bowls go on and come off. After a power cycle the count is remembered ',
+        'but unconfirmed until the next bowl moves or the platform reads empty. ',
+        'Zero is a real weight: an empty platform reads 0.0 kg and means refill me.',
+      ] : [
+        'Three cells under one platform, and they SUM — so a cell dropping out ',
+        'does not add noise, it makes the total read LOW. That is why fewer than ',
+        'three reports no weight at all rather than a partial one. Zero is a real ',
+        'weight: a tared, empty platform reads 0.0 kg and means refill me.',
+      ])));
 }
 
 // ====================================================================
@@ -708,13 +736,14 @@ function renderWeightHistory(rowsDesc, dev, tz, hours) {
   }));
 
   const width = Math.max(300, (document.getElementById('view')?.clientWidth || 640) - 34);
+  const buffer = isBuffer(dev);
 
   frag.append(h('div', { class: 'card', style: 'margin-bottom:.7rem' },
     weightChart({
       points, tz, width,
-      title: 'Weight on this counter',
+      title: buffer ? 'Food on this buffer' : 'Weight on this counter',
       subtitle: 'Sampled every two minutes and on every change. A gap is a '
-              + 'stretch with no trustworthy weight, not an empty counter.',
+              + 'stretch with no trustworthy weight, not an empty platform.',
     })));
 
   // What the curve cannot show: how much of the window had a usable reading
@@ -727,9 +756,12 @@ function renderWeightHistory(rowsDesc, dev, tz, hours) {
       kv('With a weight', `${ok} of ${rows.length}`),
       states.length ? kv('Other states', states.join(', ')) : null)));
 
+  // A buffer's rows carry its bowl count and gross load; a counter's never do,
+  // so the two columns appear only where they can hold something.
   const table = h('table', {},
     h('thead', {}, h('tr', {},
       h('th', {}, 'Recorded'), h('th', {}, 'Reason'), h('th', { class: 'num' }, 'Weight'),
+      ...(buffer ? [h('th', { class: 'num' }, 'Bowls'), h('th', { class: 'num' }, 'Gross')] : []),
       h('th', {}, 'State'), h('th', { class: 'num' }, 'Cells'),
       h('th', { class: 'num' }, 'Raw counts'), h('th', {}, 'Battery'),
       h('th', { class: 'num' }, 'Boot/seq'), h('th', {}, 'Delay'))),
@@ -742,6 +774,12 @@ function renderWeightHistory(rowsDesc, dev, tz, hours) {
         // reading. Only a non-ok state has no number.
         h('td', { class: 'num' },
           r.weight_state === 'ok' ? `${(r.weight_g / 1000).toFixed(2)} kg` : '—'),
+        ...(buffer ? [
+          h('td', { class: 'num' }, r.bowls == null ? '—'
+            : `${r.bowls}${r.bowls_confirmed === false ? '?' : ''}`),
+          h('td', { class: 'num' }, r.gross_g == null ? '—'
+            : `${(r.gross_g / 1000).toFixed(2)} kg`),
+        ] : []),
         h('td', {}, r.weight_state),
         h('td', { class: 'num' }, r.cells_online ?? '—'),
         h('td', { class: 'num' },

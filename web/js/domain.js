@@ -126,8 +126,15 @@ export function deviceStack(dev) {
  * What to render for one DISH POSITION, which may be served by several stacks.
  * The arithmetic is the view's — `bowls_trusted` already sums only the devices
  * reporting `ok`. Nothing is re-summed here.
+ *
+ * `devs` are the device_overview rows at this position. They decide ONE thing,
+ * whether a weight is a lower bound, because the view's scales/buffers counts
+ * cannot: they include instruments that have never reported. LDC-002..024 sit
+ * assigned at every position and have never spoken, so `scales_ok < scales`
+ * would put a ≥ on every card for good -- and a unit awaiting deployment is
+ * not missing food, it is not installed.
  */
-export function slotStock(slot) {
+export function slotStock(slot, devs = []) {
   const capacity = Number(slot.bowls_capacity) || 0;
   const trusted = slot.bowls_trusted == null ? null : Number(slot.bowls_trusted);
 
@@ -153,13 +160,35 @@ export function slotStock(slot) {
   // unknown buffer as a real zero -- the same NULL-versus-zero confusion in the
   // other direction.
   const measured = slot.measured_weight_g == null ? null : Number(slot.measured_weight_g);
-  if (trusted == null && measured != null) {
+  // A BUFFER PLATFORM MEANS THE VIEW IS POST-migrate_buffer.sql, and only then
+  // is slot.weight_g NULL-not-0 and safe to read. Without one, the measured
+  // counter figure is the only weight a stack-less position has.
+  const buffered = devs.some(isBuffer);
+  if (trusted == null && (buffered || measured != null)) {
+    const grams = buffered
+      ? (slot.weight_g == null ? null : Number(slot.weight_g))
+      : measured;
+    if (grams == null) {
+      return { kind: 'nodata', capacity, trusted: null, severity: 'idle',
+               headline: 'No data',
+               note: 'No buffer or scale at this position has a weight right now.' };
+    }
+    const partial = devs.some(d => isWeighed(d) && d.reported && d.weight_state !== 'ok');
+    const bufG = slot.buffer_g == null ? null : Number(slot.buffer_g);
+    const bowls = slot.buffer_bowls == null ? null : Number(slot.buffer_bowls);
     return {
-      kind: 'counter',
-      capacity, trusted: null, measured,
+      kind: 'weight',
+      capacity, trusted: null, measured, grams, partial,
       severity: null,
-      headline: fmtWeight(measured),
-      note: 'Weighed at the counter. No bowl stack here has reported a count.',
+      headline: fmtWeight(grams, partial),
+      // The line under the figure: the buffer's bowls when there are any, which
+      // is what somebody walks over and counts by eye.
+      sub: bowls != null ? `${bowlsText(bowls, slot.buffer_unconfirmed)} buffered`
+         : measured != null && bufG == null ? 'weighed at the counter' : 'weighed',
+      note: [bufG != null ? `${fmtWeight(bufG)} in the buffer` : null,
+             measured != null ? `${fmtWeight(measured)} on the counter` : null]
+              .filter(Boolean).join(' + ') + '.'
+        + (partial ? ' A lower bound — a buffer or scale here has no weight right now.' : ''),
     };
   }
   if (trusted == null) {
@@ -199,6 +228,13 @@ export function fmtWeight(grams, partial = false) {
   return `${partial ? '≥' : ''}${kg.toFixed(1)} kg`;
 }
 
+/** "3 bowls", or "3? bowls" when a buffer remembers the count from before a
+ *  power cycle and nothing has confirmed it since -- the firmware's own word
+ *  for that is "unconfirmed", and the ? is the same doubt in one character. */
+export function bowlsText(n, unconfirmed = false) {
+  return `${n}${unconfirmed ? '?' : ''} bowl${Number(n) === 1 ? '' : 's'}`;
+}
+
 /**
  * What to render for one SLOT NUMBER across every serving area — the Master
  * Dashboard's row. The arithmetic is slot_quantity's and nothing is re-summed
@@ -224,14 +260,29 @@ export function slotQuantity(row) {
   // rather than defensiveness: a database that has had migrate_bowl_weight.sql
   // but not migrate_loadcell.sql has the estimate and no precedence column, and
   // Master should go on working there exactly as it did.
+  //
+  // ABSENT, NOT NULL. Once migrate_buffer.sql is in, weight_g is NULL when
+  // nothing at the slot has a weight -- and est_weight_g can then be a real 0
+  // (a per-bowl weight is set, no stack is left to count), so falling back on
+  // a NULL would print "0.0 kg" for a slot nobody can see. Only a database
+  // that has no weight_g column at all takes the fallback.
   const estGrams = row.est_weight_g == null ? null : Number(row.est_weight_g);
   const measGrams =
     row.measured_weight_g == null ? null : Number(row.measured_weight_g);
-  const grams = row.weight_g == null ? estGrams : Number(row.weight_g);
+  const grams = !('weight_g' in row) ? estGrams
+              : row.weight_g == null ? null : Number(row.weight_g);
 
   const capacityGrams =
     row.capacity_weight_g == null ? null : Number(row.capacity_weight_g);
-  const partial  = !!row.est_is_partial;
+  // Two reasons for a lower bound, and only the first has a fix on the Menu
+  // tab: a hall holds bowls with no per-bowl weight (est_is_partial), or a
+  // buffer or scale here is not reporting a weight (weight_is_partial, absent
+  // before migrate_buffer.sql). Never a ≥ on a NULL -- there is no bound to
+  // state when there is no figure.
+  const estPartial = !!row.est_is_partial;
+  const partial  = grams != null && (estPartial || !!row.weight_is_partial);
+  const bufMeas = row.buffer_measured_g == null ? null : Number(row.buffer_measured_g);
+  const bowls = row.buffer_bowls == null ? null : Number(row.buffer_bowls);
 
   // NO weight_source AND NO MISMATCH, and both were removed for the same
   // reason: they framed the buffer and the counter as rival answers to one
@@ -241,13 +292,16 @@ export function slotQuantity(row) {
   // contribute, and a "disagreement" between them was two correct instruments
   // being accused of a fault.
   const base = { trusted, capacity, grams, estGrams, measGrams, capacityGrams,
-                 partial };
+                 partial, estPartial, bowls,
+                 bowlsUnconfirmed: !!row.buffer_unconfirmed };
+  const lowerBound = partial
+    ? ' A lower bound — a buffer or scale here has no weight right now.' : '';
 
   if (trusted == null && grams == null) {
     // NULL is not zero — the distinction the whole schema is built around.
     // One sends someone to refill, the other to investigate.
     return { ...base, kind: 'nodata', severity: 'idle', headline: 'No data',
-      note: 'Nothing at this position has reported.' };
+      note: 'Nothing at this position has a weight or a count.' };
   }
   if (trusted == null) {
     // NO BOWL COUNT, BUT A WEIGHT — the load-cell-only position, and the case
@@ -255,9 +309,18 @@ export function slotQuantity(row) {
     // when every stack has gone dark mid-service and the scale is the only
     // thing still measuring: the old code returned 'No data' here and threw the
     // measurement away, which is the one moment it matters most.
+    //
+    // Since migrate_buffer.sql it is ALSO every buffer-platform position, which
+    // weighs its bowls rather than counting them -- so the note names whichever
+    // instruments produced the figure.
     return { ...base, kind: 'count', severity: null,
       headline: fmtWeight(grams, partial),
-      note: 'Weighed at the counter. No bowl stack here has reported a count.' };
+      note: (bufMeas != null && measGrams != null
+              ? `${fmtWeight(bufMeas)} in the buffer + ${fmtWeight(measGrams)} on the counter.`
+            : bufMeas != null ? 'Weighed in the buffer. No counter scale here has a weight.'
+            : 'Weighed at the counter.' + (Number(row.buffers) > 0 ? ''
+                : ' No bowl stack here has reported a count.'))
+        + lowerBound };
   }
   if (grams == null) {
     // Bowls are known; kilograms are not. "0.0 kg" here would be a
@@ -287,8 +350,9 @@ export function slotQuantity(row) {
     note: row.any_fault
       ? 'A stack here is reporting an impossible level pattern — this figure '
         + 'is what the remaining healthy stacks hold.'
-      : partial ? `A lower bound — ${areaList(row.areas_without_weight)} `
-                  + 'holds bowls with no per-bowl weight set.' : '' };
+      : estPartial ? `A lower bound — ${areaList(row.areas_without_weight)} `
+                     + 'holds bowls with no per-bowl weight set.'
+      : lowerBound.trim() };
 }
 
 /** "Darshanarthi and Tiffin" from ['D','T']. Only slotQuantity() needs it,
@@ -379,7 +443,34 @@ export function isDegraded(dev) {
 }
 
 export function isScale(dev) {
-  return dev && dev.kind === 'scale';
+  return !!dev && dev.kind === 'scale';
+}
+
+// THREE PRODUCTS NOW, and two of them weigh. A BUFFER is a BWL-xxx platform
+// under the bowls waiting behind the line -- one 200 kg cell, re-kinded from
+// the old ToF stack by supabase/cutover_buffers.sql -- and it reports in
+// exactly the scale's columns (weight_state first, weight_g only when 'ok'),
+// plus how many bowls it is carrying. So every screen that already knew how
+// to draw a scale takes a buffer through the same path, by asking isWeighed().
+export function isBuffer(dev) {
+  return !!dev && dev.kind === 'buffer';
+}
+
+/** Absent kind is a stack: a database from before migrate_loadcell.sql has no
+ *  column, and every device on it counts bowls. */
+export function isStack(dev) {
+  return !!dev && (dev.kind == null || dev.kind === 'stack');
+}
+
+export function isWeighed(dev) {
+  return isScale(dev) || isBuffer(dev);
+}
+
+/** Cells under one platform: the counter sums three 20 kg cells, a buffer
+ *  stands on one 200 kg cell. Per kind rather than a constant, or a buffer
+ *  with its only cell answering reads "1 of 3" -- a fault it does not have. */
+export function cellsTotal(dev) {
+  return isBuffer(dev) ? 1 : 3;
 }
 
 /**
@@ -408,14 +499,31 @@ export function deviceWeight(dev) {
   if (st === 'ok') {
     // 0 is a real weight and must render as 0.0 kg, not as a dash. An empty,
     // tared, calibrated platform means "refill me"; a dash means nobody knows.
+    //
+    // A BUFFER'S weight_g IS FOOD -- the gross load less 2.5 kg per bowl it
+    // has counted -- so the headline is what can be served, and the bowls and
+    // the gross ride the note. Each part only when the row carries it: bowls
+    // NULL says nothing about bowls rather than claiming none.
+    const note = isBuffer(dev) ? [
+      dev.bowls == null ? null
+        : bowlsText(dev.bowls) + (dev.bowls_confirmed === false ? ' (unconfirmed)' : ''),
+      dev.gross_g == null ? null : `gross ${fmtWeight(dev.gross_g)}`,
+    ].filter(Boolean).join(' · ') : '';
     return { kind: 'weight', value: dev.weight_g,
-             text: fmtWeight(dev.weight_g), note: '' };
+             text: fmtWeight(dev.weight_g), note };
   }
   const say = {
     no_cells:      ['fault', 'No load cell is answering'],
     cells_partial: ['fault', 'A load cell has dropped out — cells sum, so the total would read LOW'],
-    over_range:    ['fault', 'A converter is saturated — the total is not a weight'],
-    settling:      ['idle',  'Taking its power-up zero'],
+    over_range:    ['fault', isBuffer(dev)
+      // The buffer firmware also reports this when the food figure falls
+      // below -5 kg: more bowls counted than are on it, not a saturated cell.
+      ? 'Out of range — the cell is saturated, or more bowls are counted than are on it'
+      : 'A converter is saturated — the total is not a weight'],
+    // A buffer takes no power-up zero (its empty zero is stored), so settling
+    // there is only the first readings arriving.
+    settling:      ['idle',  isBuffer(dev) ? 'Waiting for steady readings'
+                                           : 'Taking its power-up zero'],
     uncalibrated:  ['idle',  'Never calibrated — it has counts, not kilograms'],
     untared:       ['idle',  'Not tared — the figure would include the platform'],
   }[st] || ['idle', st];
@@ -427,7 +535,7 @@ export function deviceGlyph(d) {
   // A scale has no levels and no stack status, so the bowl-counter ladder
   // below would read every one of them as "no reading" -- a grey ring on a
   // station that is weighing perfectly well.
-  if (isScale(d)) {
+  if (isWeighed(d)) {
     const w = deviceWeight(d);
     if (deviceOffline(d))
       return { cls: 'off', glyph: '✕', word: 'offline — showing its last value' };
@@ -464,7 +572,7 @@ export function deviceSeverity(dev) {
   // Liveness and battery above are true of any device. What follows is
   // product-specific, and running the bowl-counter tests over a scale is how
   // a perfectly healthy load cell acquires "0 of 4 sensors online".
-  if (isScale(dev)) {
+  if (isWeighed(dev)) {
     if (dev.battery_level === 'critical') { rank = Math.max(rank, 80); reasons.push('Battery critical'); }
     if (dev.battery_level === 'low') { rank = Math.max(rank, 60); reasons.push('Battery low'); }
     if (dev.weight_state === 'no_cells') {
@@ -474,15 +582,15 @@ export function deviceSeverity(dev) {
       // missing cell does not add noise -- it makes the total read LOW, which
       // looks exactly like a lighter bowl and is the harder failure to notice.
       rank = Math.max(rank, 88);
-      reasons.push(`${dev.cells_online ?? '?'} of 3 cells — the total would read low`);
+      reasons.push(`${dev.cells_online ?? '?'} of ${cellsTotal(dev)} cells — the total would read low`);
     } else if (dev.weight_state === 'over_range') {
-      rank = Math.max(rank, 86); reasons.push('Converter saturated — not a weight');
+      rank = Math.max(rank, 86); reasons.push(deviceWeight(dev).note);
     } else if (dev.weight_state === 'uncalibrated') {
       rank = Math.max(rank, 45); reasons.push('Never calibrated — counts, not kilograms');
     } else if (dev.weight_state === 'untared') {
       rank = Math.max(rank, 40); reasons.push('Not tared — the figure includes the platform');
     } else if (dev.weight_state === 'settling') {
-      rank = Math.max(rank, 15); reasons.push('Taking its power-up zero');
+      rank = Math.max(rank, 15); reasons.push(deviceWeight(dev).note);
     }
     if (dev.battery_mv == null && dev.battery_level == null) {
       rank = Math.max(rank, 20); reasons.push('No battery detected');
@@ -555,7 +663,7 @@ export function fleetSummary(devices) {
     // is the ToF array's four-up count; a scale has three cells and does not
     // populate it, so an unguarded `< 4` would have called every load cell
     // sensor-down the moment the column existed.
-    if (isScale(d) ? false : (d.sensors_online != null && d.sensors_online < 4)) s.sensorsDown++;
+    if (isWeighed(d) ? false : (d.sensors_online != null && d.sensors_online < 4)) s.sensorsDown++;
     if (d.in_service) s.inService++;
     // "Reporting" means TALKING: not flagged by either server offline flag.
     // The old count was `d.reported` — has EVER reported — which among

@@ -14,7 +14,7 @@
 import { h, empty, banner, batteryBar } from '../ui.js';
 import {
   LOCATION_NAMES, SERVING_LOCATIONS, MAX_BOWLS, slotStock, deviceStack,
-  deviceWeight, isScale, deviceSeverity,
+  deviceWeight, isWeighed, isStack, deviceSeverity,
   deviceGlyph, deviceOffline, slotOffline, weekdayOf, serviceDate,
   fmtClock, fmtRelative, serviceState, fmtWeight,
   powerState,
@@ -105,7 +105,13 @@ export function renderStock(state) {
     frag.append(h('section', { class: `area area-${loc}` },
       h('div', { class: 'area-head' },
         h('h2', {}, LOCATION_NAMES[loc] || loc),
-        h('span', { class: 'dim area-sub' }, `${totalTrusted} of ${totalCap} bowls across ${rows.length} positions`)),
+        // No bowl capacity means no stacks left here -- the buffers weigh
+        // rather than count -- and "0 of 0 bowls" would read as an empty hall.
+        // Nor a kilogram total in its place: rice plus dal is not a quantity
+        // anybody acts on (see master.js).
+        h('span', { class: 'dim area-sub' }, totalCap
+          ? `${totalTrusted} of ${totalCap} bowls across ${rows.length} positions`
+          : `${rows.length} positions`)),
       grid));
   }
 
@@ -113,7 +119,7 @@ export function renderStock(state) {
 }
 
 function slotCard(power, sl, stacks, inService, tz, template) {
-  const stock = slotStock(sl);
+  const stock = slotStock(sl, stacks);
 
   // The server's flags are the authority; the per-device rows only quantify
   // the wording. Never derived from updated_at.
@@ -158,13 +164,19 @@ function slotCard(power, sl, stacks, inService, tz, template) {
   if (stock.kind === 'fault') {
     card.append(h('div', { class: 'slot-figure' },
       h('span', { class: 'slot-fault' }, '▲ Check station')));
-  } else if (stock.kind === 'counter') {
-    // WEIGHED, WITH NO BOWL COUNT. Deliberately not folded into the branch
-    // below: that one builds its bowl line from stock.trusted, which is null
-    // here, and would render the kilograms over a line reading ">=null".
+  } else if (stock.kind === 'weight') {
+    // WEIGHED, WITH NO BOWL COUNT -- a buffer platform, a counter scale, or
+    // both. Deliberately not folded into the branch below: that one builds its
+    // bowl line from stock.trusted, which is null here, and would render the
+    // kilograms over a line reading ">=null". Red follows the same rule as the
+    // count below; the ≥ says a buffer or scale here is not weighing.
     card.append(h('div', { class: 'slot-figure' },
-      h('span', { class: 'slot-kg' }, fmtWeight(stock.measured)),
-      h('span', { class: 'slot-of' }, 'weighed, no bowl count')));
+      h('span', {
+        class: `slot-kg${compromised ? ' is-alert' : ''}`,
+        title: (anyOffline ? 'A device here stopped reporting during service — '
+                             + 'this is its last known figure. ' : '') + stock.note,
+      }, stock.headline),
+      h('span', { class: 'slot-of' }, stock.sub)));
   } else if (stock.kind === 'nodata') {
     card.append(h('div', { class: 'slot-figure' },
       h('span', { class: 'slot-nodata' }, 'No data')));
@@ -224,19 +236,24 @@ function slotCard(power, sl, stacks, inService, tz, template) {
   //   grey track     confirmed empty space
   // Three stacks with one offline: a third of the bar is striped, and the
   // reader knows exactly how much of the figure to trust.
-  {
-    const capacity = Number(sl.bowls_capacity) || (stacks.length * MAX_BOWLS);
-    const bad = stacks.filter(d => deviceOffline(d)
+  //
+  // BOWL STACKS ONLY. Every device here used to count, so an offline counter
+  // scale striped four bowls of capacity it never had -- and a buffer platform
+  // has no capacity in bowls at all. A position with no stack gets no bar.
+  const bowlDevs = stacks.filter(isStack);
+  if (Number(sl.bowls_capacity) > 0 || bowlDevs.length) {
+    const capacity = Number(sl.bowls_capacity) || (bowlDevs.length * MAX_BOWLS);
+    const bad = bowlDevs.filter(d => deviceOffline(d)
       || d.stack_status === 'degraded' || d.stack_status === 'discontiguous'
       || (d.reported && d.sensors_online === 0));
-    const confirmed = stacks
+    const confirmed = bowlDevs
       .filter(d => !bad.includes(d) && d.reported && d.stack_status === 'ok')
       .reduce((n, d) => n + (d.stack_count ?? 0), 0);
     // Fallback when the per-device rows are not in yet: trust the server
     // aggregates — all-or-nothing striping is still honest.
-    const invalidCap = stacks.length ? bad.length * MAX_BOWLS
+    const invalidCap = bowlDevs.length ? bad.length * MAX_BOWLS
       : (slotOffline(sl) || sl.any_degraded || sl.any_fault ? capacity : 0);
-    const validFill = stacks.length ? confirmed
+    const validFill = bowlDevs.length ? confirmed
       : (invalidCap ? 0 : Math.max(0, Number(stock.trusted ?? 0)));
 
     const pctFill = capacity ? Math.min(100, (validFill / capacity) * 100) : 0;
@@ -267,7 +284,7 @@ function slotCard(power, sl, stacks, inService, tz, template) {
   if (stacks.length) {
     const strip = h('div', { class: 'dev-strip' });
     for (const d of stacks.sort((a, b) => a.device_id.localeCompare(b.device_id))) {
-      const st = isScale(d) ? deviceWeight(d) : deviceStack(d);
+      const st = isWeighed(d) ? deviceWeight(d) : deviceStack(d);
       const g = deviceGlyph(d);
       // THE TOOLTIP SAID "battery good" ON A UNIT THAT WAS PLUGGED IN, because
       // it appended the charge state only when `charging` was truthy -- and

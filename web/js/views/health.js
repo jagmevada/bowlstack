@@ -17,18 +17,18 @@
 
 import { h, empty, levelColumn, cellColumn, banner, batteryBar } from '../ui.js';
 import {
-  compareDevices, deviceSeverity, deviceStack, deviceGlyph, deviceWeight, isScale,
-  isFault, isDegraded,
+  compareDevices, deviceSeverity, deviceStack, deviceGlyph, deviceWeight, isWeighed,
+  cellsTotal, isFault, isDegraded,
   deviceOffline, fmtRelative,
   powerState,
 } from '../domain.js';
 
 // `fault` and `degraded` are DIFFERENT failures and get different filters —
 // they used to share one, so the "1 faults" chip opened a 3-row list.
-//   fault     the sensors all answer, but the reading is physically
-//             impossible (a bowl above an empty level — bowls are stacked,
-//             f2 cannot exist without f1). Mount/obstruction/sensor lying.
-//   degraded  a sensor itself is down, so the count is a lower bound.
+//   fault     the reading cannot be trusted at all: a stack's impossible level
+//             pattern, or a load cell not answering or saturated.
+//   degraded  the reading is a lower bound or unproven: a stack sensor down,
+//             or a scale not calibrated or tared. See isFault/isDegraded.
 const FILTERS = {
   all:      { label: 'All', test: () => true },
   problems: { label: 'Needs attention', test: d => !d.awaiting_deployment && deviceSeverity(d).rank >= 50 },
@@ -195,7 +195,7 @@ function miniLevels(levels) {
 // the old behaviour after the Power card was fixed.
 function deviceRow(d, power) {
   const sev = deviceSeverity(d);
-  const scale = isScale(d);
+  const scale = isWeighed(d);   // a counter scale or a buffer platform
   // Same six columns whichever product this is, so the roster stays a single
   // scannable grid -- only what column 4 and 5 CONTAIN differs. A scale that
   // laid itself out differently would break the alignment the whole page is.
@@ -228,7 +228,7 @@ function deviceRow(d, power) {
     h('span', { class: 'devc-pos' },
       d.location != null && d.food_slot != null ? `${d.location}${d.food_slot}`
         : d.location != null ? d.location : '—'),
-    scale ? cellColumn(d.cells_online) : miniLevels(d.levels),
+    scale ? cellColumn(d.cells_online, cellsTotal(d)) : miniLevels(d.levels),
     // Red only where there IS a last value to redden — the fault (`!`) and
     // never-reported (`—`) renderings are not counts, so the `na` grey owns
     // them and the offline red must not touch them.
