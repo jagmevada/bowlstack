@@ -26,7 +26,9 @@ A/B/C cell rows leave the main page (Diagnose keeps them).
 | --- | --- | --- |
 | 0 | cleanup; V1.10 field-trial code committed as a baseline (`9909e20`) | done |
 | 1 | `include/load_scale.h`, `src/loadcell/load_scale.cpp` — Arduino-free core (filter + step detection, bowl tracker, zero/calibrate, weight_state) with host tests: `bash tools/host_test/run.sh` | 61/61 pass |
-| 2 | buffer bank (replaces `buffer_scale.*`): N scales from a config table, I2C bus recovery + verified writes, panel GUI, Settings › Buffers | next |
+| 2a | buffer bank (`src/loadcell/buffer_bank.cpp`, replaces `buffer_scale.*`): B1..B3 from a config table (`:buf` console), bus clear + verified bring-up, B1 calibration imported — V1.11, `0e3a152` | done; 1000/1000 reads, 5/5 resets up (one on attempt 2 — post-reset fault contained, cause not found) |
+| 2b | panel: total = counter + buffers, rows `C1`/`B1..B3`, A/B/C off the main page; Settings › Buffers (zero / calibrate / bowls); sim screenshots (`BOWLSTACK_SIM_SHOT`) — V1.13, `b01a82e` | done in sim + console; **not yet seen on the glass**; bowls-on-empty bug found on bench and fixed (65/65 host tests) |
+| 2c | on-glass check by the user; real bowl test (≥10 kg load/unload, power cycle with bowls on); recalibrate B1 with ≥20 kg | next |
 | 3 | Supabase `migrate_buffer.sql` / rollback (kind `buffer`, 250 kg rail, kind guard, views) | |
 | 4 | upload: per-device channel refactor of `scale_telemetry` (counter JSON must stay byte-identical) | |
 | 5 | cut-over of BWL-001 (stop other writers, re-kind, enable upload) | |
