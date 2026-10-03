@@ -133,9 +133,12 @@ uint8_t cycleWindow();
 uint8_t windowTrim();
 
 // --- how many decimals the reading carries ---------------------------------
-// 0.0 kg, 0.00 kg or 0.000 kg. DISPLAY ONLY: nothing computes from it, the
-// stored counts and the calibration are untouched, and the Diagnose page keeps
-// its full three places whatever this says.
+// 0.0 kg or 0.00 kg, for every platform on the dashboard at once. The third
+// place went when 200 kg buffers joined the same page: a gram on a buffer is
+// noise, and one column of figures should not mix precisions. DISPLAY ONLY:
+// nothing computes from it, the stored counts and the calibration are
+// untouched, and the Diagnose page keeps its full three places whatever this
+// says.
 //
 // IT IS A SETTING BECAUSE THE HONEST ANSWER DEPENDS ON THE ASSEMBLY, not on the
 // converter. At the bench figure of ~104 counts/g, a still platform's
@@ -163,13 +166,13 @@ uint8_t windowTrim();
 // third category, and the third category is how the simulator stops being
 // evidence.
 #ifndef BOWLSTACK_DECIMALS
-#define BOWLSTACK_DECIMALS 3
+#define BOWLSTACK_DECIMALS 1
 #endif
-static_assert(BOWLSTACK_DECIMALS >= 1 && BOWLSTACK_DECIMALS <= 3,
-              "BOWLSTACK_DECIMALS must be 1, 2 or 3");
+static_assert(BOWLSTACK_DECIMALS >= 1 && BOWLSTACK_DECIMALS <= 2,
+              "BOWLSTACK_DECIMALS must be 1 or 2");
 
-static const uint8_t DECIMAL_CHOICES[] = {1, 2, 3};
-static const uint8_t DECIMAL_CHOICE_COUNT = 3;
+static const uint8_t DECIMAL_CHOICES[] = {1, 2};
+static const uint8_t DECIMAL_CHOICE_COUNT = 2;
 static const uint8_t DECIMALS_DEFAULT = BOWLSTACK_DECIMALS;
 
 uint8_t decimals();
@@ -179,7 +182,7 @@ uint8_t decimals();
 // script must not be able to put the display somewhere the UI cannot describe.
 void setDecimals(uint8_t d);
 
-// Steps 1 -> 2 -> 3 -> 1, for a menu row that is tapped. Returns the new value.
+// Steps 1 -> 2 -> 1, for a menu row that is tapped. Returns the new value.
 uint8_t cycleDecimals();
 
 // --- the per-cell breakdown on the dashboard -------------------------------

@@ -530,7 +530,9 @@ void loadPersisted() {
   window_n_ = prefs_.getUChar(KEY_WINDOW, (uint8_t)BOWLSTACK_AVG_WINDOW);
   if (window_n_ < 4 || window_n_ > WINDOW_MAX) window_n_ = BOWLSTACK_AVG_WINDOW;
   decimals_ = prefs_.getUChar(KEY_DECIMALS, DECIMALS_DEFAULT);
-  if (decimals_ < 1 || decimals_ > 3) decimals_ = DECIMALS_DEFAULT;
+  // A 3 stored by older firmware is no longer a choice; it falls back to the default.
+  if (decimals_ < DECIMAL_CHOICES[0] || decimals_ > DECIMAL_CHOICES[DECIMAL_CHOICE_COUNT - 1])
+    decimals_ = DECIMALS_DEFAULT;
   showCells_ = prefs_.getBool(KEY_SHOWCELLS, false);
   calMass_ = prefs_.getFloat(KEY_CALMASS, (float)BOWLSTACK_CAL_MASS_G);
   if (calMass_ < MIN_CAL_GRAMS) calMass_ = (float)BOWLSTACK_CAL_MASS_G;

@@ -2,7 +2,7 @@
 // Bowlstack :: load-cell station -- Waveshare ESP32-S3-Touch-LCD-2,
 //              3x NAU7802 behind a TCA9548A
 //
-// Firmware: V1.17 261003
+// Firmware: V1.18 261003
 //
 // Also carries the 200 kg buffer-stock cell on its own bus (IO21/IO16) -- see
 // buffer_bank.h. It is a separate instrument: nothing below sums it into the
@@ -687,6 +687,10 @@ void onCycleAvg() {
   Serial.printf("ui: averaging -> %u samples\n", scale::cycleWindow());
 }
 
+void onCyclePrecision() {
+  Serial.printf("ui: dashboard -> %u decimals\n", scale::cycleDecimals());
+}
+
 // --- Settings > Buffers -------------------------------------------------------------
 // Each only QUEUES work for the buffer bank's task (zero and factor are written to
 // NVS there and nowhere else); the outcome comes back on the next snapshot as that
@@ -1034,8 +1038,8 @@ void serviceConsole() {
             "         says the battery switch is still on when the display\n"
             "         has blanked\n"
             "  w      step the moving average 8 -> 16 -> 32 -> 64 -> 128 -> 8\n"
-            "  d      step the reading 0.0 -> 0.00 -> 0.000 kg -> 0.0 (display\n"
-            "         only; Diagnose keeps all three places whatever this says)\n"
+            "  d      dashboard 0.0 <-> 0.00 kg, stored (= Settings > Precision;\n"
+            "         display only, Diagnose keeps all three places)\n"
             "  p      build every settings page now and print the LVGL pool before\n"
             "         and after -- the most a session can ask of it\n"
             "\n  Order matters: tare on an EMPTY platform, then put the mass on,\n"
@@ -1241,6 +1245,7 @@ void setup() {
   ui::pagesOnScaleTare(onTare);
   ui::pagesOnScaleClearCal(onClearCal);
   ui::pagesOnScaleCycleAvg(onCycleAvg);
+  ui::pagesOnCyclePrecision(onCyclePrecision);
   ui::pagesOnVesselApply(onVesselApply);
   ui::pagesOnScaleRestore(onRestoreDefault);
   ui::pagesOnBufferZero(onBufZero);

@@ -64,8 +64,9 @@ void pagesOnScaleCycleAvg(void (*cb)(void));
 // to 250 g of error into every reading the trial exists to measure.
 void pagesOnVesselApply(void (*cb)(float grams));
 
-// (pagesOnScaleCyclePrecision is gone: the dashboard shows every platform to one
-// decimal, so the Precision row had nothing left to change. See ui_pages.cpp.)
+// Settings > Precision: steps the dashboard between 0.0 and 0.00 kg. The firmware
+// persists it; the row's hint reads ScaleView::decimals back.
+void pagesOnCyclePrecision(void (*cb)(void));
 
 // Loads the factor the firmware was built with and persists it as this unit's
 // own. It is what lets "Clear calibration" mean cleared: without a deliberate

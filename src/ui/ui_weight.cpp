@@ -155,11 +155,11 @@ void formatKg(char *buf, uint32_t len, float grams, uint8_t decimals) {
            a % perKg);
 }
 
-// ONE DECIMAL EVERYWHERE ON THIS PAGE. The counter's third decimal was a gram on a
-// 20 kg cell; with 200 kg buffer platforms on the same page a mixed precision would
-// make a column of figures that cannot be compared at a glance, and 0.1 kg is
-// already finer than a serving. (Diagnose keeps every place.)
-const uint8_t DECIMALS = 1;
+// ONE PRECISION FOR EVERY FIGURE ON THIS PAGE, 0.0 or 0.00 kg (Settings > Precision,
+// stored in NVS). Mixed precisions would make a column that cannot be compared at a
+// glance, and the third place -- a gram on a 20 kg cell -- is noise on a 200 kg
+// buffer. Anything else in the field reads as one place. (Diagnose keeps every place.)
+uint8_t pageDecimals(const ScaleView &s) { return s.decimals == 2 ? 2 : 1; }
 
 }  // namespace
 
@@ -427,7 +427,7 @@ void updateWeight(const State &st) {
     setTotalColor(C_MUTED);
     setIfChanged(lblCaption, prevCaption_, sizeof(prevCaption_), "total, kg");
   } else {
-    formatKg(buf, sizeof(buf), t.grams, DECIMALS);
+    formatKg(buf, sizeof(buf), t.grams, pageDecimals(s));
     setIfChanged(lblTotal, prevTotal_, sizeof(prevTotal_), buf);
     setTotalColor(C_TEXT);
     // "AT LEAST", NOT "TOTAL", WHEN SOMETHING IS LEFT OUT. A platform with no weight
@@ -464,7 +464,7 @@ void updateWeight(const State &st) {
 
     uint32_t col;
     if (r.kgKnown) {
-      formatKg(buf, sizeof(buf), r.grams, DECIMALS);
+      formatKg(buf, sizeof(buf), r.grams, pageDecimals(s));
       const size_t n = strlen(buf);
       snprintf(buf + n, sizeof(buf) - n, " kg");
       // A partial figure is real and is in the total -- drawn in the caveat colour,

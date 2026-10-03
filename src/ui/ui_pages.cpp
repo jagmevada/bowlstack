@@ -82,6 +82,7 @@ uint8_t depth_ = 0;
 void (*onTare_)(void) = nullptr;
 void (*onClearCal_)(void) = nullptr;
 void (*onCycleAvg_)(void) = nullptr;
+void (*onCyclePrecision_)(void) = nullptr;
 void (*onRestore_)(void) = nullptr;
 void (*onPlatformZero_)(void) = nullptr;
 // The buffer platforms' commands, by slot. Installed by the firmware; null in the
@@ -114,17 +115,17 @@ uint8_t calSlot_ = 0;
 // puts the two things a reader has to keep in step within a screen of each
 // other.
 //
-// TWO ROWS LEFT AND ONE ARRIVED with the per-platform dashboard. Precision and
-// "Cells on home" both configured the old dashboard -- its decimal places and its
-// A/B/C rows -- and that page now draws neither (one decimal, platform rows), so a
-// row that changed nothing visible was removed rather than left lying. Buffers is
-// new, between Scale and Diagnose. Every index below them moved, which is exactly
-// the change the paragraph above is about.
+// THE ROWS MOVED TWICE with the per-platform dashboard. "Cells on home" left (the
+// page draws no A/B/C rows), Buffers arrived between Scale and Diagnose, and
+// Precision left and came back after it -- 0.0 or 0.00 kg for every platform.
+// Every index below each change moved, which is exactly what the paragraph above
+// is about.
 enum : uint8_t {
   ROW_SET_WIFI = 0,
   ROW_SET_BATTERY,
   ROW_SET_SCALE,
   ROW_SET_BUFFERS,
+  ROW_SET_PRECISION,
   ROW_SET_DIAGNOSE,
   ROW_SET_DEFAULT_PAGE,  // TRIAL HARNESS
 };
@@ -181,6 +182,7 @@ void doTare() {
 }
 void doClearCal() { if (onClearCal_) onClearCal_(); }
 void doCycleAvg() { if (onCycleAvg_) onCycleAvg_(); }
+void doCyclePrecision() { if (onCyclePrecision_) onCyclePrecision_(); }
 void doRestore() { if (onRestore_) onRestore_(); }
 // Home afterwards, for doTare()'s reason: the weight page is the confirmation. An
 // empty platform already reading 0.045 kg shows "0.0kg" before and after, so a
@@ -603,10 +605,11 @@ void buildPages() {
   // its tare, its raw conversions and its rate. All of it is real information
   // and none of it belongs on a screen read at a glance by somebody carrying a
   // bowl; it is read deliberately, by somebody who came looking for it.
+  // 0.0 or 0.00 kg for every figure on the dashboard -- one precision for the whole
+  // column (see ui_weight.cpp). Stored in NVS on the scale task. Above Diagnose,
+  // whose order matches ROW_SET_*.
+  menuAddRow(settingsMenu_, "Precision", nullptr, doCyclePrecision);
   menuAddRow(settingsMenu_, "Diagnose", nullptr, openDevice);
-  // NO PRECISION ROW ANY MORE. It set the dashboard's decimal places, and the
-  // dashboard now shows every platform to one decimal so a column of figures can be
-  // compared at a glance (see ui_weight.cpp). Diagnose still shows every place.
   // TRIAL HARNESS. Which page the device returns to when left alone and which
   // one it opens on after a power cycle.
   menuAddRow(settingsMenu_, "Default page", nullptr, doCycleDefaultPage);
@@ -729,6 +732,7 @@ void pagesOnCycleDefaultPage(void (*cb)(void)) { onCycleDefaultPage_ = cb; }
 void pagesOnScaleTare(void (*cb)(void)) { onTare_ = cb; }
 void pagesOnScaleClearCal(void (*cb)(void)) { onClearCal_ = cb; }
 void pagesOnScaleCycleAvg(void (*cb)(void)) { onCycleAvg_ = cb; }
+void pagesOnCyclePrecision(void (*cb)(void)) { onCyclePrecision_ = cb; }
 void pagesOnVesselApply(void (*cb)(float)) { vesselOnApply(cb); }
 void pagesOnScaleRestore(void (*cb)(void)) { onRestore_ = cb; }
 void pagesOnScalePlatformZero(void (*cb)(void)) { onPlatformZero_ = cb; }
@@ -808,6 +812,7 @@ void pagesTick(uint32_t nowMs) {
     if (nf == 0) snprintf(fitted, sizeof(fitted), "none");
     else snprintf(fitted, sizeof(fitted), "%u fitted", nf);
     menuSetHint(settingsMenu_, ROW_SET_BUFFERS, fitted);
+    menuSetHint(settingsMenu_, ROW_SET_PRECISION, s.scale.decimals == 2 ? "0.00 kg" : "0.0 kg");
     menuSetHint(settingsMenu_, ROW_SET_DEFAULT_PAGE, s.defaultPage == 1 ? "Knob" : "Weight");
   }
 
