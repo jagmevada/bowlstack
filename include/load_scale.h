@@ -65,7 +65,10 @@ struct FilterConfig {
 
 struct BowlConfig {
   float dryG = 2500.0f;           // one empty buffer bowl
-  float eventMinG = 10000.0f;     // a jump this size or more is bowls, not food
+  // a jump this size or more is bowls, not food -- and the lightest a counted bowl can
+  // weigh. 14 kg (owner, 2026-10-04; was 10): the lightest real bowl is ~16.5 kg on the
+  // platform, and a 10-14 kg lean or leg is not a bowl.
+  float eventMinG = 14000.0f;
   // and it must hold this long before it counts. 2.5 s, not the original 5: the owner's
   // ceiling is 3-4 s from a bowl going on to the count changing (2026-10-04), and the
   // band below is what keeps a leg or a lean from counting, not the length.

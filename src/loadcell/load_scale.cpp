@@ -148,8 +148,8 @@ bool Filter::add(int32_t raw, int32_t stepThresholdCounts) {
 // =================================================================================
 //
 // THE RULE, as the kitchen states it: a buffer bowl's dry mass is 2.5 kg. When the
-// settled weight jumps by 10 kg or more and holds for 2.5 s, bowls were loaded onto
-// the stack; when it falls by 10 kg or more and holds, bowls were taken off. The
+// settled weight jumps by 14 kg or more and holds for 2.5 s, bowls were loaded onto
+// the stack; when it falls by 14 kg or more and holds, bowls were taken off. The
 // food on the shelf is the gross weight minus 2.5 kg per bowl.
 //
 // HOW "HOLDS FOR 5 s" IS JUDGED: a RUN is the longest recent stretch of settled
@@ -159,7 +159,7 @@ bool Filter::add(int32_t raw, int32_t stepThresholdCounts) {
 // first becomes stable, against the previous level.
 //
 // SMALL CHANGES MOVE THE REFERENCE. Food being taken from a bowl, or a lid going
-// on, settles at a new level less than 10 kg away; the reference follows it. Without
+// on, settles at a new level less than 14 kg away; the reference follows it. Without
 // that, minutes of slow consumption would add up to a phantom "unload".
 //
 // HOW MANY BOWLS: round(jump / typical full bowl), at least one. The typical figure
@@ -169,10 +169,10 @@ bool Filter::add(int32_t raw, int32_t stepThresholdCounts) {
 //
 // WHAT IT REFUSES TO CLAIM: after a power cycle the count is remembered but marked
 // unconfirmed, because the stack may have changed while the unit was off. It is
-// confirmed again by the first settled level the count FITS (10-20.5 kg a bowl,
+// confirmed again by the first settled level the count FITS (14-20.5 kg a bowl,
 // re-estimated if it does not -- nobody at the buffer touches the panel), by the next
 // load/unload, by a settled empty platform (which IS a count of zero), or by an
-// operator. Under 10 kg the weight cannot decide, so "?" stays until one of the others.
+// operator. Under 14 kg the weight cannot decide, so "?" stays until one of the others.
 
 void BowlTracker::configure(const BowlConfig &c) {
   cfg_ = c;
@@ -245,13 +245,32 @@ BowlChange BowlTracker::update(uint32_t nowMs, float g) {
   // reset -- and not a reference, or the recovery would count as a load from -3 kg.
   if (level < -cfg_.emptyBelowG) return out;
 
+  // --- how many bowls a weight is --------------------------------------------------
+  // THE FEWEST BOWLS THAT CAN BE IT, at typical_ (17 kg, the owner's figure) to
+  // typicalFullMaxG (20.5 kg) a bowl, +/- inconsistentG. round(x / 17 kg) alone counted
+  // three 20 kg bowls (60 kg) as 4 (owner, 2026-10-04); the fewest that fit is 3, and
+  // for every bowl of 14-18 kg of food (16.5-20.5 kg on the platform) up to 4 at once
+  // this gives the true count. A weight between two ranges (4 x 16.5 = 66 kg, under
+  // 4 x 17) falls back to round(x / 17 kg), which is right there.
+  const auto fits = [&](long n, float x) {
+    return x >= (float)n * typical_ - cfg_.inconsistentG &&
+           x <= (float)n * cfg_.typicalFullMaxG + cfg_.inconsistentG;
+  };
+  const auto howMany = [&](float x) -> long {
+    for (long n = 1; n <= cfg_.maxBowls; n++)
+      if (fits(n, x)) return n;
+    long n = lroundf(x / typical_);
+    if (n < 1) n = 1;
+    if (n > cfg_.maxBowls) n = cfg_.maxBowls;
+    return n;
+  };
+
   // --- judge the newly stable level -------------------------------------------------
   if (haveRef_) {
     const float step = level - ref_;
     const float mag = step < 0 ? -step : step;
     if (mag >= cfg_.eventMinG) {
-      long n = lroundf(mag / typical_);
-      if (n < 1) n = 1;
+      const long n = howMany(mag);
       out.stepG = step;
       if (step > 0) {
         out.event = BowlEvent::Loaded;
@@ -299,15 +318,10 @@ BowlChange BowlTracker::update(uint32_t nowMs, float g) {
   // confirmed, and a bowl taken off later left "0 bowls" over 37.6 kg. Load/unload
   // events are RELATIVE -- a wrong base stays wrong forever -- so only the weight can
   // anchor the count. On every settled level the count is checked against it: kept if
-  // the weight is plausible for it, else re-estimated as gross / one full bowl and
-  // marked unconfirmed, since that is an estimate. PLAUSIBLE IS eventMinG..
-  // typicalFullMaxG A BOWL (+/- inconsistentG): the floor is the smallest step this
-  // tracker counts as a bowl at all, so a light bowl it counted correctly is never
-  // "corrected" down (4 x 12.5 kg loaded one at a time stays 4); the ceiling is the
-  // heaviest full bowl, and it is the side that catches the field cases. This is an
-  // estimate. Changed only if the estimate differs, so one heavy bowl a little over the
-  // band is not flagged for nothing. Below eventMinG the weight cannot tell a light
-  // bowl from loose food, so the count stands there (the dry-mass limit below applies).
+  // the weight fits it (fits() above), else replaced by howMany(). Changed only if
+  // that differs, so a bowl a little outside the band is not flagged for nothing.
+  // Below eventMinG the weight cannot tell a light bowl from loose food, so the count
+  // stands there (the dry-mass limit below applies).
   //
   // AND THE WEIGHT IS WHAT CONFIRMS IT (owner, 2026-10-04: "it should be automatic").
   // A count the weight fits is confirmed -- after a power cycle that takes one settled
@@ -316,21 +330,15 @@ BowlChange BowlTracker::update(uint32_t nowMs, float g) {
   // the weight does not fit (one bowl a little heavier than typicalFullMaxG) is not
   // un-confirmed: the load event that counted it saw it go on.
   if (level >= cfg_.eventMinG) {
-    const auto fits = [&](long n) {
-      return level >= (float)n * cfg_.eventMinG - cfg_.inconsistentG &&
-             level <= (float)n * cfg_.typicalFullMaxG + cfg_.inconsistentG;
-    };
-    if (!fits(bowls_)) {
-      long n = lroundf(level / typical_);
-      if (n < 1) n = 1;
-      if (n > cfg_.maxBowls) n = cfg_.maxBowls;
+    if (!fits(bowls_, level)) {
+      const long n = howMany(level);
       if ((uint8_t)n != bowls_) {
         out.event = BowlEvent::Estimated;
         out.delta = (int8_t)(n - (long)bowls_);
         bowls_ = (uint8_t)n;
       }
     }
-    if (fits(bowls_)) confirmed_ = true;
+    if (fits(bowls_, level)) confirmed_ = true;
   }
 
   // --- an empty platform is a count of zero, and a confirmed one --------------------
@@ -344,7 +352,7 @@ BowlChange BowlTracker::update(uint32_t nowMs, float g) {
     confirmed_ = true;
   } else if (level - (float)bowls_ * cfg_.dryG < -cfg_.inconsistentG) {
     // Less on the shelf than the counted bowls alone would weigh: an unload was
-    // missed (a nearly-empty bowl taken off is under the 10 kg threshold), or bowls
+    // missed (a nearly-empty bowl taken off is under the 14 kg threshold), or bowls
     // left while the unit was off. The count is LIMITED to what the shelf can hold
     // and marked unconfirmed -- a bound, not a count. Leaving it alone (as this did
     // while unconfirmed) kept "2 bw?" over a 3.3 kg load after a power cycle, food

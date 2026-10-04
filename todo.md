@@ -64,12 +64,11 @@ correction needed; one span correction with a true known mass (≥ 10 kg) for C1
 B1 — deferred, no mass available.**
 
 **Open:**
-- **NOT YET FLASHED (unit in the field, 2026-10-04 dinner):** the bowl-count fixes after
-  V1.30 (f3590a8, bb7cb2e) -- a count the weight cannot be (10-20.5 kg a bowl) is re-estimated on EVERY settled
-  level, not only after a power cycle, and a settled level below -1 kg is ignored instead of read
-  as "empty". Flash as the next version (bump + `Firmware:` commit) when the panel is
-  back on COM15. Until then: after a power cycle with bowls on B1, set the count by hand
-  (Settings > Buffers > B1 > Bowls).
+- **Bowl count (V1.31-V1.33, flashed on site 2026-10-04):** the count is checked against the
+  weight on every settled level >= 14 kg -- fewest bowls that fit at 17-20.5 kg each, else
+  round(gross / 17 kg) -- and a count the weight fits is confirmed by it (nobody touches
+  the panel). Min step 14 kg; a settled level below -1 kg is ignored. Bench-tested only by
+  host tests (104/104) and the on-site boot; watch the first services.
 - B1's cell read -3.2 kg then went `no_cells` at 17:44 IST on 2026-10-04 in the field --
   the random-dropout issue, now seen on the buffer bus too; a power cycle recovered it.
 - `bowlscale/cpg` was found cleared **twice** (field trial, and again during V1.18) —

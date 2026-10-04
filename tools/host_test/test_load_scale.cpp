@@ -159,7 +159,7 @@ static void countsOneAtATimeAnyWeight() {
   section("bowls: four loaded one at a time count four, at either end of the owner's range");
   // The normal way bowls arrive. Each jump is one bowl whatever the divisor, so the
   // whole 14-18 kg-of-food range (16.5-20.5 kg on the platform) and lighter fills count.
-  for (double each : {12500.0, 16500.0, 20500.0}) {
+  for (double each : {16500.0, 18500.0, 20500.0}) {
     Rig g;
     g.commission();
     for (int n = 1; n <= 4; n++) {
@@ -172,11 +172,11 @@ static void countsOneAtATimeAnyWeight() {
 }
 
 static void countsEveryMixOfBowls() {
-  section("bowls: 1..4 bowls at ONCE, 15-19 kg each (12.5-16.5 kg of food), all lightest or heaviest");
+  section("bowls: 1..4 bowls at ONCE, 16.5-20.5 kg each (14-18 kg of food), all lightest or heaviest");
   // round(jump / 17 kg) counts every n <= 4 right while each bowl is 14.9-19.1 kg on
   // the platform. The extremes are the hard cases -- any mix in between rounds the same.
   for (int n = 1; n <= 4; n++) {
-    for (double each : {15000.0, 19000.0}) {
+    for (double each : {16500.0, 20500.0}) {
       Rig g;
       g.commission();
       g.gross = n * each;
@@ -219,14 +219,14 @@ static void unload() {
 }
 
 static void belowThreshold() {
-  section("bowls: a change under 10 kg is food, not a bowl");
+  section("bowls: a change under 14 kg is food, not a bowl");
   Rig g;
   g.commission();
-  g.gross = 8000;
+  g.gross = 12000;  // a lean or a leg, under the 14 kg step
   g.run(10000);
   const Reading r = g.r();
   CHECK(g.events.empty() && r.bowls == 0, "no event, 0 bowls (got %zu events, %u bowls)", g.events.size(), r.bowls);
-  CHECK(std::fabs(r.foodG - 8000) < 60, "food %.0f g (want 8000)", r.foodG);
+  CHECK(std::fabs(r.foodG - 12000) < 60, "food %.0f g (want 12000)", r.foodG);
 }
 
 static void unstableThenStable() {
@@ -355,7 +355,7 @@ static void restoreReestimates() {
   h.run(4000);
   CHECK(h.r().bowls == 1 && h.r().bowlsConfirmed, "0 remembered over 20 kg -> 1, confirmed (got %u)", h.r().bowls);
 
-  // Bowls taken off while off: 3 remembered over 22 kg -- under 3 x 10 kg, the
+  // Bowls taken off while off: 3 remembered over 22 kg -- under 3 x 14 kg, the
   // lightest three bowls the tracker could ever have counted.
   Rig k;
   p.bowls = 3;
@@ -383,6 +383,34 @@ static void restoreReestimates() {
   m.gross = 61500;
   m.run(4000);
   CHECK(m.r().bowls == 3 && m.count(BowlEvent::Estimated) == 0, "3 over 61.5 kg kept (got %u)", m.r().bowls);
+}
+
+static void heavyBowlsAndFieldCount() {
+  section("bowls: three 20 kg bowls are 3, not 4; 2 remembered over 20.2 kg is 1 (field, 2026-10-04)");
+  // round(60 / 17) = 4. The fewest bowls that fit 60 kg at 17-20.5 kg each is 3.
+  Rig g;
+  g.commission();
+  g.gross = 60000;  // three 20 kg bowls placed together
+  g.run(4000);
+  CHECK(g.r().bowls == 3 && g.r().bowlsConfirmed, "60 kg at once -> 3 bowls (got %u, %d)", g.r().bowls,
+        g.r().bowlsConfirmed);
+  Rig h;
+  Persisted p;
+  p.zeroed = true;
+  p.zero = (int32_t)ZERO;
+  p.cpg = (float)CPG;
+  p.bowls = 1;
+  h.s.restore(p);
+  h.gross = 60000;  // ...and remembered wrong across a power cycle
+  h.run(4000);
+  CHECK(h.r().bowls == 3 && h.r().bowlsConfirmed, "1 remembered over 60 kg -> 3 (got %u)", h.r().bowls);
+  Rig k;
+  p.bowls = 2;
+  k.s.restore(p);
+  k.gross = 20200;  // one bowl, 15 kg of food: the panel showed "2 bowls"
+  k.run(4000);
+  CHECK(k.r().bowls == 1 && k.r().bowlsConfirmed, "2 remembered over 20.2 kg -> 1, confirmed (got %u, %d)",
+        k.r().bowls, k.r().bowlsConfirmed);
 }
 
 static void negativeLevelIsNotEmpty() {
@@ -615,6 +643,7 @@ int main() {
   inconsistentCount();
   restoreImpossibleCount();
   restoreReestimates();
+  heavyBowlsAndFieldCount();
   negativeLevelIsNotEmpty();
   operatorCorrectionIsRechecked();
   clampAtMax();
