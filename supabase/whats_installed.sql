@@ -91,6 +91,9 @@ with present as (
     -- migrate_weight_samples_brin.sql: the time index is BRIN, not btree.
     to_regclass('public.weight_samples_recorded_at_brin') is not null   as i_brin,
     to_regclass('public.weight_samples_recorded_at_idx') is not null    as i_btree,
+    -- migrate_statistics.sql: the Statistics page's two functions.
+    to_regprocedure('public.slot_meal_series(date, text, integer)') is not null as f_series,
+    to_regprocedure('public.slot_meal_stats(date, date, text, integer)') is not null as f_stats,
     -- Registration.
     (select count(*) from public.devices where device_id like 'BWL-%') as n_stacks
 ),
@@ -192,7 +195,13 @@ select item as step, name as run_this, status, note from (
              when (select i_brin from present) then 'PARTIAL'
              else 'MISSING' end,
         'weight_samples time index as BRIN -- without it the dashboard''s '
-          || 'stock series and burn rate take seconds per refresh')
+          || 'stock series and burn rate take seconds per refresh'),
+    (15, 'migrate_statistics.sql',
+        case when (select f_series and f_stats from present) then 'installed'
+             when (select f_series or f_stats from present) then 'PARTIAL'
+             else 'MISSING' end,
+        'slot_meal_series + slot_meal_stats -- the Statistics page reads nothing '
+          || 'without them')
 ) as t(item, name, status, note)
 order by item;
 

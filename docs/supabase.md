@@ -35,6 +35,16 @@ supabase/migrate_hubs.sql            -- kind 'hub', HUB-D/M/T, platform node
                                      -- health; battery moves to the hub
 ```
 
+The dashboard's **Statistics** page needs `supabase/migrate_statistics.sql`
+(idempotent, read-only functions; undo `rollback_statistics.sql`):
+`slot_meal_series(date, meal, slot)` -- food on hand per area on a 5-minute grid
+through one meal -- and `slot_meal_stats(from, to, meal?, slot?)` -- per meal and
+slot over D+M+T: consumed, delivered, kg/h, the busiest 15 minutes, ran out.
+Consumption uses `slot_burn_rate`'s rule (drops between deliveries of
+`refill_g` or more) plus the food eaten during a delivery step, estimated from
+the steps either side. Locally, `bash tools/localdb.sh seed` writes 10 days of
+dummy BWL-001 + LDC-001 meals on D slot 1 to try it on.
+
 A database that ran `migrate_weight_samples.sql` before 2026-10-04 also needs
 `supabase/migrate_weight_samples_brin.sql` (idempotent): it swaps the btree on
 `weight_samples.recorded_at` for a BRIN, without which `slot_stock_series` and

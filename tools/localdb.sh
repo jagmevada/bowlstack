@@ -5,6 +5,7 @@
 #
 #   bash tools/localdb.sh up      start (first run pulls the images) + load
 #   bash tools/localdb.sh load    rebuild the schema from supabase/*.sql
+#   bash tools/localdb.sh seed    dummy BWL-001 + LDC-001 meals on D slot 1
 #   bash tools/localdb.sh env     print what fleet_sim and the browser need
 #   bash tools/localdb.sh down    stop the containers
 #
@@ -33,7 +34,7 @@ load() {
   # cutover_buffers.sql is here for parity with live (every BWL is a buffer).
   for f in schema register_devices assign_devices seed_meal_mapping \
            migrate_bowl_weight apply_loadcell weekly_menu_and_offline \
-           cutover_buffers smoke_test; do
+           cutover_buffers migrate_statistics smoke_test; do
     echo "== $f.sql"
     # psql, not `supabase db query --local`: that sends a file as one prepared
     # statement, which refuses more than one command.
@@ -64,7 +65,12 @@ case "${1:-up}" in
         sb start -x realtime,storage-api,imgproxy,mailpit,edge-runtime,logflare,vector,supavisor
         load; env_ ;;
   load) load ;;
+  # Dummy BWL-001 + LDC-001 history on D slot 1 for the Statistics page. It
+  # refuses to run where those ids hold real readings (i.e. on live).
+  seed) docker exec -i supabase_db_bowlstack-local psql -X -q -v ON_ERROR_STOP=1 \
+          "postgresql://postgres:postgres@127.0.0.1:5432/postgres" \
+          < "$REPO/tools/localdb_seed_slot1.sql" ;;
   env)  env_ ;;
   down) sb stop ;;
-  *)    echo "usage: $0 [up|load|env|down]"; exit 2 ;;
+  *)    echo "usage: $0 [up|load|seed|env|down]"; exit 2 ;;
 esac
