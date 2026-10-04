@@ -123,7 +123,7 @@ class Filter {
 };
 
 // --- the bowl tracker (buffer role) ------------------------------------------------
-enum class BowlEvent : uint8_t { None, Loaded, Unloaded, EmptyReset, Inconsistent, Clamped };
+enum class BowlEvent : uint8_t { None, Loaded, Unloaded, EmptyReset, Inconsistent, Clamped, Estimated };
 const char *bowlEventText(BowlEvent e);
 
 struct BowlChange {
@@ -166,6 +166,7 @@ class BowlTracker {
 
   bool haveRef_ = false;
   float ref_ = 0.0f;         // the last settled level
+  bool reseed_ = false;      // restored from NVS: check the count on the first settled level
 };
 
 // --- commands -----------------------------------------------------------------------

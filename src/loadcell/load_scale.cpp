@@ -28,6 +28,7 @@ const char *bowlEventText(BowlEvent e) {
     case BowlEvent::EmptyReset: return "empty -- count reset to 0";
     case BowlEvent::Inconsistent: return "count cannot be right -- unconfirmed";
     case BowlEvent::Clamped: return "count limited -- unconfirmed";
+    case BowlEvent::Estimated: return "count re-estimated from the weight -- unconfirmed";
   }
   return "?";
 }
@@ -189,6 +190,7 @@ void BowlTracker::restore(uint8_t bowls, float typicalFullG) {
     typical_ = typicalFullG;
   running_ = false;
   haveRef_ = false;
+  reseed_ = true;
 }
 
 void BowlTracker::resetEmpty() {
@@ -196,11 +198,13 @@ void BowlTracker::resetEmpty() {
   confirmed_ = true;
   running_ = false;
   haveRef_ = false;
+  reseed_ = false;
 }
 
 void BowlTracker::set(uint8_t bowls) {
   bowls_ = bowls > cfg_.maxBowls ? cfg_.maxBowls : bowls;
   confirmed_ = true;
+  reseed_ = false;  // an operator's count outranks an estimate
   // THE REFERENCE IS KEPT -- an operator correcting the count has not moved anything,
   // so the next settled level is not a load or an unload -- BUT THE RUN RESTARTS, so
   // that level is judged again within stableMs. Without it a count typed with the
@@ -235,6 +239,13 @@ BowlChange BowlTracker::update(uint32_t nowMs, float g) {
   if (runJudged_ || (uint32_t)(nowMs - runStart_) < cfg_.stableMs) return out;
   runJudged_ = true;
   const float level = (float)(runSum_ / (double)runN_);
+
+  // A SETTLED LEVEL WELL BELOW ZERO IS NOT A SHELF. An empty platform reads ~0; -3 kg
+  // is a cell failing or a zero gone wrong. Field, 2026-10-04: B1 read -3.2 kg for a
+  // moment before dropping out, the empty rule took it for "empty", and the 20 kg bowl
+  // on it came back as 0 after the next power cycle. Judged as nothing: no event, no
+  // reset -- and not a reference, or the recovery would count as a load from -3 kg.
+  if (level < -cfg_.emptyBelowG) return out;
 
   // --- judge the newly stable level -------------------------------------------------
   if (haveRef_) {
@@ -283,6 +294,33 @@ BowlChange BowlTracker::update(uint32_t nowMs, float g) {
   }
   ref_ = level;
   haveRef_ = true;
+
+  // --- after a power cycle: is the remembered count still the shelf? ---------------
+  // Found in the field (2026-10-04 dinner): two bowls went on while the panel was off,
+  // so it came back "1 bowl" over 55.7 kg -- and every later load/unload counted from
+  // that wrong base, until a bowl lifted and put back even marked it confirmed. Events
+  // are RELATIVE; only the weight can anchor the count. So on the first settled level
+  // after a restore the remembered count is kept if the weight is plausible for it
+  // (typicalFullMin..Max a bowl, +/- inconsistentG), else re-estimated as gross / one
+  // full bowl. Below eventMinG the weight cannot tell a light bowl from loose food, so
+  // the remembered count stands there (the dry-mass limit below still applies).
+  // Still unconfirmed either way: it is an estimate, and it reads as one.
+  if (reseed_) {
+    reseed_ = false;
+    const float lo = (float)bowls_ * cfg_.typicalFullMinG - cfg_.inconsistentG;
+    const float hi = (float)bowls_ * cfg_.typicalFullMaxG + cfg_.inconsistentG;
+    if (level >= cfg_.eventMinG && (level < lo || level > hi)) {
+      long n = lroundf(level / typical_);
+      if (n < 1) n = 1;
+      if (n > cfg_.maxBowls) n = cfg_.maxBowls;
+      if ((uint8_t)n != bowls_) {
+        out.event = BowlEvent::Estimated;
+        out.delta = (int8_t)(n - (long)bowls_);
+        bowls_ = (uint8_t)n;
+      }
+      confirmed_ = false;
+    }
+  }
 
   // --- an empty platform is a count of zero, and a confirmed one --------------------
   if (level < cfg_.emptyBelowG) {

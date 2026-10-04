@@ -64,6 +64,14 @@ correction needed; one span correction with a true known mass (≥ 10 kg) for C1
 B1 — deferred, no mass available.**
 
 **Open:**
+- **NOT YET FLASHED (unit in the field, 2026-10-04 dinner):** the bowl-count fixes after
+  V1.30 -- a remembered count the weight cannot be is re-estimated on the first settled
+  level after a power cycle, and a settled level below -1 kg is ignored instead of read
+  as "empty". Flash as the next version (bump + `Firmware:` commit) when the panel is
+  back on COM15. Until then: after a power cycle with bowls on B1, set the count by hand
+  (Settings > Buffers > B1 > Bowls).
+- B1's cell read -3.2 kg then went `no_cells` at 17:44 IST on 2026-10-04 in the field --
+  the random-dropout issue, now seen on the buffer bus too; a power cycle recovered it.
 - `bowlscale/cpg` was found cleared **twice** (field trial, and again during V1.18) —
   each time an explicit 0.0, which only the single-tap *Clear calibration* row (or `x`)
   writes. Now two-tap ("Clear cal", "tap again").

@@ -326,6 +326,69 @@ static void restoreImpossibleCount() {
   CHECK(r.kgKnown && std::fabs(r.foodG - 760) < 80, "food %.0f g (want 3260 - 2500 = 760)", r.foodG);
 }
 
+static void restoreReestimates() {
+  section("power cycle: a count the weight cannot be is re-estimated (field, 2026-10-04)");
+  // Two bowls went on while the panel was off: it came back "1 bowl" over 55.7 kg.
+  Rig g;
+  Persisted p;
+  p.zeroed = true;
+  p.zero = (int32_t)ZERO;
+  p.cpg = (float)CPG;
+  p.bowls = 1;
+  g.s.restore(p);
+  g.gross = 55700;
+  g.run(4000);
+  CHECK(g.r().bowls == 3 && !g.r().bowlsConfirmed, "55.7 kg -> 3 bowls, unconfirmed (got %u, %d)",
+        g.r().bowls, g.r().bowlsConfirmed);
+  CHECK(g.count(BowlEvent::Estimated) == 1, "one Estimated event (got %d)", g.count(BowlEvent::Estimated));
+  CHECK(std::fabs(g.r().foodG - 48200) < 100, "food %.0f g (want 55700 - 3 x 2500)", g.r().foodG);
+  g.gross = 37700;  // one bowl lifted off: counts from the right base now
+  g.run(4000);
+  CHECK(g.r().bowls == 2 && g.r().bowlsConfirmed, "then an unload -> 2, confirmed (got %u, %d)",
+        g.r().bowls, g.r().bowlsConfirmed);
+
+  // The owner's bench case: a 20 kg bowl on, but 0 remembered.
+  Rig h;
+  p.bowls = 0;
+  h.s.restore(p);
+  h.gross = 20000;
+  h.run(4000);
+  CHECK(h.r().bowls == 1 && !h.r().bowlsConfirmed, "0 remembered over 20 kg -> 1 (got %u)", h.r().bowls);
+
+  // Two taken off while off: 3 remembered over 38 kg.
+  Rig k;
+  p.bowls = 3;
+  k.s.restore(p);
+  k.gross = 38000;
+  k.run(4000);
+  CHECK(k.r().bowls == 2, "3 remembered over 38 kg -> 2 (got %u)", k.r().bowls);
+
+  // A plausible remembered count is KEPT, even where gross / 17 kg would say otherwise:
+  // three heavy bowls (3 x 20.5 kg) round to 4.
+  Rig m;
+  p.bowls = 3;
+  m.s.restore(p);
+  m.gross = 61500;
+  m.run(4000);
+  CHECK(m.r().bowls == 3 && m.count(BowlEvent::Estimated) == 0, "3 over 61.5 kg kept (got %u)", m.r().bowls);
+}
+
+static void negativeLevelIsNotEmpty() {
+  section("bowls: a settled -3 kg is a failing cell, not an empty platform (field, 2026-10-04)");
+  Rig g;
+  g.commission();
+  g.gross = 19100;
+  g.run(4000);
+  CHECK(g.r().bowls == 1 && g.r().bowlsConfirmed, "1 bowl (got %u)", g.r().bowls);
+  g.events.clear();
+  g.gross = -3200;
+  g.run(4000);
+  CHECK(g.r().bowls == 1 && g.count(BowlEvent::EmptyReset) == 0, "still 1, no EmptyReset (got %u)", g.r().bowls);
+  g.gross = 19100;  // the cell recovers
+  g.run(4000);
+  CHECK(g.r().bowls == 1 && g.count(BowlEvent::Loaded) == 0, "still 1, no phantom load (got %u)", g.r().bowls);
+}
+
 static void operatorCorrectionIsRechecked() {
   section("bowls: an operator's count is re-checked against the shelf without the load moving");
   // Found on the bench: "bowls 2" typed with the platform still and empty left food
@@ -539,6 +602,8 @@ int main() {
   restoreLoadedThenEvent();
   inconsistentCount();
   restoreImpossibleCount();
+  restoreReestimates();
+  negativeLevelIsNotEmpty();
   operatorCorrectionIsRechecked();
   clampAtMax();
   staleCountIsNotOver();
