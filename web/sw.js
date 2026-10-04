@@ -8,7 +8,7 @@
 // Supabase requests are never cached: a stale bowl count is worse than none,
 // and every screen already says how old its data is.
 
-const CACHE = 'bowlstack-shell-v1.44';
+const CACHE = 'bowlstack-shell-v1.45';
 const SHELL = [
   './',
   'index.html',
@@ -26,6 +26,7 @@ const SHELL = [
   'js/chart.js',
   'js/views/stock.js',
   'js/views/master.js',
+  'js/views/statistics.js',
   'js/views/health.js',
   'js/views/device.js',
   'js/views/menu.js',

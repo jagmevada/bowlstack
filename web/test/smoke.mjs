@@ -314,6 +314,7 @@ window.supabase = {
     from: builder,
     rpc: (name, args) => {
       calls.push({ rpc: name, args });
+      if (name === 'slot_meal_series' || name === 'slot_meal_stats') return statsRpc(name, args);
       if (name === 'meal_template_apply') {
         return Promise.resolve({ data: [
           { meal_date: args.p_from, meal_type: 'Lunch', written: 5, skipped: false },
@@ -875,14 +876,15 @@ console.log('\n[swipe navigation]');
   // Master sits between Stock and Health in the tab bar, so it is what a
   // left swipe off Stock now reaches. The order under test is the tab-bar
   // order, not an arbitrary list.
-  // Order is master, stock, health, menu, assign -- the tab bar's order, which
+  // Order is master, stock, statistics, health, menu, assign -- the tab bar's order, which
   // Master now leads. These assert the ARGUMENTS as well as the names: an
   // earlier pass renamed them to match and left the arguments describing the
   // old order, so they still passed while testing the opposite thing.
   ok('left swipe on Master lands on Stock', swipeTarget('master', -120, 10, 200, false) === 'stock');
   ok('right swipe on Stock returns to Master', swipeTarget('stock', 120, -8, 200, false) === 'master');
-  ok('left swipe on Stock lands on Health', swipeTarget('stock', -120, 10, 200, false) === 'health');
-  ok('right swipe on Health returns to Stock', swipeTarget('health', 120, -8, 200, false) === 'stock');
+  ok('left swipe on Stock lands on Statistics', swipeTarget('stock', -120, 10, 200, false) === 'statistics');
+  ok('left swipe on Statistics lands on Health', swipeTarget('statistics', -120, 10, 200, false) === 'health');
+  ok('right swipe on Health returns to Statistics', swipeTarget('health', 120, -8, 200, false) === 'statistics');
   ok('left swipe on Devices has nowhere to go', swipeTarget('assign', -120, 0, 200, false) === null);
   ok('right swipe on Master has nowhere to go', swipeTarget('master', 120, 0, 200, false) === null);
   ok('a mostly-vertical drag is a scroll, not a swipe', swipeTarget('stock', -70, 60, 200, false) === null);
@@ -2275,6 +2277,92 @@ console.log('\n[master: a hall line opens that hall on Stock]');
   ok('a hall with neither gets no tooltip rather than an empty one',
     areaWeightNote({ est_weight_g: null, measured_weight_g: null,
                      bowl_weight_g: null, scales: 0 }, null) === undefined, 'defined');
+}
+
+// =========================================================================
+//  Statistics -- supabase/migrate_statistics.sql's two functions, as fixtures:
+//  slot 1 (Dal) weighed in D and M (not T); M misses one point, so the total
+//  is partial there and M's line breaks; Rice (slot 2) drains faster than Dal;
+//  one day of the range ran out before close.
+// =========================================================================
+function statsRpc(name, args) {
+  const T = ['2026-10-02T06:00:00+00:00', '2026-10-02T06:05:00+00:00',
+             '2026-10-02T06:10:00+00:00', '2026-10-02T06:15:00+00:00'];
+  const D = [30000, 28000, 26000, 24000], M = [20000, 19000, null, 17000];
+  const stat = (o) => ({
+    meal_date: '2026-10-02', meal_type: 'Lunch', food_slot: 1, food_name: 'Dal',
+    areas: ['D', 'M'], start_g: 50000, end_g: 41000, consumed_g: 9000, delivered_g: 0,
+    g_per_hour: 36000, rush_g_per_hour: 36000, rush_at: T[3], ran_out_at: null,
+    short_before_close: false, covered_min: 15, partial: true, ...o,
+  });
+  let data = [];
+  if (name === 'slot_meal_series') {
+    data = T.flatMap((t, i) => [
+      { at_ts: t, location: 'D', buffer_g: D[i] - 5000, counter_g: 5000, total_g: D[i], partial: false },
+      { at_ts: t, location: 'M', buffer_g: null, counter_g: M[i], total_g: M[i], partial: M[i] == null },
+    ]);
+  } else if (args.p_slot == null) {
+    data = [stat({}), stat({ food_slot: 2, food_name: 'Rice', g_per_hour: 52000, consumed_g: 13000 })];
+  } else if (args.p_from === args.p_to) {
+    data = [stat({})];
+  } else {
+    data = [
+      stat({ meal_date: '2026-09-30', consumed_g: 12000, g_per_hour: 48000,
+             ran_out_at: '2026-09-30T08:05:00+00:00', short_before_close: true }),
+      stat({ meal_date: '2026-10-01', consumed_g: 6000, g_per_hour: 24000 }),
+      stat({}),
+    ];
+  }
+  return Promise.resolve({ data, error: null });
+}
+
+console.log('\n[statistics]');
+{
+  ok('a Statistics tab sits in the bar',
+    !!window.document.querySelector('.tabs a[data-tab="statistics"]'));
+  calls.length = 0;
+  await go('#/statistics?d=2026-10-02&m=Lunch&s=1');
+  await new Promise(r => setTimeout(r, 150));   // the three rpcs fill in after the frame
+  const series = calls.find(c => c.rpc === 'slot_meal_series');
+  ok('asks for the chosen meal and slot',
+    series && series.args.p_date === '2026-10-02' && series.args.p_meal === 'Lunch'
+    && series.args.p_slot === 1, JSON.stringify(series?.args));
+  const range = calls.find(c => c.rpc === 'slot_meal_stats' && c.args.p_from !== c.args.p_to);
+  ok('...and the last 7 days of it for the bars',
+    range && range.args.p_from === '2026-09-26' && range.args.p_to === '2026-10-02'
+    && range.args.p_slot === 1, JSON.stringify(range?.args));
+  ok('...and every weighed slot of that meal for the ranking',
+    calls.some(c => c.rpc === 'slot_meal_stats' && c.args.p_from === '2026-10-02'
+      && c.args.p_to === '2026-10-02' && c.args.p_slot == null));
+
+  const legend = view.querySelector('#stats-chart .legend-line')?.textContent || '';
+  ok('the chart draws the total and one line per area weighed -- no Tiffin',
+    /D\+M\+T/.test(legend) && /Darshanarthi/.test(legend) && /Mahatma/.test(legend)
+    && !/Tiffin/.test(legend), legend);
+  // Total + D + M's first two points as lines; M's last point, alone after the
+  // gap, is a dot -- never a line dipping to zero through the missing reading.
+  ok("...and M's missing point breaks its line rather than dropping to zero",
+    view.querySelectorAll('#stats-chart path').length === 3
+    && view.querySelectorAll('#stats-chart circle').length === 1,
+    `${view.querySelectorAll('#stats-chart path').length} paths, `
+    + `${view.querySelectorAll('#stats-chart circle').length} dots`);
+  ok('the figures: eaten, average, rush and lasted',
+    /Eaten\s*9\.0 kg/.test(text()) && /Average\s*36\.0 kg\/h/.test(text())
+    && /Rush\s*36\.0 kg\/h/.test(text()) && /Lasted\s*the whole meal/.test(text()));
+  ok('...where it was measured, and that readings were missing',
+    /Measured in Darshanarthi, Mahatma\./.test(text()) && /Some readings were missing/.test(text()));
+  ok('the slot picker names the dish', /1 · Dal/.test(view.querySelector('#stats-slot')?.textContent || ''));
+  const rank = [...view.querySelectorAll('.stats-rank-row')];
+  ok('ranking: the faster dish first, the chosen slot marked',
+    rank.length === 2 && /Rice/.test(rank[0].textContent) && rank[1].classList.contains('is-target'),
+    rank.map(r => r.textContent).join(' | '));
+  const bars = [...view.querySelectorAll('.stats-bar-row')];
+  ok('day by day: one bar per day, newest first, the chosen day marked',
+    bars.length === 3 && bars[0].classList.contains('is-target') && /Wed 30/.test(bars[2].textContent),
+    bars.map(b => b.textContent).join(' | '));
+  ok('...and the day that ran out says when',
+    /out 13:35/.test(bars[2].querySelector('.stats-out')?.textContent || ''),
+    bars[2].querySelector('.stats-out')?.textContent);
 }
 
 console.log(`\n${fails.length ? `FAILED (${fails.length}): ${fails.join(' | ')}` : 'ALL PASS'}`);

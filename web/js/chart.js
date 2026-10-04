@@ -293,8 +293,14 @@ export { STATUS_STYLE };
  * is not a low weight, it is not a weight at all, so the line must not bridge
  * it — exactly as stepChart refuses to bridge `discontiguous`.
  */
-export function weightChart({ points, now = Date.now(), width = 640, tz,
+export function weightChart({ points, series, now = Date.now(), width = 640, tz,
                               title, subtitle, height = 260 }) {
+  // SEVERAL LINES ON ONE AXIS (Statistics: the D+M+T total and each area) when
+  // `series` is given: [{ points, label, color, width, cls }]. The first series
+  // is the one whose last value is called out. Without it this is the original
+  // single-series chart, unchanged for its callers.
+  const list = series || [{ points, color: 'var(--series-1)', width: 2 }];
+  const all = list.flatMap(l => l.points);
   // t: 20 rather than 12, to clear the unit label. At 12 the "kg" sat exactly
   // on y(top) -- the topmost gridline's own number -- and the two overprinted.
   //
@@ -310,15 +316,15 @@ export function weightChart({ points, now = Date.now(), width = 640, tz,
   if (title) wrap.append(h('div', { class: 'chart-title' }, title));
   if (subtitle) wrap.append(h('div', { class: 'chart-sub' }, subtitle));
 
-  const usable = points.filter(p => p.v != null);
+  const usable = all.filter(p => p.v != null);
   if (!usable.length) {
     wrap.append(h('div', { class: 'empty' },
       'No weight recorded in this window.'));
     return wrap;
   }
 
-  const t0 = points[0].t;
-  const t1 = Math.max(now, points[points.length - 1].t);
+  const t0 = Math.min(...all.map(p => p.t));
+  const t1 = Math.max(now, ...all.map(p => p.t));
   const span = Math.max(1, t1 - t0);
 
   // A NICE ceiling, not the maximum. An axis topping out at 1,213 g puts every
@@ -363,44 +369,54 @@ export function weightChart({ points, now = Date.now(), width = 640, tz,
     }, fmtClock(new Date(t).toISOString(), tz)));
   }
 
-  // Break the line wherever the scale had no trustworthy figure.
-  const runs = [];
-  let run = [];
-  for (const p of points) {
-    if (p.v == null) { if (run.length) runs.push(run); run = []; }
-    else run.push(p);
-  }
-  if (run.length) runs.push(run);
-
-  for (const r of runs) {
-    if (r.length === 1) {
-      // A lone sample is a dot, not a line. Drawing a zero-length path would
-      // render nothing and read as missing data.
-      svg.append(s('circle', {
-        cx: x(r[0].t), cy: y(r[0].v), r: 2.5, fill: 'var(--series-1)',
-      }));
-      continue;
+  // Drawn last-first, so the first series (the total) lies on top.
+  for (const l of [...list].reverse()) {
+    // Break the line wherever the scale had no trustworthy figure.
+    const runs = [];
+    let run = [];
+    for (const p of l.points) {
+      if (p.v == null) { if (run.length) runs.push(run); run = []; }
+      else run.push(p);
     }
-    // ATTRIBUTES, NOT A CLASS, and this is not a style preference -- it was a
-    // bug. There is no `.series` rule anywhere in app.css; stepChart above sets
-    // fill/stroke directly on the element, and only the grid lines are styled
-    // by class. A path with a class nobody defines gets SVG's DEFAULT fill of
-    // BLACK, so the chart rendered as a solid black region under the curve
-    // rather than as a line -- which reads as a broken chart, not as a
-    // stylesheet miss.
-    svg.append(s('path', {
-      d: r.map((p, i) => `${i ? 'L' : 'M'}${x(p.t)},${y(p.v)}`).join(''),
-      fill: 'none', stroke: 'var(--series-1)', 'stroke-width': 2,
-      'stroke-linejoin': 'round', 'stroke-linecap': 'round',
-    }));
+    if (run.length) runs.push(run);
+
+    for (const r of runs) {
+      if (r.length === 1) {
+        // A lone sample is a dot, not a line. Drawing a zero-length path would
+        // render nothing and read as missing data.
+        svg.append(s('circle', {
+          cx: x(r[0].t), cy: y(r[0].v), r: 2.5, fill: l.color, class: l.cls || null,
+        }));
+        continue;
+      }
+      // ATTRIBUTES, NOT A CLASS, and this is not a style preference -- it was a
+      // bug. There is no `.series` rule anywhere in app.css; stepChart above sets
+      // fill/stroke directly on the element, and only the grid lines are styled
+      // by class. A path with a class nobody defines gets SVG's DEFAULT fill of
+      // BLACK, so the chart rendered as a solid black region under the curve
+      // rather than as a line -- which reads as a broken chart, not as a
+      // stylesheet miss. (`cls` only supplies --area-accent for `color`.)
+      svg.append(s('path', {
+        d: r.map((p, i) => `${i ? 'L' : 'M'}${x(p.t)},${y(p.v)}`).join(''),
+        fill: 'none', stroke: l.color, 'stroke-width': l.width || 2, class: l.cls || null,
+        'stroke-linejoin': 'round', 'stroke-linecap': 'round',
+      }));
+    }
   }
 
-  // The last known value, called out at the right edge the way stepChart does.
-  const last = usable[usable.length - 1];
+  // The last known value of the first series, called out at the right edge the
+  // way stepChart does.
+  const firstUsable = list[0].points.filter(p => p.v != null);
+  const last = (firstUsable.length ? firstUsable : usable).slice(-1)[0];
   svg.append(s('text', {
     x: W - PAD.r + 6, y: y(last.v) + 3.5, class: 'tick', 'text-anchor': 'start',
   }, `${(last.v / 1000).toFixed(2)}`));
 
   wrap.append(svg);
+  if (series && series.some(l => l.label)) {
+    wrap.append(h('div', { class: 'legend-line' },
+      ...series.filter(l => l.label).map(l => h('span', { class: l.cls || null },
+        h('i', { style: `background:${l.color}` }), ` ${l.label} `))));
+  }
   return wrap;
 }

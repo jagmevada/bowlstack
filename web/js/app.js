@@ -19,6 +19,7 @@ import { renderDevice, clearHistoryCache } from './views/device.js';
 import { renderMenu } from './views/menu.js';
 import { renderAssign } from './views/assign.js';
 import { renderMaster } from './views/master.js';
+import { renderStatistics, clearStatsCache } from './views/statistics.js';
 import { isMockMode } from './mock.js';
 import { APP_VERSION } from './version.js';
 
@@ -318,7 +319,7 @@ document.addEventListener('click', e => {
 
 async function refresh(manual = false) {
   if (state.loading) return;
-  if (manual) clearHistoryCache();
+  if (manual) { clearHistoryCache(); clearStatsCache(); }
   state.loading = true;
 
   // No dimming on a normal poll. The view is patched in place, so there is
@@ -460,7 +461,7 @@ document.addEventListener('visibilitychange', () => {
 
 // Swipe order follows the tab bar, so a left swipe goes where the eye
 // expects. Master leads: it is the screen the kitchen opens on.
-const SWIPE_TABS = ['master', 'stock', 'health', 'menu', 'assign'];
+const SWIPE_TABS = ['master', 'stock', 'statistics', 'health', 'menu', 'assign'];
 
 /** Pure decision, exported for the smoke suite: the route a swipe lands on,
  *  or null when the gesture must be ignored. dx<0 is a leftward swipe. */
@@ -576,6 +577,7 @@ const VIEWS = {
   device: renderDevice,
   menu: renderMenu,
   assign: renderAssign,
+  statistics: renderStatistics,
 };
 
 // Screens that hold unsaved user input. A background poll must not redraw them

@@ -833,7 +833,98 @@ function table(name) {
   return api;
 }
 
+// --- Statistics: slot_meal_series / slot_meal_stats ----------------------------
+// One dish through one meal in each area: a buffer stack (16.5 kg of food a
+// bowl) feeding a counter that people eat from, a rush through the middle, a
+// kitchen delivery of 2 bowls on even days, and every third dish-day eating fast
+// enough to run out. Slots 1-3 are "weighed"; the rest return nothing, as an
+// unweighed slot does on the real database.
+const MOCK_DISH = { 1: 'Dal', 2: 'Rice', 3: 'Sabzi' };
+const MOCK_AREA_TRAFFIC = { D: 1, M: 0.7, T: 0.5 };
+
+function mockMeal(date, meal, slot) {
+  const w = SERVICE_WINDOWS.find(x => x.meal === meal);
+  if (!w || !MOCK_DISH[slot]) return null;
+  const at = hhmm => new Date(`${date}T${hhmm}:00+05:30`).getTime();
+  const t0 = at(w.start), t1 = Math.min(at(w.end), Date.now());
+  if (t1 <= t0) return null;
+  const seed = [...`${date}${meal}${slot}`].reduce((a, c) => (a * 31 + c.charCodeAt(0)) >>> 0, 7);
+  const fast = seed % 3 === 0;
+  const delivery = Number(date.slice(8)) % 2 === 0;
+  const steps = Math.floor((t1 - t0) / 300000);
+  const tray = Object.fromEntries(Object.keys(MOCK_AREA_TRAFFIC).map(a => [a, { buf: 3, ctr: 16500 }]));
+  const rows = [], total = [];
+  let eaten = 0, delivered = 0, deliveryAt = -1;
+  for (let i = 0; i <= steps; i++) {
+    const t = new Date(t0 + i * 300000).toISOString();
+    const rush = i >= steps * 0.35 && i <= steps * 0.6 ? 1.8 : 1;
+    let sum = 0;
+    for (const [a, k] of Object.entries(MOCK_AREA_TRAFFIC)) {
+      const s = tray[a];
+      if (i) {
+        const want = (fast ? 1500 : 1000) * k * rush * (0.8 + (seed % 40) / 100);
+        const ate = Math.min(s.ctr, want);
+        s.ctr -= ate; eaten += ate;
+      }
+      if (delivery && i === Math.round(steps * 0.45)) { s.buf += 2; delivered += 33000; deliveryAt = i; }
+      if (s.ctr < 2000 && s.buf > 0) { s.buf--; s.ctr += 16500; }
+      const buffer_g = s.buf * 16500, counter_g = Math.round(s.ctr);
+      rows.push({ at_ts: t, location: a, buffer_g, counter_g, total_g: buffer_g + counter_g, partial: false });
+      sum += buffer_g + counter_g;
+    }
+    total.push({ t, v: sum });
+  }
+  // The busiest quarter hour, not across the delivery (as the SQL does).
+  let rush = 0, rushAt = null;
+  for (let i = 3; i < total.length; i++) {
+    if (deliveryAt > i - 3 && deliveryAt <= i) continue;
+    const d = total[i - 3].v - total[i].v;
+    if (d > rush) { rush = d; rushAt = total[i].t; }
+  }
+  const out = total.find((p, i) => i && p.v <= 1000 && total.slice(0, i).some(q => q.v > 1000));
+  const covered = steps * 5;
+  return {
+    rows,
+    stats: {
+      meal_date: date, meal_type: meal, food_slot: slot, food_name: MOCK_DISH[slot],
+      areas: Object.keys(MOCK_AREA_TRAFFIC), start_g: total[0].v, end_g: total[total.length - 1].v,
+      consumed_g: Math.round(eaten), delivered_g: delivered,
+      g_per_hour: covered >= 10 ? Math.round(eaten / (covered / 60)) : null,
+      rush_g_per_hour: rush > 0 ? rush * 4 : null, rush_at: rush > 0 ? rushAt : null,
+      ran_out_at: out ? out.t : null,
+      short_before_close: !!out && Date.parse(out.t) < at(w.end),
+      covered_min: covered, partial: false,
+    },
+  };
+}
+
+function mockDates(from, to) {
+  const out = [];
+  for (let d = from; d <= to; ) {
+    out.push(d);
+    const n = new Date(`${d}T12:00:00Z`); n.setUTCDate(n.getUTCDate() + 1);
+    d = n.toISOString().slice(0, 10);
+  }
+  return out;
+}
+
 function rpc(name, args = {}) {
+  if (name === 'slot_meal_series') {
+    const m = mockMeal(args.p_date, args.p_meal, Number(args.p_slot));
+    return Promise.resolve({ data: m ? m.rows : [], error: null });
+  }
+  if (name === 'slot_meal_stats') {
+    const meals = args.p_meal ? [args.p_meal] : SERVICE_WINDOWS.map(w => w.meal);
+    const slots = args.p_slot ? [Number(args.p_slot)] : Object.keys(MOCK_DISH).map(Number);
+    const data = [];
+    for (const d of mockDates(args.p_from, args.p_to)) {
+      for (const meal of meals) for (const s of slots) {
+        const m = mockMeal(d, meal, s);
+        if (m) data.push(m.stats);
+      }
+    }
+    return Promise.resolve({ data, error: null });
+  }
   if (name === 'meal_mapping_preload') {
     const { p_location, p_meal_type, p_meal_date } = args;
     const exact = [...menu.values()].filter(r => r.location === p_location
