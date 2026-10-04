@@ -290,7 +290,7 @@ static void restoreLoadedThenEvent() {
   g.s.restore(p);
   g.gross = 37000;
   g.run(15000);
-  CHECK(g.r().bowls == 2 && !g.r().bowlsConfirmed, "2 bowls, still unconfirmed with nothing happening");
+  CHECK(g.r().bowls == 2 && g.r().bowlsConfirmed, "2 bowls, confirmed by the weight -- nobody touches the panel");
   g.gross = 55500;
   g.run(8000);
   CHECK(g.r().bowls == 3 && g.r().bowlsConfirmed, "a load confirms: 3 bowls (got %u, %d)", g.r().bowls, g.r().bowlsConfirmed);
@@ -338,7 +338,7 @@ static void restoreReestimates() {
   g.s.restore(p);
   g.gross = 55700;
   g.run(4000);
-  CHECK(g.r().bowls == 3 && !g.r().bowlsConfirmed, "55.7 kg -> 3 bowls, unconfirmed (got %u, %d)",
+  CHECK(g.r().bowls == 3 && g.r().bowlsConfirmed, "55.7 kg -> 3 bowls, confirmed by the weight (got %u, %d)",
         g.r().bowls, g.r().bowlsConfirmed);
   CHECK(g.count(BowlEvent::Estimated) == 1, "one Estimated event (got %d)", g.count(BowlEvent::Estimated));
   CHECK(std::fabs(g.r().foodG - 48200) < 100, "food %.0f g (want 55700 - 3 x 2500)", g.r().foodG);
@@ -353,7 +353,7 @@ static void restoreReestimates() {
   h.s.restore(p);
   h.gross = 20000;
   h.run(4000);
-  CHECK(h.r().bowls == 1 && !h.r().bowlsConfirmed, "0 remembered over 20 kg -> 1 (got %u)", h.r().bowls);
+  CHECK(h.r().bowls == 1 && h.r().bowlsConfirmed, "0 remembered over 20 kg -> 1, confirmed (got %u)", h.r().bowls);
 
   // Bowls taken off while off: 3 remembered over 22 kg -- under 3 x 10 kg, the
   // lightest three bowls the tracker could ever have counted.
@@ -372,7 +372,7 @@ static void restoreReestimates() {
   q.run(4000);
   q.s.setBowls(0);  // a wrong base with the load already settled -- nothing moves
   q.run(4000);
-  CHECK(q.r().bowls == 2 && !q.r().bowlsConfirmed, "0 over 37.6 kg -> 2, unconfirmed (got %u, %d)",
+  CHECK(q.r().bowls == 2 && q.r().bowlsConfirmed, "0 over 37.6 kg -> 2, confirmed by the weight (got %u, %d)",
         q.r().bowls, q.r().bowlsConfirmed);
 
   // A plausible remembered count is KEPT, even where gross / 17 kg would say otherwise:

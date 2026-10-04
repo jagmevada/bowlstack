@@ -169,9 +169,10 @@ bool Filter::add(int32_t raw, int32_t stepThresholdCounts) {
 //
 // WHAT IT REFUSES TO CLAIM: after a power cycle the count is remembered but marked
 // unconfirmed, because the stack may have changed while the unit was off. It is
-// confirmed again by the next load/unload, by a settled empty platform (which IS a
-// count of zero), or by an operator. A count that makes the food come out
-// impossibly negative is marked unconfirmed rather than silently corrected.
+// confirmed again by the first settled level the count FITS (10-20.5 kg a bowl,
+// re-estimated if it does not -- nobody at the buffer touches the panel), by the next
+// load/unload, by a settled empty platform (which IS a count of zero), or by an
+// operator. Under 10 kg the weight cannot decide, so "?" stays until one of the others.
 
 void BowlTracker::configure(const BowlConfig &c) {
   cfg_ = c;
@@ -307,10 +308,19 @@ BowlChange BowlTracker::update(uint32_t nowMs, float g) {
   // estimate. Changed only if the estimate differs, so one heavy bowl a little over the
   // band is not flagged for nothing. Below eventMinG the weight cannot tell a light
   // bowl from loose food, so the count stands there (the dry-mass limit below applies).
+  //
+  // AND THE WEIGHT IS WHAT CONFIRMS IT (owner, 2026-10-04: "it should be automatic").
+  // A count the weight fits is confirmed -- after a power cycle that takes one settled
+  // level, ~3 s, with nobody touching the panel. "?" is left only where the weight
+  // cannot decide: under eventMinG, or more than maxBowls can carry. A confirmed count
+  // the weight does not fit (one bowl a little heavier than typicalFullMaxG) is not
+  // un-confirmed: the load event that counted it saw it go on.
   if (level >= cfg_.eventMinG) {
-    const float lo = (float)bowls_ * cfg_.eventMinG - cfg_.inconsistentG;
-    const float hi = (float)bowls_ * cfg_.typicalFullMaxG + cfg_.inconsistentG;
-    if (level < lo || level > hi) {
+    const auto fits = [&](long n) {
+      return level >= (float)n * cfg_.eventMinG - cfg_.inconsistentG &&
+             level <= (float)n * cfg_.typicalFullMaxG + cfg_.inconsistentG;
+    };
+    if (!fits(bowls_)) {
       long n = lroundf(level / typical_);
       if (n < 1) n = 1;
       if (n > cfg_.maxBowls) n = cfg_.maxBowls;
@@ -318,9 +328,9 @@ BowlChange BowlTracker::update(uint32_t nowMs, float g) {
         out.event = BowlEvent::Estimated;
         out.delta = (int8_t)(n - (long)bowls_);
         bowls_ = (uint8_t)n;
-        confirmed_ = false;
       }
     }
+    if (fits(bowls_)) confirmed_ = true;
   }
 
   // --- an empty platform is a count of zero, and a confirmed one --------------------
