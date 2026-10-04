@@ -12,8 +12,8 @@ and `tools/fleet_sim.py` all change. Full approved plan, with decisions and
 verification: `C:\Users\jagme\.claude\plans\u-r-aware-right-rustling-lemon.md`
 (owner's machine).
 
-**The bowl rule:** a buffer bowl's dry mass is 2.5 kg. A settled jump of ≥ 10 kg held
-5 s is bowls loaded (or unloaded); how many = round(jump ÷ 17 kg) — the owner's
+**The bowl rule:** a buffer bowl's dry mass is 2.5 kg. A settled jump of ≥ 10 kg held within
+0.5 kg for 2.5 s (owner: ≤ 3–4 s latency; was 0.3 kg for 5 s) is bowls loaded (or unloaded); how many = round(jump ÷ 17 kg) — the owner's
 full-bowl figure (bowls are 14–18 kg of food + the 2.5 kg bowl, nearer the light end).
 One at a time, any 10–25 kg jump is one bowl; four at once count right for 12.4–16.6 kg
 of food each; four is the most a stack holds. Fixed, not learned. Food = gross −

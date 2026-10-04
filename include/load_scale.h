@@ -68,9 +68,12 @@ struct BowlConfig {
   float eventMinG = 10000.0f;     // a jump this size or more is bowls, not food
   // and it must hold this long before it counts. 2.5 s, not the original 5: the owner's
   // ceiling is 3-4 s from a bowl going on to the count changing (2026-10-04), and the
-  // 0.3 kg band below is what keeps a leg or a lean from counting, not the length.
+  // band below is what keeps a leg or a lean from counting, not the length.
   uint32_t stableMs = 2500;
-  float stableBandG = 300.0f;     // "holding": the settled reading stays inside this band
+  // "holding": the settled reading stays inside this band (max - min) for stableMs.
+  // 0.5 kg (owner, 2026-10-04; was 0.3): a stack still swaying after it is set down
+  // settles inside it, while a leg on the platform moved by kilograms.
+  float stableBandG = 500.0f;
   // ONE FULL BOWL ON THE PLATFORM, as the divisor that says HOW MANY bowls one jump is
   // -- not the threshold that says a jump IS bowls (that is eventMinG). 17 kg, the
   // owner's figure (2026-10-03): bowls run 14-18 kg of food + the 2.5 kg bowl, nearer
