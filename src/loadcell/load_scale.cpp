@@ -190,7 +190,6 @@ void BowlTracker::restore(uint8_t bowls, float typicalFullG) {
     typical_ = typicalFullG;
   running_ = false;
   haveRef_ = false;
-  reseed_ = true;
 }
 
 void BowlTracker::resetEmpty() {
@@ -198,13 +197,11 @@ void BowlTracker::resetEmpty() {
   confirmed_ = true;
   running_ = false;
   haveRef_ = false;
-  reseed_ = false;
 }
 
 void BowlTracker::set(uint8_t bowls) {
   bowls_ = bowls > cfg_.maxBowls ? cfg_.maxBowls : bowls;
   confirmed_ = true;
-  reseed_ = false;  // an operator's count outranks an estimate
   // THE REFERENCE IS KEPT -- an operator correcting the count has not moved anything,
   // so the next settled level is not a load or an unload -- BUT THE RUN RESTARTS, so
   // that level is judged again within stableMs. Without it a count typed with the
@@ -295,21 +292,25 @@ BowlChange BowlTracker::update(uint32_t nowMs, float g) {
   ref_ = level;
   haveRef_ = true;
 
-  // --- after a power cycle: is the remembered count still the shelf? ---------------
+  // --- the count must be one the weight can be ---------------------------------------
   // Found in the field (2026-10-04 dinner): two bowls went on while the panel was off,
-  // so it came back "1 bowl" over 55.7 kg -- and every later load/unload counted from
-  // that wrong base, until a bowl lifted and put back even marked it confirmed. Events
-  // are RELATIVE; only the weight can anchor the count. So on the first settled level
-  // after a restore the remembered count is kept if the weight is plausible for it
-  // (typicalFullMin..Max a bowl, +/- inconsistentG), else re-estimated as gross / one
-  // full bowl. Below eventMinG the weight cannot tell a light bowl from loose food, so
-  // the remembered count stands there (the dry-mass limit below still applies).
-  // Still unconfirmed either way: it is an estimate, and it reads as one.
-  if (reseed_) {
-    reseed_ = false;
-    const float lo = (float)bowls_ * cfg_.typicalFullMinG - cfg_.inconsistentG;
+  // so it came back "1 bowl" over 55.7 kg; a bowl lifted and put back then marked that
+  // confirmed, and a bowl taken off later left "0 bowls" over 37.6 kg. Load/unload
+  // events are RELATIVE -- a wrong base stays wrong forever -- so only the weight can
+  // anchor the count. On every settled level the count is checked against it: kept if
+  // the weight is plausible for it, else re-estimated as gross / one full bowl and
+  // marked unconfirmed, since that is an estimate. PLAUSIBLE IS eventMinG..
+  // typicalFullMaxG A BOWL (+/- inconsistentG): the floor is the smallest step this
+  // tracker counts as a bowl at all, so a light bowl it counted correctly is never
+  // "corrected" down (4 x 12.5 kg loaded one at a time stays 4); the ceiling is the
+  // heaviest full bowl, and it is the side that catches the field cases. This is an
+  // estimate. Changed only if the estimate differs, so one heavy bowl a little over the
+  // band is not flagged for nothing. Below eventMinG the weight cannot tell a light
+  // bowl from loose food, so the count stands there (the dry-mass limit below applies).
+  if (level >= cfg_.eventMinG) {
+    const float lo = (float)bowls_ * cfg_.eventMinG - cfg_.inconsistentG;
     const float hi = (float)bowls_ * cfg_.typicalFullMaxG + cfg_.inconsistentG;
-    if (level >= cfg_.eventMinG && (level < lo || level > hi)) {
+    if (level < lo || level > hi) {
       long n = lroundf(level / typical_);
       if (n < 1) n = 1;
       if (n > cfg_.maxBowls) n = cfg_.maxBowls;
@@ -317,8 +318,8 @@ BowlChange BowlTracker::update(uint32_t nowMs, float g) {
         out.event = BowlEvent::Estimated;
         out.delta = (int8_t)(n - (long)bowls_);
         bowls_ = (uint8_t)n;
+        confirmed_ = false;
       }
-      confirmed_ = false;
     }
   }
 

@@ -355,13 +355,25 @@ static void restoreReestimates() {
   h.run(4000);
   CHECK(h.r().bowls == 1 && !h.r().bowlsConfirmed, "0 remembered over 20 kg -> 1 (got %u)", h.r().bowls);
 
-  // Two taken off while off: 3 remembered over 38 kg.
+  // Bowls taken off while off: 3 remembered over 22 kg -- under 3 x 10 kg, the
+  // lightest three bowls the tracker could ever have counted.
   Rig k;
   p.bowls = 3;
   k.s.restore(p);
-  k.gross = 38000;
+  k.gross = 22000;
   k.run(4000);
-  CHECK(k.r().bowls == 2, "3 remembered over 38 kg -> 2 (got %u)", k.r().bowls);
+  CHECK(k.r().bowls == 1, "3 remembered over 22 kg -> 1 (got %u)", k.r().bowls);
+
+  // And WHILE RUNNING, not only after a restore: the field's second case -- a bowl
+  // lifted off a count that was already wrong left "0 bowls" confirmed over 37.6 kg.
+  Rig q;
+  q.commission();
+  q.gross = 37600;
+  q.run(4000);
+  q.s.setBowls(0);  // a wrong base with the load already settled -- nothing moves
+  q.run(4000);
+  CHECK(q.r().bowls == 2 && !q.r().bowlsConfirmed, "0 over 37.6 kg -> 2, unconfirmed (got %u, %d)",
+        q.r().bowls, q.r().bowlsConfirmed);
 
   // A plausible remembered count is KEPT, even where gross / 17 kg would say otherwise:
   // three heavy bowls (3 x 20.5 kg) round to 4.

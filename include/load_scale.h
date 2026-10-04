@@ -166,7 +166,6 @@ class BowlTracker {
 
   bool haveRef_ = false;
   float ref_ = 0.0f;         // the last settled level
-  bool reseed_ = false;      // restored from NVS: check the count on the first settled level
 };
 
 // --- commands -----------------------------------------------------------------------
