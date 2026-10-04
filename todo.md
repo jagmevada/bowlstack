@@ -65,8 +65,8 @@ B1 — deferred, no mass available.**
 
 **Open:**
 - **NOT YET FLASHED (unit in the field, 2026-10-04 dinner):** the bowl-count fixes after
-  V1.30 -- a remembered count the weight cannot be is re-estimated on the first settled
-  level after a power cycle, and a settled level below -1 kg is ignored instead of read
+  V1.30 (f3590a8, bb7cb2e) -- a count the weight cannot be (10-20.5 kg a bowl) is re-estimated on EVERY settled
+  level, not only after a power cycle, and a settled level below -1 kg is ignored instead of read
   as "empty". Flash as the next version (bump + `Firmware:` commit) when the panel is
   back on COM15. Until then: after a power cycle with bowls on B1, set the count by hand
   (Settings > Buffers > B1 > Bowls).
