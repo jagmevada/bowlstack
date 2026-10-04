@@ -147,7 +147,7 @@ bool Filter::add(int32_t raw, int32_t stepThresholdCounts) {
 // =================================================================================
 //
 // THE RULE, as the kitchen states it: a buffer bowl's dry mass is 2.5 kg. When the
-// settled weight jumps by 10 kg or more and holds for 5 s, bowls were loaded onto
+// settled weight jumps by 10 kg or more and holds for 2.5 s, bowls were loaded onto
 // the stack; when it falls by 10 kg or more and holds, bowls were taken off. The
 // food on the shelf is the gross weight minus 2.5 kg per bowl.
 //

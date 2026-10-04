@@ -129,13 +129,13 @@ static void filterNoFalseSteps() {
 
 // ---------------------------------------------------------------------------------
 static void singleLoad() {
-  section("bowls: one bowl loaded is counted after it holds 5 s, food = gross - 2.5 kg");
+  section("bowls: one bowl is counted within 4 s (owner's ceiling), food = gross - 2.5 kg");
   Rig g;
   g.commission();
   g.gross = 18500;  // a 2.5 kg bowl with 16 kg of food
-  g.run(4500);
-  CHECK(g.events.empty(), "no event before the load has held 5 s (got %zu)", g.events.size());
-  g.run(3000);
+  g.run(2000);
+  CHECK(g.events.empty(), "no event before the load has held 2.5 s (got %zu)", g.events.size());
+  g.run(2000);
   CHECK(g.count(BowlEvent::Loaded) == 1, "exactly one Loaded event (got %d)", g.count(BowlEvent::Loaded));
   const Reading r = g.r();
   CHECK(r.bowls == 1 && r.bowlsConfirmed, "1 bowl, confirmed (got %u, %d)", r.bowls, r.bowlsConfirmed);

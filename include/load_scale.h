@@ -66,7 +66,10 @@ struct FilterConfig {
 struct BowlConfig {
   float dryG = 2500.0f;           // one empty buffer bowl
   float eventMinG = 10000.0f;     // a jump this size or more is bowls, not food
-  uint32_t stableMs = 5000;       // and it must hold this long before it counts
+  // and it must hold this long before it counts. 2.5 s, not the original 5: the owner's
+  // ceiling is 3-4 s from a bowl going on to the count changing (2026-10-04), and the
+  // 0.3 kg band below is what keeps a leg or a lean from counting, not the length.
+  uint32_t stableMs = 2500;
   float stableBandG = 300.0f;     // "holding": the settled reading stays inside this band
   // ONE FULL BOWL ON THE PLATFORM, as the divisor that says HOW MANY bowls one jump is
   // -- not the threshold that says a jump IS bowls (that is eventMinG). 17 kg, the
